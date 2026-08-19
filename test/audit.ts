@@ -22,6 +22,7 @@ import { ProcessSupervisor, stillOurProcess, processStartTicks, RunRecord } from
 import { deriveBudgets } from '../src/engine/budget';
 import { mockProvider } from '../src/engine/providers';
 import { defaultPolicy, inspectCommand } from '../src/engine/policy';
+import { providerReportedError, providerDiagnostics } from '../src/engine/providers';
 import { defaultConfig } from '../src/config';
 import { parseDiff } from '../src/validation/diff';
 import { resolveTier, maxTier } from '../src/validation/tier';
@@ -187,6 +188,34 @@ export async function auditRegressionSuite(): Promise<void> {
       /--exclude=\.git/.test(src) && /--exclude=node_modules/.test(src) && /--exclude=\.zeus/.test(src));
     check('R-F2: it no longer uses a bare recursive copy',
       !/cp -a "\$\{this\.opts\.projectRoot\}\/\."/.test(src));
+  }
+
+  section('cycle-1 dogfood: a provider failure is not reported as a task failure');
+  {
+    // Found by running Zeus on Zeus: the planner call failed, the CLI said so
+    // in its structured fields, and Zeus reported "design failed" — a claim
+    // about the user's task rather than about the platform.
+    const apiError = { is_error: true, subtype: 'error_during_execution', api_error_status: 529, terminal_reason: 'error' };
+    const success = { is_error: false, subtype: 'success', api_error_status: null, terminal_reason: 'completed', stop_reason: 'end_turn' };
+    check('R-P1: a provider-reported error is recognised as infrastructure',
+      providerReportedError(apiError as any) !== null, String(providerReportedError(apiError as any)));
+    check('R-P2: a successful call is not mistaken for one',
+      providerReportedError(success as any) === null);
+    check('R-P3: an absent opinion is not read as failure',
+      providerReportedError({} as any) === null && providerReportedError(null) === null);
+    check('R-P4: permission denials are surfaced',
+      providerReportedError({ permission_denials: [{ tool: 'Bash' }] } as any) !== null);
+    check('R-P5: the reason names the field, so an operator can act on it',
+      /api_error_status=529/.test(String(providerReportedError(apiError as any))));
+
+    const diag = providerDiagnostics(apiError as any);
+    check('R-P6: diagnostics record VALUES, not just field names',
+      diag.api_error_status === 529 && diag.subtype === 'error_during_execution');
+    check('R-P7: a result excerpt is captured for diagnosis',
+      typeof providerDiagnostics({ result: 'x'.repeat(500) } as any).resultExcerpt === 'string');
+    const orch = fs.readFileSync(path.resolve(__dirname, '../src/engine/orchestrator.ts'), 'utf8');
+    check('R-P8: diagnostics reach the event log',
+      /diagnostics: res\.diagnostics/.test(orch));
   }
 
   // ---------------------------------------------------------------------

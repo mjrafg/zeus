@@ -355,6 +355,8 @@ export class Engine {
       role, provider: provider.id, outcome: res.outcome, exitCode: res.exitCode,
       durationMs: res.durationMs, infrastructureFailure: res.infrastructureFailure,
       structuredKeys: res.structured ? Object.keys(res.structured) : [],
+      // Values, not just key names: a list of field names is not a diagnosis.
+      diagnostics: res.diagnostics ?? {},
     } });
     return res;
   }

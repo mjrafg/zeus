@@ -38,6 +38,8 @@ export interface AgentResponse {
   outcome: string;
   /** Set when the failure was infrastructure rather than the agent's answer. */
   infrastructureFailure: string | null;
+  /** The provider's own error fields, so a failure is diagnosable from the log. */
+  diagnostics?: Record<string, unknown>;
 }
 
 export interface Provider {
@@ -87,17 +89,77 @@ async function runCli(id: string, bin: string, argv: (req: AgentRequest) => stri
     timeoutSeconds: req.timeoutSeconds ?? 1200,
   } as ExecutionRequest);
 
+  const structured = parseStructured(res.stdout);
+
+  // The vendor CLIs report their own failures in structured fields, not only in
+  // prose. Reading just the text meant an API error arrived as a plain non-zero
+  // exit and became "design failed" — a statement about the user's task, when
+  // the truth was that Zeus could not run the planner at all. That is precisely
+  // the confusion the outcome vocabulary exists to prevent, so the provider's
+  // own signal is now believed before any pattern matching.
+  const providerError = providerReportedError(structured);
+
   const infra = ['TIMEOUT', 'RESOURCE_LIMIT_EXCEEDED', 'INFRASTRUCTURE_FAILURE', 'POLICY_DENIED'].includes(res.outcome)
     ? `${res.outcome}: ${res.stdout.slice(-300)}`
-    : /\b(429|529|overloaded|rate.?limit|ECONNRESET|socket hang up)\b/i.test(res.stdout)
-      ? `PROVIDER_UNAVAILABLE: ${res.stdout.slice(-200)}` : null;
+    : providerError
+      ? `PROVIDER_ERROR: ${providerError}`
+      : /\b(429|529|overloaded|rate.?limit|ECONNRESET|socket hang up)\b/i.test(res.stdout)
+        ? `PROVIDER_UNAVAILABLE: ${res.stdout.slice(-200)}` : null;
 
   return {
     ok: res.outcome === 'COMPLETED' && !infra,
-    role: req.role, structured: parseStructured(res.stdout), text: res.stdout.slice(-4000),
+    role: req.role, structured, text: res.stdout.slice(-4000),
     raw: res.stdout, exitCode: res.exitCode, durationMs: res.durationMs,
     outcome: res.outcome, infrastructureFailure: infra,
+    diagnostics: providerDiagnostics(structured),
   };
+}
+
+/**
+ * The provider's own verdict on whether IT failed.
+ *
+ * Returns a human-readable reason when the CLI says the call did not succeed,
+ * or null when it reports success. Deliberately conservative: an absent field
+ * is not evidence of failure, because treating "no opinion" as an outage would
+ * turn every parse miss into an infrastructure incident.
+ */
+export function providerReportedError(structured: Record<string, unknown> | null): string | null {
+  if (!structured) return null;
+  const s = structured as any;
+  const parts: string[] = [];
+  if (s.is_error === true) parts.push('is_error=true');
+  if (typeof s.api_error_status === 'number' || (typeof s.api_error_status === 'string' && s.api_error_status)) {
+    parts.push(`api_error_status=${s.api_error_status}`);
+  }
+  if (typeof s.subtype === 'string' && /error|refus|denied|limit/i.test(s.subtype)) parts.push(`subtype=${s.subtype}`);
+  if (typeof s.terminal_reason === 'string' && !/completed|end_turn|success/i.test(s.terminal_reason)) {
+    parts.push(`terminal_reason=${s.terminal_reason}`);
+  }
+  if (Array.isArray(s.permission_denials) && s.permission_denials.length) {
+    parts.push(`permission_denials=${s.permission_denials.length}`);
+  }
+  return parts.length ? parts.join(' ') : null;
+}
+
+/**
+ * The fields worth recording when an agent call fails.
+ *
+ * The failure that produced this function recorded only the NAMES of the
+ * provider's response fields, so an operator debugging it had a list of keys
+ * and no values. Diagnosing a failure should not require reproducing it.
+ */
+export function providerDiagnostics(structured: Record<string, unknown> | null): Record<string, unknown> {
+  if (!structured) return {};
+  const s = structured as any;
+  const out: Record<string, unknown> = {};
+  for (const k of ['is_error', 'subtype', 'api_error_status', 'terminal_reason', 'stop_reason', 'num_turns']) {
+    if (s[k] !== undefined) out[k] = s[k];
+  }
+  if (Array.isArray(s.permission_denials) && s.permission_denials.length) {
+    out.permission_denials = s.permission_denials.slice(0, 3);
+  }
+  if (typeof s.result === 'string') out.resultExcerpt = s.result.slice(0, 300);
+  return out;
 }
 
 function whichSync(bin: string): string | null {

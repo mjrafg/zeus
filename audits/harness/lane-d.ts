@@ -25,6 +25,30 @@ const SECTIONS = [
   { id: '§35', title: 'Escalation completeness' },
 ];
 
+/**
+ * A real Engine over a throwaway project, so probes exercise the product's own
+ * code path rather than a reimplementation of it.
+ */
+function engineOn(ctx: ProbeContext, name: string) {
+  const { Engine } = fromAudit(ctx.auditRoot, '../src/engine/orchestrator');
+  const { ProcessSupervisor } = fromAudit(ctx.auditRoot, '../src/engine/exec');
+  const { deriveBudgets } = fromAudit(ctx.auditRoot, '../src/engine/budget');
+  const { mockProvider } = fromAudit(ctx.auditRoot, '../src/engine/providers');
+  const { defaultConfig } = fromAudit(ctx.auditRoot, '../src/config');
+  const root = repo(path.join(ctx.tmp, name), { 'a.ts': 'export const a = 1;\n', 'package.json': '{"name":"p"}\n' });
+  const stateRoot = path.join(root, '.zeus/state');
+  const engine = new Engine({
+    projectRoot: root, config: defaultConfig(root),
+    supervisor: new ProcessSupervisor(deriveBudgets(), undefined, stateRoot),
+    providers: { planner: mockProvider(), implementer: mockProvider(), reviewer: mockProvider() },
+    stateRoot,
+  });
+  engine.acquire();
+  const rec = engine.createTask(`audit probe ${name}`);
+  git(root, ['worktree', 'add', '-q', '--detach', rec.worktree, rec.baseSha]);
+  return { engine, rec, wt: rec.worktree, root };
+}
+
 export const laneD: LaneSpec = {
   lane: 'D',
   title: 'Validation / false-green / review independence',
@@ -35,24 +59,26 @@ export const laneD: LaneSpec = {
       id: 'D1', section: '§10',
       title: 'a newly added file is visible to the classifier',
       run(ctx: ProbeContext) {
-        const root = repo(path.join(ctx.tmp, 'd1'), { 'a.ts': 'export const a = 1;\n' });
-        const wt = path.join(ctx.tmp, 'd1-wt');
-        git(root, ['worktree', 'add', '-q', '--detach', wt, 'HEAD']);
+        // Exercises Engine.diff() itself. An earlier version of this probe
+        // called `git diff` directly and so kept reporting the defect after it
+        // was fixed: it was testing git, not Zeus.
+        const { engine, rec, wt } = engineOn(ctx, 'd1');
         // An implementer adds a new module and a new test. Nothing is staged,
         // which is exactly what "the agent edited the worktree" looks like.
         write(path.join(wt, 'src/session.ts'), 'export const ttl = 86400;\n');
         write(path.join(wt, 'test/new.spec.ts'), 'it.skip("critical", () => {});\n');
 
-        const seenByDiff = git(wt, ['diff', '--stat', '-p']);
-        const seenByStatus = git(wt, ['status', '--porcelain']);
+        const seenByDiff = engine.diff(rec);
+        const seenByChanged = engine.changedFiles(rec);
         const { parseDiff } = fromAudit(ctx.auditRoot, 'validation/diff');
         const { resolveTier } = fromAudit(ctx.auditRoot, 'validation/tier');
         const decision = resolveTier({ diff: parseDiff(seenByDiff), adapterId: 'node', confidence: 'KNOWN' });
+        engine.release();
 
         const observed = compare([
           ['files on disk', 'src/session.ts (auth-session), test/new.spec.ts (test surface, .skip)'],
-          ['git status --porcelain', JSON.stringify(seenByStatus.trim())],
-          ['git diff (what Engine.diff() returns)', JSON.stringify(seenByDiff.trim())],
+          ['Engine.changedFiles()', JSON.stringify(seenByChanged)],
+          ['Engine.diff() bytes', String(seenByDiff.length)],
           ['hunks classified', String(decision.perHunk.length)],
           ['resolved tier', decision.tier],
           ['testSurfaceFiles', JSON.stringify(decision.testSurfaceFiles)],
@@ -81,16 +107,14 @@ export const laneD: LaneSpec = {
       id: 'D2', section: '§10',
       title: 'work the implementer committed is still validated',
       run(ctx: ProbeContext) {
-        const root = repo(path.join(ctx.tmp, 'd2'), { 'a.ts': 'export const a = 1;\n' });
-        const wt = path.join(ctx.tmp, 'd2-wt');
-        git(root, ['worktree', 'add', '-q', '--detach', wt, 'HEAD']);
+        const { engine, rec, wt } = engineOn(ctx, 'd2');
         write(path.join(wt, 'a.ts'), 'export const a = 2;\n');
         write(path.join(wt, 'src/auth.ts'), 'export const bypass = true;\n');
         git(wt, ['add', '-A']);
         git(wt, ['commit', '-qm', 'agent work']);
 
-        const seenByDiff = git(wt, ['diff', '--stat', '-p']);
-        const seenByStatus = git(wt, ['status', '--porcelain']);
+        const seenByDiff = engine.diff(rec);
+        const seenByChanged = engine.changedFiles(rec);
         const truth = git(wt, ['diff', '--name-only', 'HEAD~1']).trim().split('\n').filter(Boolean);
         const { parseDiff } = fromAudit(ctx.auditRoot, 'validation/diff');
         const { resolveTier } = fromAudit(ctx.auditRoot, 'validation/tier');
@@ -98,11 +122,12 @@ export const laneD: LaneSpec = {
         const parsed = parseDiff(seenByDiff);
         const decision = resolveTier({ diff: parsed, adapterId: 'node', confidence: 'KNOWN' });
         const integrity = inspectIntegrity(parsed, designContract({ requiredTests: ['npm test'] }));
+        engine.release();
 
         const observed = compare([
-          ['files actually changed', JSON.stringify(truth)],
-          ['git status --porcelain (changedFiles)', JSON.stringify(seenByStatus.trim())],
-          ['git diff (Engine.diff)', JSON.stringify(seenByDiff.trim())],
+          ['files actually changed (git)', JSON.stringify(truth)],
+          ['Engine.changedFiles()', JSON.stringify(seenByChanged)],
+          ['Engine.diff() bytes', String(seenByDiff.length)],
           ['hunks classified', String(decision.perHunk.length)],
           ['tier', decision.tier],
           ['integrity findings', String(integrity.findings.length)],

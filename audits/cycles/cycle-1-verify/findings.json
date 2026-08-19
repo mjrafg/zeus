@@ -1,0 +1,507 @@
+{
+ "cycleId": "cycle-1-verify",
+ "head": "61e6d6590e6aad1456259d7021efa32ea3e428ce",
+ "startedAt": "2026-08-19T14:26:48.201Z",
+ "finishedAt": "2026-08-19T14:26:58.493Z",
+ "lanes": [
+  {
+   "lane": "A",
+   "title": "State / recovery / event integrity",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§7",
+     "title": "Event store append and chain semantics",
+     "status": "TESTED",
+     "probes": [
+      "A1",
+      "A2",
+      "A7",
+      "A8"
+     ]
+    },
+    {
+     "section": "§15",
+     "title": "Crash recovery and torn writes",
+     "status": "TESTED",
+     "probes": [
+      "A3",
+      "A9"
+     ]
+    },
+    {
+     "section": "§16",
+     "title": "Project lease and multi-instance safety",
+     "status": "TESTED",
+     "probes": [
+      "A4",
+      "A5"
+     ]
+    },
+    {
+     "section": "§34",
+     "title": "State path derivation and isolation",
+     "status": "TESTED",
+     "probes": [
+      "A6"
+     ]
+    }
+   ],
+   "probesRun": 9,
+   "probesHeld": 9,
+   "notes": [],
+   "durationMs": 1335,
+   "complete": true
+  },
+  {
+   "lane": "B",
+   "title": "Process / resource / concurrency",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§3",
+     "title": "Single spawn point",
+     "status": "TESTED",
+     "probes": [
+      "B1"
+     ]
+    },
+    {
+     "section": "§4",
+     "title": "Host-derived resource budgets",
+     "status": "TESTED",
+     "probes": [
+      "B4"
+     ]
+    },
+    {
+     "section": "§5",
+     "title": "Process-group termination",
+     "status": "TESTED",
+     "probes": [
+      "B2"
+     ]
+    },
+    {
+     "section": "§6",
+     "title": "Wall-clock enforcement",
+     "status": "TESTED",
+     "probes": [
+      "B3"
+     ]
+    },
+    {
+     "section": "§18",
+     "title": "Run registry and cross-process cancellation",
+     "status": "TESTED",
+     "probes": [
+      "B5",
+      "B6"
+     ]
+    },
+    {
+     "section": "§32",
+     "title": "Concurrency limits",
+     "status": "TESTED",
+     "probes": [
+      "B7"
+     ]
+    },
+    {
+     "section": "§33",
+     "title": "Orphan and leak prevention",
+     "status": "TESTED",
+     "probes": [
+      "B8"
+     ]
+    }
+   ],
+   "probesRun": 8,
+   "probesHeld": 8,
+   "notes": [],
+   "durationMs": 7379,
+   "complete": true
+  },
+  {
+   "lane": "C",
+   "title": "Security / filesystem / shell / secrets",
+   "findings": [
+    {
+     "sections": [
+      "§28"
+     ],
+     "severity": "P1",
+     "title": "Project command output is copied verbatim into the permanent event log",
+     "detail": "CHECK_RESULT records `tail: res.stdout.slice(-500)` with no redaction. Whatever a project's own build or test prints — tokens echoed by a debug logger, a connection string in a failing assertion, a key in an error message — is written into the hash-chained, append-only log.",
+     "impact": "Secrets become permanent: the log is designed to be tamper-evident and is copied into evidence bundles and future audit cycles. Redacting later breaks the hash chain, so there is no clean remediation. Zeus strips secrets going INTO a command (§24) and then records whatever comes back out.",
+     "id": "C-C5",
+     "lane": "C",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-c.ts :: probe C5",
+     "observed": "  command output                 : sk-live-AUDITSECRET0123456789abcdef\n  check outcome                  : PASSED\n  secret present in events.jsonl : true\n  log path                       : /tmp/zeus-lane-C-OkMEoX/c5/.zeus/state/tasks/c5~T-0001/events.jsonl\n  excerpt                        : {\"id\":\"EV-c0235dba4a1491669f92\",\"taskId\":\"c5/T-0001\",\"seq\":3,\"ts\":\"2026-08-19T14:26:57.712Z\",\"type\":\"CHECK_RESULT\",\"prev\":\"EV-4c7a7eca84e2cd191084\",\"payload\":{\"name\":\"leaky-test\",\"required\":true,\"outcome\":\"PASSED\",\"command\":\"printf sk-live-AUDITSECRET0123456789abcdef\",\"exitCode\":0,\"durationMs\":60,\"backend\":\"bubblewrap\"\n… (108 more bytes)"
+    },
+    {
+     "sections": [
+      "§28"
+     ],
+     "severity": "P2",
+     "title": "Repository content contains instruction-shaped text (INJECTION_SURFACE)",
+     "detail": "Found in: src/cli.ts:349, src/setup/wizard.ts:122, src/setup/wizard.ts:479",
+     "impact": "An agent reading the repository as context could follow it as direction rather than treating it as data.",
+     "id": "C-C6",
+     "lane": "C",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-c.ts :: probe C6",
+     "observed": "  files scanned            : 67\n  injection-shaped strings : 3\n  locations                : src/cli.ts:349, src/setup/wizard.ts:122, src/setup/wizard.ts:479"
+    }
+   ],
+   "coverage": [
+    {
+     "section": "§21",
+     "title": "Path containment and traversal refusal",
+     "status": "TESTED",
+     "probes": [
+      "C1"
+     ]
+    },
+    {
+     "section": "§22",
+     "title": "Symlink resolution before trust",
+     "status": "TESTED",
+     "probes": [
+      "C2"
+     ]
+    },
+    {
+     "section": "§23",
+     "title": "Destructive and escaping command detection",
+     "status": "TESTED",
+     "probes": [
+      "C3"
+     ]
+    },
+    {
+     "section": "§24",
+     "title": "Environment allowlist and secret stripping",
+     "status": "TESTED",
+     "probes": [
+      "C4"
+     ]
+    },
+    {
+     "section": "§28",
+     "title": "Secret leakage into recorded evidence",
+     "status": "TESTED",
+     "probes": [
+      "C5",
+      "C6"
+     ]
+    },
+    {
+     "section": "§29",
+     "title": "Web surface",
+     "status": "NOT_APPLICABLE",
+     "reason": "Zeus ships no web surface. Verified by inspection of the release artifact allowlist (bin/, dist/, src/, install.sh, README.md, LICENSE) and of src/: there is no HTTP server, no request handler, and no static asset path in the runtime. The Control Center UI referenced elsewhere is unbuilt, so there is nothing to exercise rather than something skipped.",
+     "probes": []
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 4,
+   "notes": [
+    "C6 scanned 67 files for injection-shaped content; 3 hit(s)."
+   ],
+   "durationMs": 615,
+   "complete": true
+  },
+  {
+   "lane": "D",
+   "title": "Validation / false-green / review independence",
+   "findings": [
+    {
+     "sections": [
+      "§10",
+      "§8",
+      "§11"
+     ],
+     "severity": "P0",
+     "title": "Added files are invisible to validation, integrity and review",
+     "detail": "Engine.diff() runs `git diff`, which reports tracked, unstaged modifications only. A file the implementer CREATES is untracked, so it appears in changedFiles() (git status --porcelain) but contributes nothing to the parsed diff. The tier is therefore resolved over zero hunks, inspectIntegrity() sees no test-surface change, and the reviewer receives a diff that omits the new code entirely.",
+     "impact": "Every anti-gaming protection is bypassed by putting the change in a new file: a new auth module is never classified high-risk, a new test arriving pre-skipped is never surfaced, and the independent reviewer reviews an empty diff while reporting on the task. This is the false-green mode the hardening work exists to prevent.",
+     "id": "D-D1",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D1",
+     "observed": "  files on disk                         : src/session.ts (auth-session), test/new.spec.ts (test surface, .skip)\n  git status --porcelain                : \"?? src/\\n?? test/\"\n  git diff (what Engine.diff() returns) : \"\"\n  hunks classified                      : 0\n  resolved tier                         : NORMAL\n  testSurfaceFiles                      : []"
+    },
+    {
+     "sections": [
+      "§10",
+      "§8",
+      "§11",
+      "§12"
+     ],
+     "severity": "P0",
+     "title": "A committing implementer makes the entire change invisible",
+     "detail": "If the implementation agent commits its work in the task worktree — normal agent behaviour — then both `git status --porcelain` and `git diff` are empty. CODE_CHANGE records zero files changed, VALIDATION_PLAN classifies zero hunks, EVIDENCE_INTEGRITY inspects nothing, and the reviewer is handed an empty diff. The task can then reach COMPLETED having validated a change nobody looked at.",
+     "impact": "This is a complete bypass of adaptive validation, all anti-gaming protections and reviewer independence, triggered by an action agents take routinely. A deleted required test would go undetected. It is the highest-severity class of defect in the product: a confident, green, dishonest result.",
+     "id": "D-D2",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D2",
+     "observed": "  files actually changed                : [\"a.ts\",\"src/auth.ts\"]\n  git status --porcelain (changedFiles) : \"\"\n  git diff (Engine.diff)                : \"\"\n  hunks classified                      : 0\n  tier                                  : NORMAL\n  integrity findings                    : 0"
+    }
+   ],
+   "coverage": [
+    {
+     "section": "§8",
+     "title": "Validation tier selection integrity",
+     "status": "TESTED",
+     "probes": [
+      "D4",
+      "D5",
+      "D14"
+     ]
+    },
+    {
+     "section": "§9",
+     "title": "Deterministic floor authority",
+     "status": "TESTED",
+     "probes": [
+      "D6"
+     ]
+    },
+    {
+     "section": "§10",
+     "title": "Change visibility — what actually gets validated",
+     "status": "TESTED",
+     "probes": [
+      "D1",
+      "D2"
+     ]
+    },
+    {
+     "section": "§11",
+     "title": "Evidence-chain integrity (anti-gaming)",
+     "status": "TESTED",
+     "probes": [
+      "D7",
+      "D8",
+      "D13"
+     ]
+    },
+    {
+     "section": "§12",
+     "title": "Reviewer independence enforcement",
+     "status": "TESTED",
+     "probes": [
+      "D3",
+      "D9"
+     ]
+    },
+    {
+     "section": "§13",
+     "title": "Acceptance semantics and outcome vocabulary",
+     "status": "TESTED",
+     "probes": [
+      "D10"
+     ]
+    },
+    {
+     "section": "§31",
+     "title": "Telemetry honesty",
+     "status": "TESTED",
+     "probes": [
+      "D11"
+     ]
+    },
+    {
+     "section": "§35",
+     "title": "Escalation completeness",
+     "status": "TESTED",
+     "probes": [
+      "D12"
+     ]
+    }
+   ],
+   "probesRun": 14,
+   "probesHeld": 12,
+   "notes": [],
+   "durationMs": 399,
+   "complete": true
+  },
+  {
+   "lane": "E",
+   "title": "Installer / setup / providers / packaging",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§14",
+     "title": "Release artifact composition",
+     "status": "TESTED",
+     "probes": [
+      "E5"
+     ]
+    },
+    {
+     "section": "§25",
+     "title": "Installer safety",
+     "status": "TESTED",
+     "probes": [
+      "E1",
+      "E2"
+     ]
+    },
+    {
+     "section": "§26",
+     "title": "Setup consent",
+     "status": "TESTED",
+     "probes": [
+      "E3"
+     ]
+    },
+    {
+     "section": "§27",
+     "title": "Provider credential handling",
+     "status": "TESTED",
+     "probes": [
+      "E4",
+      "E6"
+     ]
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 6,
+   "notes": [],
+   "durationMs": 109,
+   "complete": true
+  },
+  {
+   "lane": "F",
+   "title": "Git / worktrees / project isolation / revalidate",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§17",
+     "title": "Worktree creation and isolation",
+     "status": "TESTED",
+     "probes": [
+      "F2",
+      "F3"
+     ]
+    },
+    {
+     "section": "§19",
+     "title": "Project state isolation",
+     "status": "TESTED",
+     "probes": [
+      "F6"
+     ]
+    },
+    {
+     "section": "§20",
+     "title": "Task identity and path isolation",
+     "status": "TESTED",
+     "probes": [
+      "F1"
+     ]
+    },
+    {
+     "section": "§30",
+     "title": "Integration revalidation",
+     "status": "TESTED",
+     "probes": [
+      "F4",
+      "F5"
+     ]
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 6,
+   "notes": [],
+   "durationMs": 248,
+   "complete": true
+  }
+ ],
+ "findings": [
+  {
+   "sections": [
+    "§28"
+   ],
+   "severity": "P1",
+   "title": "Project command output is copied verbatim into the permanent event log",
+   "detail": "CHECK_RESULT records `tail: res.stdout.slice(-500)` with no redaction. Whatever a project's own build or test prints — tokens echoed by a debug logger, a connection string in a failing assertion, a key in an error message — is written into the hash-chained, append-only log.",
+   "impact": "Secrets become permanent: the log is designed to be tamper-evident and is copied into evidence bundles and future audit cycles. Redacting later breaks the hash chain, so there is no clean remediation. Zeus strips secrets going INTO a command (§24) and then records whatever comes back out.",
+   "id": "C-C5",
+   "lane": "C",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-c.ts :: probe C5",
+   "observed": "  command output                 : sk-live-AUDITSECRET0123456789abcdef\n  check outcome                  : PASSED\n  secret present in events.jsonl : true\n  log path                       : /tmp/zeus-lane-C-OkMEoX/c5/.zeus/state/tasks/c5~T-0001/events.jsonl\n  excerpt                        : {\"id\":\"EV-c0235dba4a1491669f92\",\"taskId\":\"c5/T-0001\",\"seq\":3,\"ts\":\"2026-08-19T14:26:57.712Z\",\"type\":\"CHECK_RESULT\",\"prev\":\"EV-4c7a7eca84e2cd191084\",\"payload\":{\"name\":\"leaky-test\",\"required\":true,\"outcome\":\"PASSED\",\"command\":\"printf sk-live-AUDITSECRET0123456789abcdef\",\"exitCode\":0,\"durationMs\":60,\"backend\":\"bubblewrap\"\n… (108 more bytes)"
+  },
+  {
+   "sections": [
+    "§28"
+   ],
+   "severity": "P2",
+   "title": "Repository content contains instruction-shaped text (INJECTION_SURFACE)",
+   "detail": "Found in: src/cli.ts:349, src/setup/wizard.ts:122, src/setup/wizard.ts:479",
+   "impact": "An agent reading the repository as context could follow it as direction rather than treating it as data.",
+   "id": "C-C6",
+   "lane": "C",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-c.ts :: probe C6",
+   "observed": "  files scanned            : 67\n  injection-shaped strings : 3\n  locations                : src/cli.ts:349, src/setup/wizard.ts:122, src/setup/wizard.ts:479"
+  },
+  {
+   "sections": [
+    "§10",
+    "§8",
+    "§11"
+   ],
+   "severity": "P0",
+   "title": "Added files are invisible to validation, integrity and review",
+   "detail": "Engine.diff() runs `git diff`, which reports tracked, unstaged modifications only. A file the implementer CREATES is untracked, so it appears in changedFiles() (git status --porcelain) but contributes nothing to the parsed diff. The tier is therefore resolved over zero hunks, inspectIntegrity() sees no test-surface change, and the reviewer receives a diff that omits the new code entirely.",
+   "impact": "Every anti-gaming protection is bypassed by putting the change in a new file: a new auth module is never classified high-risk, a new test arriving pre-skipped is never surfaced, and the independent reviewer reviews an empty diff while reporting on the task. This is the false-green mode the hardening work exists to prevent.",
+   "id": "D-D1",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D1",
+   "observed": "  files on disk                         : src/session.ts (auth-session), test/new.spec.ts (test surface, .skip)\n  git status --porcelain                : \"?? src/\\n?? test/\"\n  git diff (what Engine.diff() returns) : \"\"\n  hunks classified                      : 0\n  resolved tier                         : NORMAL\n  testSurfaceFiles                      : []"
+  },
+  {
+   "sections": [
+    "§10",
+    "§8",
+    "§11",
+    "§12"
+   ],
+   "severity": "P0",
+   "title": "A committing implementer makes the entire change invisible",
+   "detail": "If the implementation agent commits its work in the task worktree — normal agent behaviour — then both `git status --porcelain` and `git diff` are empty. CODE_CHANGE records zero files changed, VALIDATION_PLAN classifies zero hunks, EVIDENCE_INTEGRITY inspects nothing, and the reviewer is handed an empty diff. The task can then reach COMPLETED having validated a change nobody looked at.",
+   "impact": "This is a complete bypass of adaptive validation, all anti-gaming protections and reviewer independence, triggered by an action agents take routinely. A deleted required test would go undetected. It is the highest-severity class of defect in the product: a confident, green, dishonest result.",
+   "id": "D-D2",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D2",
+   "observed": "  files actually changed                : [\"a.ts\",\"src/auth.ts\"]\n  git status --porcelain (changedFiles) : \"\"\n  git diff (Engine.diff)                : \"\"\n  hunks classified                      : 0\n  tier                                  : NORMAL\n  integrity findings                    : 0"
+  }
+ ],
+ "confirmed": 4,
+ "suspected": 0,
+ "bySeverity": {
+  "P0": 2,
+  "P1": 1,
+  "P2": 1,
+  "P3": 0
+ },
+ "coverageGaps": [],
+ "verdict": "FINDINGS_OPEN",
+ "evidenceChain": [
+  "6 lane(s) ran 49 probe(s) against 61e6d6590e6a",
+  "45 probe(s) observed the invariant holding",
+  "4 finding(s) CONFIRMED by executable reproduction; 0 SUSPECTED (not reproduced)",
+  "3 unfixed P0/P1 finding(s) remain open",
+  "0 charter section(s) untested with no stated reason",
+  "0 lane(s) failed to complete",
+  "the candidate has open findings or coverage gaps and is not cleared for installation"
+ ]
+}

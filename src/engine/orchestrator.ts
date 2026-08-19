@@ -371,8 +371,11 @@ export class Engine {
       confineFilesystem: true,          // project commands are the untrusted ones
     });
     const outcome = classifyCheck(res, required);
+    // The command line is evidence too, and a project's configured command can
+    // itself carry a secret (a token in a URL, a password flag). Redacting the
+    // output while recording the command verbatim leaks it just as permanently.
     this.events.append({ taskId: rec.taskId, type: 'CHECK_RESULT', payload: {
-      name, required, outcome, command: commandLine, exitCode: res.exitCode,
+      name, required, outcome, command: redactSecrets(commandLine).text, exitCode: res.exitCode,
       durationMs: res.durationMs, backend: res.backend, isolationFallback: res.isolationFallback,
       productSignal: res.productSignal, violations: res.violations,
       ...(() => {

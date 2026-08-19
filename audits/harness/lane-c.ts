@@ -212,18 +212,18 @@ export const laneC: LaneSpec = {
         // fires on "operating system:", "confineFilesystem:" and every other
         // ordinary use of the word — 13 hits, all noise. A detector that cries
         // wolf about its own source code teaches people to ignore it.
-        const injectionShaped = new RegExp(
-          [
-            String.raw`ignore\s+(all\s+)?(previous|prior|above)\s+instructions`,
-            String.raw`disregard\s+(the\s+)?(above|previous|system)\s+(prompt|instruction)`,
-            String.raw`you\s+are\s+now\s+(a|an|the)\b`,
-            String.raw`^\s*(SYSTEM|ASSISTANT|USER)\s*:\s`,
-            String.raw`<\|im_(start|end)\|>`,
-            String.raw`\[\s*INST\s*\]`,
-            String.raw`new\s+instructions\s*:`,
-          ].join('|'),
-          'im',
-        );
+        // Two detectors, because they need different sensitivity. Prose phrases
+        // are matched case-insensitively; role markers must be UPPERCASE at
+        // column zero, or `  system: report.system` and `confineFilesystem:`
+        // match and the detector spends its credibility on its own source.
+        const injectionProse = new RegExp([
+          String.raw`ignore\s+(all\s+)?(previous|prior|above)\s+instructions`,
+          String.raw`disregard\s+(the\s+)?(above|previous|system)\s+(prompt|instruction)`,
+          String.raw`you\s+are\s+now\s+(a|an|the)\b`,
+          String.raw`new\s+instructions\s*:`,
+        ].join('|'), 'i');
+        const injectionMarker = /^(SYSTEM|ASSISTANT|USER|HUMAN):|<\|im_(start|end)\|>|\[\s*INST\s*\]/;
+        const injectionShaped = { test: (l: string) => injectionProse.test(l) || injectionMarker.test(l) };
         const scanned: string[] = [];
         const hits: Array<{ file: string; line: number; text: string }> = [];
         const walk = (dir: string) => {

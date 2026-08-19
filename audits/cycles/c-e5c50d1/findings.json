@@ -1,0 +1,208 @@
+{
+ "cycleId": "c-e5c50d1",
+ "head": "e5c50d17c3c6229f3771f455d3ad2167a03ab79d",
+ "startedAt": "2026-08-19T14:12:13.375Z",
+ "finishedAt": "2026-08-19T14:12:14.460Z",
+ "lanes": [
+  {
+   "lane": "D",
+   "title": "Validation / false-green / review independence",
+   "findings": [
+    {
+     "sections": [
+      "§10",
+      "§8",
+      "§11"
+     ],
+     "severity": "P0",
+     "title": "Added files are invisible to validation, integrity and review",
+     "detail": "Engine.diff() runs `git diff`, which reports tracked, unstaged modifications only. A file the implementer CREATES is untracked, so it appears in changedFiles() (git status --porcelain) but contributes nothing to the parsed diff. The tier is therefore resolved over zero hunks, inspectIntegrity() sees no test-surface change, and the reviewer receives a diff that omits the new code entirely.",
+     "impact": "Every anti-gaming protection is bypassed by putting the change in a new file: a new auth module is never classified high-risk, a new test arriving pre-skipped is never surfaced, and the independent reviewer reviews an empty diff while reporting on the task. This is the false-green mode the hardening work exists to prevent.",
+     "id": "D-D1",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D1",
+     "observed": "  files on disk                         : src/session.ts (auth-session), test/new.spec.ts (test surface, .skip)\n  git status --porcelain                : \"?? src/\\n?? test/\"\n  git diff (what Engine.diff() returns) : \"\"\n  hunks classified                      : 0\n  resolved tier                         : NORMAL\n  testSurfaceFiles                      : []"
+    },
+    {
+     "sections": [
+      "§10",
+      "§8",
+      "§11",
+      "§12"
+     ],
+     "severity": "P0",
+     "title": "A committing implementer makes the entire change invisible",
+     "detail": "If the implementation agent commits its work in the task worktree — normal agent behaviour — then both `git status --porcelain` and `git diff` are empty. CODE_CHANGE records zero files changed, VALIDATION_PLAN classifies zero hunks, EVIDENCE_INTEGRITY inspects nothing, and the reviewer is handed an empty diff. The task can then reach COMPLETED having validated a change nobody looked at.",
+     "impact": "This is a complete bypass of adaptive validation, all anti-gaming protections and reviewer independence, triggered by an action agents take routinely. A deleted required test would go undetected. It is the highest-severity class of defect in the product: a confident, green, dishonest result.",
+     "id": "D-D2",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D2",
+     "observed": "  files actually changed                : [\"a.ts\",\"src/auth.ts\"]\n  git status --porcelain (changedFiles) : \"\"\n  git diff (Engine.diff)                : \"\"\n  hunks classified                      : 0\n  tier                                  : NORMAL\n  integrity findings                    : 0"
+    },
+    {
+     "sections": [
+      "§12",
+      "§10"
+     ],
+     "severity": "P1",
+     "title": "The reviewer's diff is silently truncated",
+     "detail": "The review payload contains diff.slice(0, 20000) with no marker saying the diff was cut. A change larger than that limit is reviewed on its first portion only, and the reviewer has no way to know it is looking at a fragment.",
+     "impact": "On any large change the reviewer can report \"no findings\" having seen a fraction of it, and that verdict is recorded as an independent review of the whole change. Reviewer independence is preserved while reviewer sufficiency is not, which is arguably worse: the result looks corroborated.",
+     "id": "D-D3",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D3",
+     "observed": "  reviewer diff section                : diff.slice(0, 20000)\n  truncation announced to the reviewer : false"
+    }
+   ],
+   "coverage": [
+    {
+     "section": "§8",
+     "title": "Validation tier selection integrity",
+     "status": "TESTED",
+     "probes": [
+      "D4",
+      "D5",
+      "D14"
+     ]
+    },
+    {
+     "section": "§9",
+     "title": "Deterministic floor authority",
+     "status": "TESTED",
+     "probes": [
+      "D6"
+     ]
+    },
+    {
+     "section": "§10",
+     "title": "Change visibility — what actually gets validated",
+     "status": "TESTED",
+     "probes": [
+      "D1",
+      "D2"
+     ]
+    },
+    {
+     "section": "§11",
+     "title": "Evidence-chain integrity (anti-gaming)",
+     "status": "TESTED",
+     "probes": [
+      "D7",
+      "D8",
+      "D13"
+     ]
+    },
+    {
+     "section": "§12",
+     "title": "Reviewer independence enforcement",
+     "status": "TESTED",
+     "probes": [
+      "D3",
+      "D9"
+     ]
+    },
+    {
+     "section": "§13",
+     "title": "Acceptance semantics and outcome vocabulary",
+     "status": "TESTED",
+     "probes": [
+      "D10"
+     ]
+    },
+    {
+     "section": "§31",
+     "title": "Telemetry honesty",
+     "status": "TESTED",
+     "probes": [
+      "D11"
+     ]
+    },
+    {
+     "section": "§35",
+     "title": "Escalation completeness",
+     "status": "TESTED",
+     "probes": [
+      "D12"
+     ]
+    }
+   ],
+   "probesRun": 14,
+   "probesHeld": 11,
+   "notes": [],
+   "durationMs": 917,
+   "complete": true
+  }
+ ],
+ "findings": [
+  {
+   "sections": [
+    "§10",
+    "§8",
+    "§11"
+   ],
+   "severity": "P0",
+   "title": "Added files are invisible to validation, integrity and review",
+   "detail": "Engine.diff() runs `git diff`, which reports tracked, unstaged modifications only. A file the implementer CREATES is untracked, so it appears in changedFiles() (git status --porcelain) but contributes nothing to the parsed diff. The tier is therefore resolved over zero hunks, inspectIntegrity() sees no test-surface change, and the reviewer receives a diff that omits the new code entirely.",
+   "impact": "Every anti-gaming protection is bypassed by putting the change in a new file: a new auth module is never classified high-risk, a new test arriving pre-skipped is never surfaced, and the independent reviewer reviews an empty diff while reporting on the task. This is the false-green mode the hardening work exists to prevent.",
+   "id": "D-D1",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D1",
+   "observed": "  files on disk                         : src/session.ts (auth-session), test/new.spec.ts (test surface, .skip)\n  git status --porcelain                : \"?? src/\\n?? test/\"\n  git diff (what Engine.diff() returns) : \"\"\n  hunks classified                      : 0\n  resolved tier                         : NORMAL\n  testSurfaceFiles                      : []"
+  },
+  {
+   "sections": [
+    "§10",
+    "§8",
+    "§11",
+    "§12"
+   ],
+   "severity": "P0",
+   "title": "A committing implementer makes the entire change invisible",
+   "detail": "If the implementation agent commits its work in the task worktree — normal agent behaviour — then both `git status --porcelain` and `git diff` are empty. CODE_CHANGE records zero files changed, VALIDATION_PLAN classifies zero hunks, EVIDENCE_INTEGRITY inspects nothing, and the reviewer is handed an empty diff. The task can then reach COMPLETED having validated a change nobody looked at.",
+   "impact": "This is a complete bypass of adaptive validation, all anti-gaming protections and reviewer independence, triggered by an action agents take routinely. A deleted required test would go undetected. It is the highest-severity class of defect in the product: a confident, green, dishonest result.",
+   "id": "D-D2",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D2",
+   "observed": "  files actually changed                : [\"a.ts\",\"src/auth.ts\"]\n  git status --porcelain (changedFiles) : \"\"\n  git diff (Engine.diff)                : \"\"\n  hunks classified                      : 0\n  tier                                  : NORMAL\n  integrity findings                    : 0"
+  },
+  {
+   "sections": [
+    "§12",
+    "§10"
+   ],
+   "severity": "P1",
+   "title": "The reviewer's diff is silently truncated",
+   "detail": "The review payload contains diff.slice(0, 20000) with no marker saying the diff was cut. A change larger than that limit is reviewed on its first portion only, and the reviewer has no way to know it is looking at a fragment.",
+   "impact": "On any large change the reviewer can report \"no findings\" having seen a fraction of it, and that verdict is recorded as an independent review of the whole change. Reviewer independence is preserved while reviewer sufficiency is not, which is arguably worse: the result looks corroborated.",
+   "id": "D-D3",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D3",
+   "observed": "  reviewer diff section                : diff.slice(0, 20000)\n  truncation announced to the reviewer : false"
+  }
+ ],
+ "confirmed": 3,
+ "suspected": 0,
+ "bySeverity": {
+  "P0": 2,
+  "P1": 1,
+  "P2": 0,
+  "P3": 0
+ },
+ "coverageGaps": [],
+ "verdict": "FINDINGS_OPEN",
+ "evidenceChain": [
+  "1 lane(s) ran 14 probe(s) against e5c50d17c3c6",
+  "11 probe(s) observed the invariant holding",
+  "3 finding(s) CONFIRMED by executable reproduction; 0 SUSPECTED (not reproduced)",
+  "3 unfixed P0/P1 finding(s) remain open",
+  "0 charter section(s) untested with no stated reason",
+  "0 lane(s) failed to complete",
+  "the candidate has open findings or coverage gaps and is not cleared for installation"
+ ]
+}

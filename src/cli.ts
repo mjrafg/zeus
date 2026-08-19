@@ -690,6 +690,10 @@ function cmdRevalidate(argv: string[]): number {
   out(`  ${decision.overlap.length ? `${C.y}!${C.x}` : `${C.g}✓${C.x}`} overlap: ${decision.overlap.join(', ') || 'none'}`);
   out(`  tier ${decision.originalTier} → ${C.b}${decision.tier}${C.x}${decision.escalated ? ' (escalated by overlap)' : ''}`);
   out(`  rerun before integrating: ${[...(decision.plan?.floor ?? []), ...(decision.plan?.additional ?? [])].join(', ') || '(nothing configured)'}`);
+  // This command is not read-only, and an operator running it as "should I
+  // integrate?" deserves to be told that the answer changed the worktree.
+  out(`  ${C.y}!${C.x} the task worktree is now rebased onto ${decision.integrationHead.slice(0, 12)}; `
+    + 'its evidence was recorded against the previous base');
   out(`${C.dim}  ${decision.detail}${C.x}`);
   return 0;
 }

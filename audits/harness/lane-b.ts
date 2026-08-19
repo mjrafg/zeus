@@ -76,7 +76,7 @@ export const laneB: LaneSpec = {
         const p = sup.run({
           id: 'b2', projectId: 'p', taskId: 't', cls: 'light',
           command: 'sh', args: ['-c', `sleep ${'3025'}1 & sleep ${'3025'}1 & wait`],
-          cwd: wt, policy: defaultPolicy(wt, wt), timeoutMs: 60_000,
+          cwd: wt, policy: defaultPolicy(wt, wt), timeoutSeconds: 60,
         });
         await sleep(1200);
         const before = run('sh', ['-c', `pgrep -f "[s]leep 30251" | wc -l`]).stdout.trim();
@@ -108,7 +108,11 @@ export const laneB: LaneSpec = {
         const res = await sup.run({
           id: 'b3', projectId: 'p', taskId: 't3', cls: 'light',
           command: 'sh', args: ['-c', 'sleep 30252'], cwd: wt,
-          policy: defaultPolicy(wt, wt), timeoutMs: 2_000,
+          // The request field is timeoutSeconds. An earlier version of this
+          // probe passed `timeoutMs` — which the supervisor ignores — and
+          // reported the resulting 300s default as a missing wall clock. The
+          // finding was wrong; the probe was.
+          policy: defaultPolicy(wt, wt), timeoutSeconds: 2,
         });
         const elapsed = Date.now() - started;
         await sleep(500);
@@ -117,7 +121,7 @@ export const laneB: LaneSpec = {
           ['outcome', String(res.outcome)], ['elapsed ms', String(elapsed)],
           ['processes left behind', leaked],
         ]);
-        return res.outcome === 'TIMEOUT' && elapsed < 20_000 && leaked === '0'
+        return res.outcome === 'TIMEOUT' && elapsed < 15_000 && leaked === '0'
           ? held(observed)
           : defect(observed, {
             sections: ['§6'], severity: 'P0',

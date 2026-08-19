@@ -102,6 +102,41 @@ export function classifyCheck(res: ExecutionResult, required: boolean): CheckOut
   }
 }
 
+/**
+ * Secret-shaped substrings, removed before command output is recorded.
+ *
+ * Zeus strips credentials on the way INTO a project command and then used to
+ * write whatever came back out into the append-only log. A test that echoes a
+ * token, a failing assertion printing a connection string, a debug logger — any
+ * of them made the secret permanent, because the log is hash-chained and
+ * redacting later would break the chain.
+ *
+ * This is a net, not a guarantee: it catches recognisable shapes. Anything it
+ * misses is still a reason to keep project output out of evidence bundles.
+ */
+const SECRET_SHAPES: Array<[RegExp, string]> = [
+  [/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '[redacted:api-key]'],
+  [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[redacted:github-token]'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '[redacted:slack-token]'],
+  [/\bAKIA[0-9A-Z]{16}\b/g, '[redacted:aws-key-id]'],
+  [/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[redacted:jwt]'],
+  [/\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi, '[redacted:credentialed-url]'],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted:private-key]'],
+  [/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL))\s*[=:]\s*\S+/g, '$1=[redacted]'],
+];
+
+export function redactSecrets(text: string): { text: string; redactions: number } {
+  let out = text;
+  let redactions = 0;
+  for (const [re, replacement] of SECRET_SHAPES) {
+    out = out.replace(re, (...args) => {
+      redactions += 1;
+      return replacement.includes('$1') ? replacement.replace('$1', String(args[1])) : replacement;
+    });
+  }
+  return { text: out, redactions };
+}
+
 /** Only a real verdict about the code may let acceptance continue. */
 export function checkAllowsAcceptance(o: CheckOutcome): boolean { return o === 'PASSED'; }
 
@@ -293,7 +328,13 @@ export class Engine {
       // a brand-new project still works.
       try {
         fs.mkdirSync(rec.worktree, { recursive: true });
-        execFileSync('sh', ['-c', `cp -a "${this.opts.projectRoot}/." "${rec.worktree}/" 2>/dev/null || true`], { timeout: 300_000 });
+        // Deliberately NOT a plain `cp -a .`: that clones .git (so the agent's
+        // commits would land in a copy nobody reads), duplicates node_modules,
+        // and copies untracked local files such as .env into a directory the
+        // agent controls.
+        execFileSync('sh', ['-c',
+          `cd "${this.opts.projectRoot}" && tar -cf - --exclude=.git --exclude=node_modules --exclude=.zeus . `
+          + `| tar -xf - -C "${rec.worktree}" 2>/dev/null || true`], { timeout: 300_000 });
         fs.rmSync(path.join(rec.worktree, '.zeus'), { recursive: true, force: true });
         return { ok: true, detail: 'worktree copied (repository has no commit to check out)' };
       } catch (e2: any) {
@@ -334,7 +375,10 @@ export class Engine {
       name, required, outcome, command: commandLine, exitCode: res.exitCode,
       durationMs: res.durationMs, backend: res.backend, isolationFallback: res.isolationFallback,
       productSignal: res.productSignal, violations: res.violations,
-      tail: res.stdout.slice(-500),
+      ...(() => {
+        const r = redactSecrets(res.stdout.slice(-500));
+        return { tail: r.text, ...(r.redactions ? { redactions: r.redactions } : {}) };
+      })(),
     } });
     return { outcome, res };
   }
@@ -587,6 +631,18 @@ export class Engine {
     this.setState(taskId, 'REVIEW', 'review');
     const diff = this.diff(rec);
     const headSha = this.worktreeHead(rec);
+    // A reviewer that silently receives the first 20KB of a large change can
+    // report "no findings" having seen a fraction of it, and that verdict is
+    // recorded as a review of the whole thing. If it must be cut, say so.
+    const DIFF_LIMIT = 20000;
+    const diffTruncated = diff.length > DIFF_LIMIT;
+    const truncatedDiff = diffTruncated
+      ? `${diff.slice(0, DIFF_LIMIT)}\n\n*** DIFF TRUNCATED ***\n`
+        + `This section shows the first ${DIFF_LIMIT} of ${diff.length} bytes. `
+        + `${changed.length} file(s) changed in total; the remainder is NOT included above.\n`
+        + 'You have not seen the whole change. Say so in your evidence summary, and treat any\n'
+        + 'conclusion about the unseen portion as unsupported.\n'
+      : diff;
 
     // The reviewer's payload is assembled under policy and hashed, so what it
     // received is a matter of record rather than of trust. Anything carrying
@@ -594,7 +650,7 @@ export class Engine {
     const reviewInputs: ReviewInput[] = [
       { kind: 'task-requirement', label: 'TASK', content: rec.description },
       { kind: 'changed-files', label: 'CHANGED FILES', content: changed.join('\n') || '(none)' },
-      { kind: 'diff', label: 'DIFF (base..head)', content: diff.slice(0, 20000) },
+      { kind: 'diff', label: 'DIFF (base..head)', content: truncatedDiff },
       { kind: 'protected-paths', label: 'PROTECTED PATHS',
         content: (cfg.policy?.protectedPaths ?? []).join('\n') || '(none)' },
       { kind: 'test-evidence', label: 'CHECKS ALREADY RUN',
@@ -641,6 +697,7 @@ export class Engine {
       ].join('\n'),
     });
     this.events.append({ taskId, type: 'REVIEW_CONTEXT', payload: {
+      diffBytes: diff.length, diffTruncated, diffDelivered: truncatedDiff.length,
       reviewInvocationId: payload.reviewInvocationId,
       baseSha: payload.baseSha, headSha: payload.headSha,
       configuredContext: payload.configuredContext,
@@ -808,18 +865,53 @@ export class Engine {
     } catch { return rec.baseSha; }
   }
 
-  changedFiles(rec: TaskRecord): string[] {
+  /**
+   * Makes every shape of change visible to git.
+   *
+   * `git diff` alone reports tracked, unstaged modifications — which is a
+   * fraction of what an implementer actually does. A file it CREATES is
+   * untracked and invisible; work it COMMITS is invisible twice over. Both are
+   * ordinary agent behaviour, and both used to produce an empty diff, which
+   * meant zero hunks classified, no integrity inspection, and an empty payload
+   * handed to the reviewer.
+   *
+   * `--intent-to-add` records the existence of untracked paths without staging
+   * their content, so they appear as additions; diffing against the task's BASE
+   * commit rather than the worktree HEAD then also captures anything committed.
+   * The index of a per-task, disposable worktree is Zeus's own scratch space.
+   */
+  private markIntentToAdd(rec: TaskRecord): void {
     try {
-      const out = require('child_process')
-        .execFileSync('git', ['-C', rec.worktree, 'status', '--porcelain'], { encoding: 'utf8', timeout: 30_000 });
-      return out.split('\n').filter(Boolean).map((l: string) => l.slice(3).trim());
-    } catch { return []; }
+      require('child_process').execFileSync('git', ['-C', rec.worktree, 'add', '-A', '--intent-to-add', '--'],
+        { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch { /* a path git refuses to index still shows through status below */ }
+  }
+
+  changedFiles(rec: TaskRecord): string[] {
+    this.markIntentToAdd(rec);
+    const cp = require('child_process');
+    const names = new Set<string>();
+    try {
+      const out = cp.execFileSync('git', ['-C', rec.worktree, 'diff', '--name-only', rec.baseSha, '--'],
+        { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      for (const l of out.split('\n').filter(Boolean)) names.add(l.trim());
+    } catch { /* fall through to status */ }
+    // Belt and braces: anything git still will not diff (an unreadable path,
+    // a submodule) is at least reported as changed rather than lost.
+    try {
+      const st = cp.execFileSync('git', ['-C', rec.worktree, 'status', '--porcelain'],
+        { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      for (const l of st.split('\n').filter(Boolean)) names.add(l.slice(3).trim());
+    } catch { /* nothing more to add */ }
+    return [...names].filter(Boolean);
   }
 
   diff(rec: TaskRecord): string {
+    this.markIntentToAdd(rec);
     try {
       return require('child_process')
-        .execFileSync('git', ['-C', rec.worktree, 'diff', '--stat', '-p'], { encoding: 'utf8', timeout: 60_000, maxBuffer: 32 * 1024 * 1024 });
+        .execFileSync('git', ['-C', rec.worktree, 'diff', '--stat', '-p', rec.baseSha, '--'],
+          { encoding: 'utf8', timeout: 60_000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch { return '(diff unavailable)'; }
   }
 

@@ -53,16 +53,23 @@ export const laneF: LaneSpec = {
     {
       id: 'F2', section: '§17', title: 'a task worktree does not carry the project state directory',
       run(ctx) {
+        // Modelled on what `zeus init` actually creates: config.yaml is
+        // committed, and state/ logs/ worktrees/ are git-ignored. An earlier
+        // version of this probe committed .zeus/state itself — something no
+        // Zeus project does — and then reported the predictable consequence as
+        // a product defect.
         const root = repo(path.join(ctx.tmp, 'f2'), {
           'a.ts': 'export const a = 1;\n',
           '.zeus/config.yaml': 'version: 1\n',
-          '.zeus/state/tasks/x/events.jsonl': '{"seq":1}\n',
+          '.zeus/.gitignore': 'state/\nlogs/\nworktrees/\n',
         });
+        write(path.join(root, '.zeus/state/tasks/x/events.jsonl'), '{"seq":1}\n');
         const wt = path.join(ctx.tmp, 'f2-wt');
         git(root, ['worktree', 'add', '-q', '--detach', wt, 'HEAD']);
         const stateInWorktree = fs.existsSync(path.join(wt, '.zeus/state'));
         const observed = compare([
           ['project has .zeus/state', String(fs.existsSync(path.join(root, '.zeus/state')))],
+          ['.zeus/.gitignore excludes state/', String(fs.readFileSync(path.join(root, '.zeus/.gitignore'), 'utf8').includes('state/'))],
           ['worktree has .zeus/state', String(stateInWorktree)],
           ['worktree entries', fs.readdirSync(wt).join(', ')],
         ]);

@@ -208,7 +208,22 @@ export const laneC: LaneSpec = {
       run(ctx) {
         // The audited repository contains adversarial fixtures on purpose. If
         // an auditing agent can be steered by them, the audit is worthless.
-        const injectionShaped = /ignore (all )?(previous|prior) instructions|you are now|disregard the (above|system)|SYSTEM:|<\|im_start\|>/i;
+        // Anchored and specific. An earlier version matched /SYSTEM:/i, which
+        // fires on "operating system:", "confineFilesystem:" and every other
+        // ordinary use of the word — 13 hits, all noise. A detector that cries
+        // wolf about its own source code teaches people to ignore it.
+        const injectionShaped = new RegExp(
+          [
+            String.raw`ignore\s+(all\s+)?(previous|prior|above)\s+instructions`,
+            String.raw`disregard\s+(the\s+)?(above|previous|system)\s+(prompt|instruction)`,
+            String.raw`you\s+are\s+now\s+(a|an|the)\b`,
+            String.raw`^\s*(SYSTEM|ASSISTANT|USER)\s*:\s`,
+            String.raw`<\|im_(start|end)\|>`,
+            String.raw`\[\s*INST\s*\]`,
+            String.raw`new\s+instructions\s*:`,
+          ].join('|'),
+          'im',
+        );
         const scanned: string[] = [];
         const hits: Array<{ file: string; line: number; text: string }> = [];
         const walk = (dir: string) => {
@@ -217,6 +232,8 @@ export const laneC: LaneSpec = {
             const f = path.join(dir, e.name);
             if (e.isDirectory()) { walk(f); continue; }
             if (!/\.(ts|js|md|json|sh|ya?ml)$/.test(e.name)) continue;
+            // A detector must not report its own patterns as a finding.
+            if (path.relative(ctx.auditRoot, f).startsWith(path.join('audits', 'harness'))) continue;
             scanned.push(f);
             const text = fs.readFileSync(f, 'utf8');
             text.split('\n').forEach((l, i) => {

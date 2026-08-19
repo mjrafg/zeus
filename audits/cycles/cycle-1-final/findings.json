@@ -1,8 +1,8 @@
 {
  "cycleId": "cycle-1-final",
- "head": "22e3c808d1c5b44fb477b643cbd605f36a6bc910",
- "startedAt": "2026-08-19T14:28:42.809Z",
- "finishedAt": "2026-08-19T14:28:54.018Z",
+ "head": "67da187902b3aab04835c4129ae4176898215bba",
+ "startedAt": "2026-08-19T14:36:24.357Z",
+ "finishedAt": "2026-08-19T14:36:35.125Z",
  "lanes": [
   {
    "lane": "A",
@@ -50,7 +50,7 @@
    "probesRun": 9,
    "probesHeld": 9,
    "notes": [],
-   "durationMs": 1330,
+   "durationMs": 1358,
    "complete": true
   },
   {
@@ -119,7 +119,7 @@
    "probesRun": 8,
    "probesHeld": 8,
    "notes": [],
-   "durationMs": 7418,
+   "durationMs": 7436,
    "complete": true
   },
   {
@@ -179,9 +179,9 @@
    "probesRun": 6,
    "probesHeld": 6,
    "notes": [
-    "C6 scanned 69 files for injection-shaped content; 0 hit(s)."
+    "C6 scanned 73 files for injection-shaped content; 0 hit(s)."
    ],
-   "durationMs": 746,
+   "durationMs": 566,
    "complete": true
   },
   {
@@ -263,7 +263,7 @@
    "probesRun": 14,
    "probesHeld": 14,
    "notes": [],
-   "durationMs": 1003,
+   "durationMs": 816,
    "complete": true
   },
   {
@@ -309,7 +309,7 @@
    "probesRun": 6,
    "probesHeld": 6,
    "notes": [],
-   "durationMs": 135,
+   "durationMs": 101,
    "complete": true
   },
   {
@@ -355,7 +355,7 @@
    "probesRun": 6,
    "probesHeld": 6,
    "notes": [],
-   "durationMs": 366,
+   "durationMs": 299,
    "complete": true
   }
  ],
@@ -371,7 +371,7 @@
  "coverageGaps": [],
  "verdict": "CANDIDATE_SAFE_TO_INSTALL",
  "evidenceChain": [
-  "6 lane(s) ran 49 probe(s) against 22e3c808d1c5",
+  "6 lane(s) ran 49 probe(s) against 67da187902b3",
   "49 probe(s) observed the invariant holding",
   "0 finding(s) CONFIRMED by executable reproduction; 0 SUSPECTED (not reproduced)",
   "0 unfixed P0/P1 finding(s) remain open",

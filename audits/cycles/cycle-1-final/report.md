@@ -1,6 +1,6 @@
 # Zeus self-audit — cycle cycle-1-final
 
-Candidate `22e3c808d1c5b44fb477b643cbd605f36a6bc910` · started 2026-08-19T14:28:42.809Z · finished 2026-08-19T14:28:54.018Z
+Candidate `67da187902b3aab04835c4129ae4176898215bba` · started 2026-08-19T14:36:24.357Z · finished 2026-08-19T14:36:35.125Z
 
 ## Verdict
 
@@ -8,7 +8,7 @@ Candidate `22e3c808d1c5b44fb477b643cbd605f36a6bc910` · started 2026-08-19T14:28
 
 The verdict is a statement about what was tested, not about what exists:
 
-- 6 lane(s) ran 49 probe(s) against 22e3c808d1c5
+- 6 lane(s) ran 49 probe(s) against 67da187902b3
 - 49 probe(s) observed the invariant holding
 - 0 finding(s) CONFIRMED by executable reproduction; 0 SUSPECTED (not reproduced)
 - 0 unfixed P0/P1 finding(s) remain open
@@ -71,13 +71,13 @@ _No findings._
 
 | Lane | Area                                             | Probes | Held | Findings | Duration | Complete |
 |------|--------------------------------------------------|--------|------|----------|----------|----------|
-| A    | State / recovery / event integrity               | 9      | 9    | 0        | 1.3s     | true     |
+| A    | State / recovery / event integrity               | 9      | 9    | 0        | 1.4s     | true     |
 | B    | Process / resource / concurrency                 | 8      | 8    | 0        | 7.4s     | true     |
-| C    | Security / filesystem / shell / secrets          | 6      | 6    | 0        | 0.7s     | true     |
-| D    | Validation / false-green / review independence   | 14     | 14   | 0        | 1s       | true     |
+| C    | Security / filesystem / shell / secrets          | 6      | 6    | 0        | 0.6s     | true     |
+| D    | Validation / false-green / review independence   | 14     | 14   | 0        | 0.8s     | true     |
 | E    | Installer / setup / providers / packaging        | 6      | 6    | 0        | 0.1s     | true     |
-| F    | Git / worktrees / project isolation / revalidate | 6      | 6    | 0        | 0.4s     | true     |
+| F    | Git / worktrees / project isolation / revalidate | 6      | 6    | 0        | 0.3s     | true     |
 
 **Lane C notes**
-- C6 scanned 69 files for injection-shaped content; 0 hit(s).
+- C6 scanned 73 files for injection-shaped content; 0 hit(s).
 

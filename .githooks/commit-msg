@@ -1,0 +1,14 @@
+#!/bin/sh
+# Reject AI attribution in commit messages.
+#
+# A policy written only in prose gets forgotten; this makes the mistake
+# impossible to commit. Prose that merely mentions a tool by name is fine —
+# only attribution trailers are refused.
+msg_file="$1"
+if grep -qiE '^[[:space:]]*(Co-[Aa]uthored-[Bb]y:|Generated[ -](with|by)).*(claude|anthropic|gpt|copilot|assistant|ai\b)' "$msg_file"; then
+  echo "commit-msg: refusing AI attribution trailer." >&2
+  echo "  Commits in this repository carry the owner's identity only." >&2
+  echo "  See CONTRIBUTING.md" >&2
+  exit 1
+fi
+exit 0

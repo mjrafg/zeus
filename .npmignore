@@ -1,0 +1,25 @@
+# Never ship anything but the runtime.
+docs/
+test/
+tsnode.sh
+*.tgz
+
+# Never ship state, evidence or credentials — belt and braces with "files".
+.zeus/
+state/
+worktrees/
+transcripts/
+artifacts/
+sessions.json
+owner.json
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+.claude/
+.codex/
+
+# Engineering configuration, never shipped
+.claude/*
+.githooks/

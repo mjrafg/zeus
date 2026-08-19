@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Deprecated launcher, kept only so development installs of the old name keep
+# working. It prints one line and forwards; nothing else lives here.
+#
+# To remove the compatibility alias entirely: delete this file and the
+# "autopilot" entry in package.json's "bin" map. Nothing depends on it.
+set -euo pipefail
+printf 'autopilot has been renamed to zeus; use `zeus`.\n' >&2
+exec "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/zeus" "$@"

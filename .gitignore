@@ -1,0 +1,27 @@
+node_modules/
+dist/
+*.log
+
+# Release artifacts, built by scripts/package.sh
+dist-release/
+
+# Never commit runtime state, task data or agent transcripts
+.zeus/
+state/
+worktrees/
+transcripts/
+artifacts/
+
+# Never commit credentials of any kind
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+known_hosts
+.claude/
+.codex/
+
+# macOS AppleDouble junk
+._*
+.DS_Store

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Launcher for the zeus CLI.
+#
+# Resolves the runtime next to this script (or via ZEUS_RUNTIME) and runs
+# the compiled CLI. Kept in bash so the entry point works before any Node
+# tooling is configured, and so `zeus doctor` can report a missing Node
+# instead of failing with a stack trace.
+set -euo pipefail
+
+resolve_self() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do
+    local dir; dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"; [[ $src != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+SELF_DIR="$(resolve_self)"
+RUNTIME="${ZEUS_RUNTIME:-}"
+if [ -z "$RUNTIME" ]; then
+  for candidate in "$SELF_DIR/.." "${XDG_DATA_HOME:-$HOME/.local/share}/zeus/runtime"; do
+    if [ -f "$candidate/dist/cli.js" ] || [ -f "$candidate/src/cli.ts" ]; then RUNTIME="$(cd "$candidate" && pwd)"; break; fi
+  done
+fi
+if [ -z "$RUNTIME" ]; then
+  echo "zeus: runtime not found. Reinstall, or set ZEUS_RUNTIME." >&2; exit 1
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "zeus: Node.js 18+ is required but 'node' was not found on PATH." >&2; exit 1
+fi
+
+if [ -f "$RUNTIME/dist/cli.js" ]; then
+  exec node "$RUNTIME/dist/cli.js" "$@"
+fi
+# Source checkout: prefer a local typescript, fall back to a clear message.
+if [ -f "$RUNTIME/node_modules/.bin/ts-node" ]; then
+  exec "$RUNTIME/node_modules/.bin/ts-node" --transpile-only "$RUNTIME/src/cli.ts" "$@"
+fi
+echo "zeus: no build found. Run 'npm run build' in $RUNTIME (or install a release)." >&2
+exit 1

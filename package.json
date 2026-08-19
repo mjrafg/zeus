@@ -1,0 +1,55 @@
+{
+  "name": "@mjrafg/zeus",
+  "version": "0.1.0-rc.1",
+  "description": "Zeus — Autonomous Software Engineering Orchestrator: plan, implement, independently review, verify.",
+  "license": "AGPL-3.0-only",
+  "bin": {
+    "zeus": "bin/zeus",
+    "autopilot": "bin/autopilot"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "ts-node --transpile-only test/run.ts",
+    "cli": "ts-node --transpile-only src/cli.ts",
+    "package": "bash scripts/package.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.2",
+    "@types/node": "^18.19.0"
+  },
+  "dependencies": {},
+  "files": [
+    "bin/",
+    "dist/",
+    "src/",
+    "install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mjrafg/zeus.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "developer-tools",
+    "automation",
+    "software-engineering",
+    "claude",
+    "codex",
+    "cli",
+    "orchestrator"
+  ],
+  "homepage": "https://github.com/mjrafg/zeus",
+  "bugs": {
+    "url": "https://github.com/mjrafg/zeus/issues"
+  }
+}

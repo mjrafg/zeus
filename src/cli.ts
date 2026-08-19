@@ -28,6 +28,11 @@ import { TtyConsent, interactivePossible } from './setup/prompt';
 import { FileStateStore, applyRoles } from './setup/state';
 import { RoleAssignment, DEFAULT_ROLES, ProviderId } from './setup/providers';
 import { planMigration, applyMigration, MigrationPlan } from './migrate';
+import { taskTelemetry, zeroTouchCleanRate, formatZeroTouch, TaskTelemetry } from './validation/telemetry';
+import { revalidateForIntegration, GitAccess } from './validation/revalidate';
+import { impactConfidence } from './validation/tier';
+import { parseDiff } from './validation/diff';
+import { renderEscalation, EscalationPayload } from './validation/escalation';
 
 /** Single source of truth: the packaged manifest, not a second literal. */
 export const VERSION: string = (() => {
@@ -59,6 +64,8 @@ ${C.b}Usage${C.x}
   zeus cancel <taskId> [--reason "..."]
   zeus logs [<taskId>] [--follow]
   zeus config [get <key> | set <key> <value>]  read or edit this project's configuration
+  zeus config [get <key> | set <key> <value>]  read or edit this project's configuration
+  zeus revalidate <taskId> [--into <ref>]     recheck a verified task against a moved integration target
   zeus version
   zeus help
 
@@ -479,12 +486,117 @@ function cmdStatus(argv: string[]): number {
   out(`${C.b}${ctx.cfg.project.name}${C.x} ${C.dim}${ctx.root}${C.x}`);
   const lease = engine.lock.current();
   if (lease) out(`${C.dim}owned by ${lease.instanceId} (heartbeat ${lease.heartbeatAt})${C.x}`);
+  const telemetry: TaskTelemetry[] = [];
   for (const id of ids) {
     const t = engine.task(id);
     if (!t) { err(`unknown task ${id}`); continue; }
     const terminal = TERMINAL.includes(t.state);
-    out(`  ${terminal ? C.dim : C.b}${id}${C.x}  ${t.state.padEnd(22)} ${t.description.slice(0, 60)}`);
+    const tel = taskTelemetry(id, engine.events.read(id));
+    telemetry.push(tel);
+    const touch = tel.humanInterventionCount === 0 ? `${C.g}0 touch${C.x}` : `${C.y}${tel.humanInterventionCount} touch${C.x}`;
+    out(`  ${terminal ? C.dim : C.b}${id}${C.x}  ${t.state.padEnd(22)} ${touch}  ${t.description.slice(0, 50)}`);
+    // A task waiting on a person should say what it wants, right here.
+    if (['AWAITING_HUMAN', 'BLOCKED', 'NEEDS_RECONCILIATION'].includes(t.state)) {
+      const esc = [...engine.events.read(id)].reverse().find((e) => e.type === 'ESCALATION');
+      if (esc) {
+        const p = esc.payload as unknown as EscalationPayload;
+        for (const line of renderEscalation(p).split('\n').slice(1)) out(`${C.dim}    ${line.trim()}${C.x}`);
+      }
+    }
   }
+
+  // The product metric. Everything above is detail; this is the number.
+  const metric = zeroTouchCleanRate(telemetry);
+  out('');
+  out(`  ${metric.rate === null || metric.rate >= 0.8 ? C.g : C.y}${formatZeroTouch(metric)}${C.x}`);
+  if (metric.completed && metric.rate !== null && metric.rate < 1) {
+    if (metric.withIntervention) out(`${C.dim}    ${metric.withIntervention} needed a person; ${metric.withRegression} caused a regression attributed later${C.x}`);
+    for (const r of metric.topInterventionReasons) out(`${C.dim}    ${String(r.count).padStart(3)} × ${r.reason}${C.x}`);
+  }
+  return 0;
+}
+
+/**
+ * `zeus revalidate` — the integration primitive.
+ *
+ * A task verified against one commit and integrated onto another was never
+ * verified against what it lands on. This rebases, recomputes impact on the
+ * REBASED diff, and says what must rerun. It deliberately stops there: merging
+ * is a separate, explicitly enabled operation.
+ */
+function cmdRevalidate(argv: string[]): number {
+  const ctx = requireProject();
+  if (!ctx) return 2;
+  const taskId = argv.find((a) => !a.startsWith('--'));
+  if (!taskId) { err('usage: zeus revalidate <taskId> [--into <ref>]'); return 2; }
+  const intoIdx = argv.indexOf('--into');
+  const into = intoIdx >= 0 ? argv[intoIdx + 1] : 'HEAD';
+  const json = argv.includes('--json');
+
+  const engine = engineFor(ctx.root, ctx.cfg);
+  const rec = engine.task(taskId);
+  if (!rec) { err(`unknown task ${taskId}`); return 2; }
+
+  const { execFileSync } = require('child_process');
+  // git's own progress and conflict hints are captured rather than inherited:
+  // Zeus reports the outcome in its own words, and a wall of rebase hints in
+  // the middle of that is noise the reader has to parse past.
+  const git = (cwd: string) => (args: string[]): string => {
+    try {
+      return execFileSync('git', ['-C', cwd, ...args], {
+        encoding: 'utf8', timeout: 120_000, maxBuffer: 32 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (e: any) { return `${String(e?.stdout ?? '')}${String(e?.stderr ?? '')}`; }
+  };
+  const inProject = git(ctx.root);
+  const inWorktree = git(rec.worktree);
+
+  const access: GitAccess = {
+    headOf: (ref) => inProject(['rev-parse', ref]).trim() || rec.baseSha,
+    filesChangedBetween: (from, to) => inProject(['diff', '--name-only', `${from}..${to}`]).split('\n').filter(Boolean),
+    rebase: (onto) => {
+      const before = inWorktree(['status', '--porcelain']);
+      const out2 = inWorktree(['rebase', onto]);
+      const conflicts = inWorktree(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
+      if (conflicts.length) { inWorktree(['rebase', '--abort']); return { ok: false, conflicts, detail: 'rebase aborted; the worktree is unchanged' }; }
+      void out2;
+      return { ok: true, conflicts: [], detail: `rebased onto ${onto.slice(0, 12)} (worktree was ${before.trim() ? 'dirty' : 'clean'})` };
+    },
+    diffAgainst: (base) => inWorktree(['diff', base, '--']),
+  };
+
+  const parsedNow = parseDiff(inWorktree(['diff', rec.baseSha, '--']));
+  const decision = revalidateForIntegration({
+    git: access, integrationRef: into, verifiedAgainst: rec.baseSha,
+    originalTier: 'NORMAL',
+    adapterId: ctx.cfg.project?.adapter ?? 'generic',
+    confidence: impactConfidence(parsedNow, ctx.cfg.project?.adapter ?? 'generic'),
+    commands: (ctx.cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>,
+    hardening: (ctx.cfg as any)?.validation?.hardening,
+  });
+
+  engine.events.append({ taskId, type: 'INTEGRATION_REVALIDATION', payload: {
+    code: decision.code, verifiedAgainst: decision.verifiedAgainst, integrationHead: decision.integrationHead,
+    intervening: decision.intervening, overlap: decision.overlap,
+    tier: decision.tier, escalated: decision.escalated, plan: decision.plan, detail: decision.detail,
+  } });
+
+  if (json) { out(JSON.stringify(decision, null, 1)); return decision.code === 'REVALIDATION_CONFLICT' ? 1 : 0; }
+
+  out(`${C.b}${taskId}${C.x} verified against ${C.dim}${decision.verifiedAgainst.slice(0, 12)}${C.x}`);
+  out(`  integration target ${into} is at ${decision.integrationHead.slice(0, 12)}`);
+  if (decision.code === 'REVALIDATION_NOT_NEEDED') { out(`  ${C.g}✓${C.x} ${decision.detail}`); return 0; }
+  if (decision.code === 'REVALIDATION_CONFLICT') {
+    err(`  ${C.r}✗${C.x} ${decision.detail}`);
+    for (const f of decision.conflicts.slice(0, 10)) err(`      ${f}`);
+    return 1;
+  }
+  out(`  ${decision.intervening.length} file(s) changed on the target since verification`);
+  out(`  ${decision.overlap.length ? `${C.y}!${C.x}` : `${C.g}✓${C.x}`} overlap: ${decision.overlap.join(', ') || 'none'}`);
+  out(`  tier ${decision.originalTier} → ${C.b}${decision.tier}${C.x}${decision.escalated ? ' (escalated by overlap)' : ''}`);
+  out(`  rerun before integrating: ${[...(decision.plan?.floor ?? []), ...(decision.plan?.additional ?? [])].join(', ') || '(nothing configured)'}`);
+  out(`${C.dim}  ${decision.detail}${C.x}`);
   return 0;
 }
 
@@ -542,6 +654,7 @@ export async function main(argv: string[]): Promise<number> {
     case 'cancel': return cmdCancel(rest);
     case 'logs': return cmdLogs(rest);
     case 'config': return cmdConfig(rest);
+    case 'revalidate': return cmdRevalidate(rest);
     default: err(`unknown command "${cmd}"`); usage(); return 2;
   }
 }

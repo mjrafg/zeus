@@ -159,6 +159,7 @@ that does not exist is worse than none.
 | `zeus cancel <taskId>` | stop a task and its process tree |
 | `zeus logs [taskId]` | the task's event log (`--follow` to tail) |
 | `zeus config` | show, `get` or `set` a value in this project's configuration |
+| `zeus revalidate <taskId>` | recheck a verified task against a moved integration target |
 | `zeus version` | installed version |
 
 ## Configuration
@@ -183,6 +184,118 @@ Task-level ceilings (wall clock, agent invocations, design attempts, review and
 repair cycles, provider time) are recomputed from the event log, so restarting
 the orchestrator cannot reset a budget. Cost is only enforced when a provider
 actually reports one — no token pricing is invented.
+
+## Adaptive validation
+
+Not every change deserves the same scrutiny, and pretending otherwise is how
+teams end up disabling the checks. Zeus classifies each change and validates it
+at the depth it earns — **FAST**, **NORMAL** or **DEEP**.
+
+The classification is deterministic: ordered path rules and unified-diff
+parsing, no model anywhere in the safety floor. And it is per *hunk*, not per
+file, because the file is the level a diff can be gamed at:
+
+```
+Hunk 1  src/components/Header.tsx   UI label      → FAST
+Hunk 2  src/lib/session.ts          session core  → DEEP
+                                         result:  → DEEP
+```
+
+**The tier is the maximum over every hunk.** FAST is not "the diff looks
+small"; FAST means every single hunk independently qualified. Bundling a
+session change with a typo fix buys nothing.
+
+**The deterministic floor is not part of the negotiation.** Required tests and
+typecheck run at *every* tier, FAST included. A tier decides what runs on top,
+never how much runs at all.
+
+### Trusted autonomy
+
+The point of all this is unattended work. That only pays off if an unattended
+"done" can be believed, so the rules that make lying difficult are not
+configurable:
+
+* **Test-surface changes are a risk signal.** Any diff touching tests,
+  snapshots, fixtures, assertions, test config or skip annotations is at
+  minimum NORMAL, and the reviewer gets a dedicated section: *TEST SURFACE
+  CHANGED: verify the modification is justified.*
+* **Required tests are immutable.** A required test declared in task design
+  cannot be deleted or renamed by the implementation. Attempting it is
+  `REQUIRED_TEST_TAMPERED`, and no justification clears it — the contract is
+  the contract.
+* **Deleting or weakening a test needs a stated reason.** Not a general
+  apology: a justification naming that path, in the design output. Otherwise
+  the task blocks.
+* **`.skip`, `.only`, `xit`, `@pytest.mark.skip`, `t.Skip` and friends** added
+  to a previously passing test are surfaced to the reviewer explicitly.
+* **The acceptance report never merges two different claims.** "Tests passed"
+  and "tests this task edited, which then passed" are reported separately.
+* **Uncertainty on a dangerous surface goes straight to DEEP.** Unknown impact
+  confidence plus auth, schema, lockfile, CI or shared-core is not walked up a
+  tier at a time.
+* **The generic adapter cannot claim FAST** for anything but documentation-only
+  or comment-only diffs, because it cannot compute real impact.
+* **Reviewer expansion is bounded.** A reviewer may ask for more validation, but
+  must name a concrete affected behaviour; "run everything to be safe" is
+  rejected and recorded. Each grant costs a review cycle.
+* **Flakes never masquerade as misses, or the reverse.** A checkpoint failure
+  attributed to an earlier task is re-run in a clean environment: consistent
+  failure is `VALIDATION_MISS`, intermittent is `SUSPECTED_FLAKE`, recorded
+  against the *test* and never used to make the analyzer more conservative.
+
+### Integration revalidation
+
+A task verified against HEAD X and merged onto HEAD Y was never verified
+against what it lands on:
+
+```bash
+zeus revalidate <taskId> --into main
+```
+
+Rebases, recomputes impact on the **rebased** diff, and escalates one tier if
+that diff overlaps anything that moved in between. It stops before integrating
+— merging stays a separate, explicitly enabled operation.
+
+### The number that matters
+
+```
+ZERO_TOUCH_CLEAN_RATE  92%  (46/50 completed tasks: 0 interventions, 0 attributed regressions)
+```
+
+Shown by `zeus status`. Both halves are deliberate: a task that finished
+untouched but caused a regression next week is not a success, and counting it
+as one is the self-deception the metric exists to prevent.
+
+When Zeus does need a person, the interruption carries what is needed to
+resolve it in minutes — reason code, what was already tried, evidence
+references, the one specific thing required, and what resumes automatically:
+
+```
+T-0042 blocked: the migration cannot run because the staging database URL is not available
+  Tried: environment discovery; adapter configuration; the project .env file
+  Needed: the staging DATABASE_URL — set it in the environment Zeus runs in
+  On receipt: validation resumes automatically from the migration step
+  Reason code: MISSING_CREDENTIAL
+```
+
+A bare "task needs attention" fails Zeus's own tests.
+
+### Configuring it
+
+```yaml
+validation:
+  strategy: fastest-safe
+  hardening:
+    mixedDiffMaxTier: true          # not disableable in v1
+    testSurfaceRisk: true           # not disableable in v1
+    unknownPlusRiskDirectDeep: true
+    genericAdapterFloor: normal
+    reviewerExpansionBudget: 2
+```
+
+The first two are listed for visibility, not for choice. Setting either to
+`false` is a configuration **error** rather than a silent no-op, because being
+ignored quietly is worse than being told.
 
 ## Where Zeus keeps things
 

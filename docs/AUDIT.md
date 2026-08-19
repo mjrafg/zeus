@@ -160,6 +160,62 @@ destination does not exist; if both exist, the conflict is reported and neither
 copy is touched. Nothing is merged, overwritten or deleted, and running
 migration twice is a no-op.
 
+## Trusted autonomy
+
+Adaptive validation exists to make unattended work affordable. Everything in
+this section exists so that it does not also make unattended work
+*untrustworthy*: each rule closes a path by which a green result could be
+produced without the code actually being correct.
+
+**The tier cannot be lowered by bundling.** Classification is per hunk and the
+result is the maximum. A high-risk change packaged with a documentation edit
+does not inherit the documentation edit's cheapness.
+
+**The floor is outside the tier system.** Required checks run at FAST, NORMAL
+and DEEP alike. `planFor` can only add; there is no code path by which a tier
+decision removes a required check, and `F4` asserts it.
+
+**The measuring instrument is protected.** Required tests declared in design
+are immutable during implementation; test deletion and assertion weakening
+need a per-path justification in the design output; disabling annotations are
+surfaced to the reviewer; and the acceptance report separates "passed" from
+"passed after this task edited the tests". These rules are deliberately outside
+user configuration — a config that tries to disable one is a validation error,
+not a preference.
+
+**Uncertainty is not optimism.** An unparseable diff, a diff with no readable
+hunks, and the generic adapter all produce UNKNOWN confidence, and UNKNOWN on a
+high-risk surface goes directly to DEEP rather than climbing one tier at a
+time.
+
+**Feedback cannot be poisoned.** A post-acceptance failure is re-run in a clean
+environment before it is attributed. Consistent failure is a VALIDATION_MISS
+and counts against the task; intermittent failure is a SUSPECTED_FLAKE recorded
+against the test, explicitly barred from influencing the impact analyzer. An
+inconclusive retry leaves the original attribution standing, because "we could
+not reproduce it" is not evidence of innocence.
+
+**The reviewer strengthens evidence without an unbounded loop.** Expansion
+requires a named behaviour, is deterministically assessed, costs a review
+cycle, and is refused past budget. Repeated expansion producing no findings is
+itself recorded.
+
+**Integration is revalidated, not assumed.** `zeus revalidate` rebases,
+recomputes impact on the rebased diff, and escalates one tier when that diff
+overlaps what moved underneath it.
+
+**Asking a human is treated as a cost.** Every human-attention exit carries a
+structured payload — reason code, attempts, evidence references, the single
+specific need, and the resume behaviour. An incomplete payload records
+`ESCALATION_INCOMPLETE` against Zeus itself, and a bare "needs attention" fails
+the test suite.
+
+Two defects were found by writing these tests rather than by reasoning about
+them: a CI-configuration path rule that was anchored so that nothing *inside*
+`.github/workflows/` ever matched, and a generic-adapter floor that applied
+silently when the tier already met it, making it invisible to anyone auditing
+why the fast path was never taken. Both are fixed and covered.
+
 ## Outcome vocabulary
 
 The engine keeps these apart on purpose, because collapsing them is how a tool

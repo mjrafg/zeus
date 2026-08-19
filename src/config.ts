@@ -35,6 +35,21 @@ export interface ProjectConfig {
     maxPlaywrightWorkers: number;
   };
   providers: { planner: string; implementer: string; reviewer: string; billing: string };
+  validation: {
+    /** Only 'fastest-safe' exists today; the field makes future strategies explicit. */
+    strategy: string;
+    hardening: {
+      /** §1. Non-disableable in v1: recorded, and always enforced. */
+      mixedDiffMaxTier: boolean;
+      /** §2. Non-disableable in v1. */
+      testSurfaceRisk: boolean;
+      unknownPlusRiskDirectDeep: boolean;
+      /** Minimum tier the generic adapter may claim for non-documentation. */
+      genericAdapterFloor: string;
+      /** Reviewer-requested validation expansions allowed per task. */
+      reviewerExpansionBudget: number;
+    };
+  };
   integrations: { graphify: 'auto' | 'on' | 'off' };
   paths: { state: string; logs: string; worktrees: string };
 }
@@ -147,6 +162,18 @@ export function defaultConfig(root: string): ProjectConfig {
       ...(readUserDefaults()?.providers ?? {}),
       billing: 'subscription-cli-only',
     },
+    validation: {
+      strategy: 'fastest-safe',
+      hardening: {
+        // The first two are trust infrastructure rather than preference: they
+        // are written here for visibility, and enforced whatever they say.
+        mixedDiffMaxTier: true,
+        testSurfaceRisk: true,
+        unknownPlusRiskDirectDeep: true,
+        genericAdapterFloor: 'normal',
+        reviewerExpansionBudget: 2,
+      },
+    },
     integrations: { graphify: 'auto' },
     paths: { state: '.zeus/state', logs: '.zeus/logs', worktrees: '.zeus/worktrees' },
   };
@@ -200,6 +227,29 @@ export function validateConfig(cfg: any): ConfigProblem[] {
   if (cfg.providers?.billing && cfg.providers.billing !== 'subscription-cli-only') {
     p.push({ level: 'error', message: 'providers.billing must be subscription-cli-only; paid API fallback is not supported' });
   }
+  const h = cfg.validation?.hardening ?? {};
+  // Saying "off" and being ignored is worse than being told. A config that
+  // tries to disable an anti-gaming rule is an error, not a silent no-op.
+  for (const key of ['mixedDiffMaxTier', 'testSurfaceRisk'] as const) {
+    if (h[key] === false) {
+      p.push({ level: 'error', message: `validation.hardening.${key} cannot be disabled: it is what makes unattended validation trustworthy` });
+    }
+  }
+  if (cfg.validation?.strategy && cfg.validation.strategy !== 'fastest-safe') {
+    p.push({ level: 'error', message: `unknown validation.strategy "${cfg.validation.strategy}" (supported: fastest-safe)` });
+  }
+  if (h.genericAdapterFloor && !['normal', 'deep'].includes(String(h.genericAdapterFloor).toLowerCase())) {
+    p.push({ level: 'error', message: 'validation.hardening.genericAdapterFloor must be normal or deep; the generic adapter cannot justify fast' });
+  }
+  if (h.reviewerExpansionBudget !== undefined) {
+    const n = Number(h.reviewerExpansionBudget);
+    if (!Number.isInteger(n) || n < 0) {
+      p.push({ level: 'error', message: 'validation.hardening.reviewerExpansionBudget must be a non-negative integer' });
+    } else if (n > 5) {
+      p.push({ level: 'warning', message: `reviewerExpansionBudget ${n} is high: repeated expansion without findings is usually uncertainty, not diligence` });
+    }
+  }
+
   for (const key of ['state', 'logs', 'worktrees'] as const) {
     const v = String(cfg.paths?.[key] ?? '');
     if (path.isAbsolute(v) || v.split(/[\\/]/).includes('..')) {

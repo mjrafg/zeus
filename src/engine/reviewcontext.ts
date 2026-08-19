@@ -17,7 +17,7 @@ import * as crypto from 'crypto';
 
 export type ReviewInputKind =
   | 'task-requirement' | 'changed-files' | 'diff' | 'current-source'
-  | 'test-evidence' | 'protected-paths' | 'structural-map' | 'area-context'
+  | 'test-evidence' | 'test-surface' | 'protected-paths' | 'structural-map' | 'area-context'
   | 'planner-reasoning' | 'planner-plan' | 'implementer-transcript'
   | 'implementer-rationale' | 'previous-review' | 'adjudication' | 'acceptance-verdict';
 
@@ -30,7 +30,13 @@ export interface ReviewContextPolicy {
 }
 
 export const DEFAULT_REVIEW_POLICY: ReviewContextPolicy = {
-  allowed: ['task-requirement', 'changed-files', 'diff', 'current-source', 'test-evidence', 'protected-paths', 'structural-map'],
+  allowed: [
+    'task-requirement', 'changed-files', 'diff', 'current-source', 'test-evidence',
+    // What the change did to the tests themselves. Facts from the diff, never
+    // an opinion about them: the reviewer forms that.
+    'test-surface',
+    'protected-paths', 'structural-map',
+  ],
   forbidden: [
     'planner-reasoning', 'planner-plan', 'implementer-transcript', 'implementer-rationale',
     'previous-review', 'adjudication', 'acceptance-verdict', 'area-context',

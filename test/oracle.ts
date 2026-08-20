@@ -26,6 +26,7 @@ import { MissionRegistry } from '../src/mission/registry';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, computeAcceptanceMode,
   applyCriticMode, detectAuthority, evaluatorResolves,
+  AcceptanceMode, findingFamily, findingsFloor,
 } from '../src/mission/oracle';
 import { compileOracle, critiqueOracle, proposeAcceptance, normaliseCriteria } from '../src/mission/compile';
 import { evaluateCriteria, outcomeForExecution, achievementFrom, acceptedCommands } from '../src/mission/evaluate';
@@ -105,8 +106,11 @@ export async function oracleSuite(): Promise<void> {
       moved.filter((n) => !discovered.includes(n)).join(', '));
     // Pinned, not assumed: the probe went stale once, and the registry fix is
     // what stops it happening again.
-    check('OR12: the event-type total is pinned at 44',
-      discovered.length === 44, `${discovered.length} types`);
+    check('OR12: the event-type total is pinned at 45',
+      discovered.length === 45, `${discovered.length} types`);
+    check('OR12c: ORACLE_RECOMPILED is emitted and discovered automatically',
+      (MISSION_EVENT_TYPES as readonly string[]).includes('ORACLE_RECOMPILED')
+      && discovered.includes('ORACLE_RECOMPILED'));
     check('OR12b: ORACLE_COMPILE_REJECTED is emitted and discovered automatically',
       (MISSION_EVENT_TYPES as readonly string[]).includes('ORACLE_COMPILE_REJECTED')
       && discovered.includes('ORACLE_COMPILE_REJECTED'));
@@ -651,6 +655,111 @@ export async function oracleSuite(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------
+  section('oracle: a critique that cannot change the outcome is decoration');
+  {
+    const F = (code: string, criterionId = 'p/M-0001/C-0001') => ({ code, criterionId, detail: `${code} detail.` });
+
+    // The M-0002 shape, replayed: seven findings and an opinion of AUTO.
+    const m0002 = [F('BEYOND_GOAL', 'p/M-0001/C-0003'), F('EVALUATOR_INSUFFICIENT', 'p/M-0001/C-0003'),
+      F('EVALUATOR_MISMATCH', 'p/M-0001/C-0004'), F('BEYOND_GOAL', 'p/M-0001/C-0005'),
+      F('BEYOND_GOAL', 'p/M-0001/C-0006'), F('BEYOND_GOAL', 'p/M-0001/C-0007'),
+      F('AUTHORITY_UNDECLARED', 'p/M-0001/C-0001')];
+    const replayed = proposeAcceptance([criterion()], CTX, 'AUTO', m0002);
+    check('OR140: the M-0002 shape now floors at REQUIRED_CONSENT',
+      replayed.mode === 'REQUIRED_CONSENT' && replayed.floor.floor === 'REQUIRED_CONSENT',
+      `${replayed.mode} (was OPTIONAL_CONFIRMATION, auto-accepted)`);
+    check('OR141: an evaluator whose validity is contested is what forces it',
+      replayed.floor.families['evaluator-integrity'] === 2
+      && replayed.floor.forcedBy.some((f) => f.code === 'EVALUATOR_MISMATCH'),
+      JSON.stringify(replayed.floor.families));
+    check('OR142: the old auto-accept path is dead — this is not auto-acceptable',
+      replayed.autoAcceptable === false);
+    check('OR143: the critic\'s OPINION of AUTO no longer decides anything',
+      replayed.escalatedByCritic === false && replayed.escalatedByFindings === true,
+      'the findings escalated it, the opinion did not');
+
+    const scopeOnly = proposeAcceptance([criterion()], CTX, 'AUTO', [F('BEYOND_GOAL')]);
+    check('OR144: scope-only findings floor at OPTIONAL_CONFIRMATION',
+      scopeOnly.mode === 'OPTIONAL_CONFIRMATION' && scopeOnly.floor.floor === 'OPTIONAL_CONFIRMATION');
+    check('OR145: and it is a REAL stop — any finding means a human looks',
+      scopeOnly.autoAcceptable === false);
+    const clean = proposeAcceptance([criterion()], CTX, null, []);
+    check('OR146: a findings-free critique keeps the old fast path',
+      clean.mode === 'AUTO' && clean.autoAcceptable === true && clean.floor.findingCount === 0);
+    check('OR147: an unrecognised code still counts — an unknown objection is not a resolved one',
+      findingFamily('SOMETHING_NOBODY_ENUMERATED') === 'other'
+      && proposeAcceptance([criterion()], CTX, null, [F('SOMETHING_NOBODY_ENUMERATED')])
+        .autoAcceptable === false);
+    check('OR148: the families are matched on shape, so the critic\'s invented codes sort correctly',
+      findingFamily('EVALUATOR_DOES_NOT_PROVE_STATEMENT') === 'evaluator-integrity'
+      && findingFamily('RUBRIC_TOO_WEAK') === 'evaluator-integrity'
+      && findingFamily('AI_JUDGED_MECHANICALLY_PROVABLE') === 'evaluator-integrity'
+      && findingFamily('UNDECLARED_AUTHORITY') === 'scope-authority');
+
+    // Escalate-only, across the grid.
+    const grid: Array<[AcceptanceMode, string[], AcceptanceMode]> = [
+      ['AUTO', [], 'AUTO'],
+      ['AUTO', ['BEYOND_GOAL'], 'OPTIONAL_CONFIRMATION'],
+      ['AUTO', ['EVALUATOR_MISMATCH'], 'REQUIRED_CONSENT'],
+      ['OPTIONAL_CONFIRMATION', [], 'OPTIONAL_CONFIRMATION'],
+      ['OPTIONAL_CONFIRMATION', ['BEYOND_GOAL'], 'OPTIONAL_CONFIRMATION'],
+      ['OPTIONAL_CONFIRMATION', ['EVALUATOR_MISMATCH'], 'REQUIRED_CONSENT'],
+      ['REQUIRED_CONSENT', [], 'REQUIRED_CONSENT'],
+      ['REQUIRED_CONSENT', ['BEYOND_GOAL'], 'REQUIRED_CONSENT'],
+      ['REQUIRED_CONSENT', ['EVALUATOR_MISMATCH'], 'REQUIRED_CONSENT'],
+    ];
+    const wrong = grid.filter(([computed, codes, want]) =>
+      applyCriticMode(computed, findingsFloor(codes.map((c) => F(c))).floor).mode !== want);
+    check('OR149: floors only ever RAISE — never lower a computed mode',
+      wrong.length === 0,
+      wrong.map(([c, f, w]) => `${c}+${f.join()} wanted ${w}`).join(' | '));
+  }
+
+  // ---------------------------------------------------------------------
+  section('oracle: the fix loop shows the compiler the critique, never the critic');
+  {
+    const seen: Record<string, string> = {};
+    const recording = (id: string, reply: unknown) => ({
+      id, async available() { return { ok: true, detail: 'recording fake' }; },
+      async invoke(req: any) {
+        seen[id] = req.prompt;
+        return { ok: true, role: req.role, structured: reply as any, text: '', raw: '',
+          exitCode: 0, durationMs: 1, outcome: 'COMPLETED', infrastructureFailure: null };
+      },
+    });
+    const priorCriteria = [criterion()];
+    const priorFindings = [{ code: 'EVALUATOR_MISMATCH', criterionId: 'p/M-0001/C-0001',
+      detail: 'the probe diffs against HEAD, not the mission base.' }];
+
+    await compileOracle({
+      missionId: 'p/M-0001', projectId: 'p', goal: 'a goal', context: CTX,
+      provider: recording('compiler', { criteria: [] }) as any,
+      supervisor: sup, policy, baseSha: 'sha',
+      prior: { criteria: priorCriteria, findings: priorFindings, version: 1 },
+    });
+    check('OR150: the COMPILER is shown the previous attempt and the findings',
+      /EVALUATOR_MISMATCH/.test(seen.compiler) && /previous attempt \(oracle v1\)/.test(seen.compiler)
+      && /Answer these findings/.test(seen.compiler));
+
+    const round2 = await critiqueOracle({
+      missionId: 'p/M-0001', projectId: 'p', goal: 'a goal', criteria: priorCriteria,
+      context: CTX, provider: recording('critic', { findings: [], modeOpinion: null }) as any,
+      supervisor: sup, policy, baseSha: 'sha',
+    });
+    check('OR151: the round-2 CRITIC sees no prior verdict — not the codes, not the details',
+      !/EVALUATOR_MISMATCH/.test(seen.critic) && !/diffs against HEAD/.test(seen.critic)
+      && round2.payload.deliveredContext.sort().join()
+        === 'compiled-criteria,evidence-summary,mission-goal,project-commands');
+    check('OR152: and a prior verdict offered to it is refused outright',
+      (await critiqueOracle({
+        missionId: 'p/M-0001', projectId: 'p', goal: 'a goal', criteria: priorCriteria,
+        context: CTX, provider: recording('critic2', { findings: [] }) as any,
+        supervisor: sup, policy, baseSha: 'sha',
+        extraInputs: [{ kind: 'critic-verdict', label: 'ROUND 1', content: 'EVALUATOR_MISMATCH on C-0001' }],
+      })).valid === false);
+  }
+
+  // ---------------------------------------------------------------------
   section('oracle CLI: compile, confirm, evaluate, status');
   {
     const root = repo('cli');
@@ -697,7 +806,7 @@ export async function oracleSuite(): Promise<void> {
     const afterCompile = JSON.parse(said());
     check('OR113: status reports the oracle and that it is accepted',
       afterCompile.oracleVersion === 1 && afterCompile.oracleAccepted === true
-      && afterCompile.acceptedBy === 'consent-flag'
+      && afterCompile.acceptedBy === 'default-policy'
       && Array.isArray(afterCompile.oracle.criteria) && afterCompile.oracle.criteria.length > 0,
       JSON.stringify({ v: afterCompile.oracleVersion, a: afterCompile.oracleAccepted }));
 
@@ -732,6 +841,70 @@ export async function oracleSuite(): Promise<void> {
       confirmed.oracleAccepted === true && confirmed.acceptedBy === 'user-confirmed');
     check('OR119: and evaluation then runs',
       (await run('mission', 'evaluate', 'M-0002', '--mock')) === 0);
+
+    // ---- the stop, at the CLI ------------------------------------------
+    // A mission whose oracle carries findings, seeded through the registry so
+    // the CLI paths can be exercised without a scripted provider.
+    const store = new EventStore(path.join(root, '.zeus/state'));
+    const missions = new MissionRegistry({ events: store, projectId: 'cli' });
+    const stop = missions.create('a goal whose critique objects', 'sha');
+    const stopOracle: Oracle = { ...oracleOf([criterion({ criterionId: `${stop.missionId}/C-0001` })]),
+      missionId: stop.missionId, acceptanceMode: 'REQUIRED_CONSENT' };
+    missions.recordOracle(stop.missionId, stopOracle, 'sha256:x', { valid: true });
+    missions.recordCritique(stop.missionId, {
+      valid: true, modeOpinion: 'AUTO', promptHash: 'sha256:p', hashes: {}, violations: [],
+      criticProviderId: 'mock', reconciliation: { consistent: true, unsupportedClaims: [] },
+      findings: [
+        { code: 'EVALUATOR_MISMATCH', criterionId: `${stop.missionId}/C-0001`,
+          detail: 'The probe compares against HEAD, not the mission base. It passes trivially.' },
+        { code: 'BEYOND_GOAL', criterionId: `${stop.missionId}/C-0001`,
+          detail: 'A full project build is unrelated to this goal.' },
+      ],
+    });
+    const stopLabel = 'M-0003';
+
+    check('OR160: an unaccepted oracle with findings authorises no evaluation',
+      (await run('mission', 'evaluate', stopLabel, '--mock')) === 1);
+
+    // `confirm` renders the findings BEFORE accepting, and records them.
+    const confirmCode = await run('mission', 'confirm', stopLabel);
+    const confirmText = said();
+    check('OR161: confirm renders the findings before it accepts anything',
+      confirmCode === 0 && /EVALUATOR_MISMATCH/.test(confirmText) && /BEYOND_GOAL/.test(confirmText)
+      && /2 finding\(s\) from the independent critique/.test(confirmText),
+      confirmText.split('\n').slice(0, 4).join(' | '));
+    check('OR162: and the first line of each finding is shown, not just its code',
+      /passes trivially|compares against HEAD/.test(confirmText));
+    check('OR163: the acceptance says it happened DESPITE the findings',
+      /despite 2 finding\(s\)/.test(confirmText), confirmText.split('\n').pop() ?? '');
+
+    const acceptedRec = missions.mission(stop.missionId)!;
+    check('OR164: ORACLE_ACCEPTED carries the finding ids, so a report can show what was overridden',
+      acceptedRec.oracleAccepted && acceptedRec.acceptedBy === 'user-confirmed'
+      && acceptedRec.acceptedDespite.length === 2
+      && acceptedRec.acceptedDespite.some((f) => f.code === 'EVALUATOR_MISMATCH'),
+      JSON.stringify(acceptedRec.acceptedDespite));
+    check('OR165: "accepted with seven invisible findings" is now unrepresentable',
+      acceptedRec.acceptedBy !== ('consent-flag' as any));
+
+    // ---- the recompile bound -------------------------------------------
+    const bounded = missions.create('a goal recompiled too often', 'sha');
+    missions.recordOracle(bounded.missionId,
+      { ...oracleOf([criterion({ criterionId: `${bounded.missionId}/C-0001` })]),
+        missionId: bounded.missionId }, 'sha256:y', { valid: true });
+    for (let i = 0; i < 2; i += 1) {
+      missions.recordOracle(bounded.missionId,
+        { ...oracleOf([criterion({ criterionId: `${bounded.missionId}/C-0001` })]),
+          missionId: bounded.missionId, version: i + 2 }, 'sha256:y', { valid: true });
+      store.append({ taskId: bounded.missionId, type: 'ORACLE_COMPILED',
+        payload: { oracle: { missionId: bounded.missionId, version: i + 2, criteria: [] },
+          findingsForwarded: true } });
+    }
+    check('OR166: the log counts how many times the critique was sent back',
+      missions.mission(bounded.missionId)!.recompiles === 2);
+    const overBound = await run('mission', 'recompile', 'M-0004', '--mock');
+    check('OR167: recompiling past the bound is refused, and says why',
+      overBound === 1 && /limit is 2/.test(said()), said().trim().split('\n')[0]);
   }
 
   sup.shutdown('oracle suite finished');

@@ -64,6 +64,8 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
     acceptanceMode: null,
     oracleAccepted: false,
     acceptedBy: null,
+    acceptedDespite: [],
+    recompiles: 0,
     criterionOutcomes: {},
     evaluations: 0,
     evaluatorRevisions: 0,
@@ -128,7 +130,9 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
           // A newly compiled oracle is not an accepted one.
           rec.oracleAccepted = false;
           rec.acceptedBy = null;
+          rec.acceptedDespite = [];
         }
+        if (p.findingsForwarded === true) rec.recompiles += 1;
         break;
       }
       case 'ORACLE_ACCEPTED': {
@@ -136,8 +140,10 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
         if (mode) rec.acceptanceMode = mode;
         rec.oracleAccepted = true;
         const by = str(p.acceptedBy);
-        rec.acceptedBy = (['auto', 'user-confirmed', 'consent-flag'].includes(by)
-          ? by : 'auto') as MissionRecord['acceptedBy'];
+        rec.acceptedBy = (['auto', 'user-confirmed', 'default-policy'].includes(by)
+          ? by : 'default-policy') as MissionRecord['acceptedBy'];
+        rec.acceptedDespite = Array.isArray(p.acceptedDespite)
+          ? (p.acceptedDespite as Array<{ code: string; criterionId?: string }>) : [];
         if (rec.oracle) {
           rec.oracle = { ...(rec.oracle as Oracle),
             acceptanceMode: (rec.acceptanceMode ?? (rec.oracle as Oracle).acceptanceMode) as AcceptanceMode,
@@ -335,13 +341,28 @@ export class MissionRegistry {
    */
   acceptOracle(missionId: string, spec: {
     acceptanceMode: AcceptanceMode;
-    acceptedBy: 'auto' | 'user-confirmed' | 'consent-flag';
+    acceptedBy: 'auto' | 'user-confirmed' | 'default-policy';
     modeInputs: unknown; modeReasons: string[]; escalatedByCritic: boolean;
+    escalatedByFindings?: boolean;
+    /**
+     * The findings that stood when this was accepted. Recorded so a later
+     * report can say "accepted despite N findings, by human consent" instead
+     * of showing an approval with no visible cost.
+     */
+    acceptedDespite?: Array<{ code: string; criterionId?: string }>;
+    findingsFloor?: unknown;
   }): boolean {
     const rec = this.mission(missionId);
     if (!rec || !rec.oracle || rec.terminated) return false;
     this.append(missionId, 'ORACLE_ACCEPTED', { ...spec });
     return true;
+  }
+
+  /** A compile attempt that carried the previous critique back to the compiler. */
+  recordRecompile(missionId: string, spec: {
+    fromVersion: number; findingsForwarded: number; attempt: number; limit: number;
+  }): void {
+    this.append(missionId, 'ORACLE_RECOMPILED', { ...spec });
   }
 
   recordEvaluation(missionId: string, run: {

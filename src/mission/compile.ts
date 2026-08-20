@@ -23,11 +23,20 @@ import {
 import {
   AcceptanceMode, Criterion, ModeDecision, OracleValidation, ProjectContext,
   applyCriticMode, computeAcceptanceMode, makeCriterionId, oracleHash, validateOracle,
-  ACCEPTANCE_MODES,
+  ACCEPTANCE_MODES, CriticFindingRef, FindingsFloor, findingsFloor,
 } from './oracle';
 
 export interface CompileInput {
   missionId: string;
+  /**
+   * A previous attempt and what the critic said about it.
+   *
+   * The review→fix pattern, lifted to the oracle layer: the COMPILER is shown
+   * the findings so it can answer them. The CRITIC never is — a critic shown a
+   * previous verdict reviews the verdict instead of the contract, which is the
+   * contamination the payload policy exists to prevent.
+   */
+  prior?: { criteria: Criterion[]; findings: CriticFindingRef[]; version: number };
   projectId: string;
   goal: string;
   context: ProjectContext;
@@ -144,8 +153,19 @@ const COMPILE_HEADER = [
  * outage as NEEDS_RECONCILIATION rather than a verdict.
  */
 export async function compileOracle(input: CompileInput): Promise<CompileResult> {
+  const priorSections = input.prior ? [
+    `--- your previous attempt (oracle v${input.prior.version}) ---\n`
+      + JSON.stringify(input.prior.criteria, null, 1),
+    `--- an independent critic's findings on that attempt ---\n`
+      + input.prior.findings.map((f) => `${f.code} ${f.criterionId ?? ''}: ${f.detail ?? ''}`).join('\n'),
+    'Answer these findings. Remove criteria the critic showed to be beyond the goal,',
+    'repair evaluators it showed do not measure what they claim, and declare any',
+    'authority it says is undeclared. Produce the FULL criteria set again.',
+  ] : [];
+
   const prompt = [
     COMPILE_HEADER, '',
+    ...priorSections,
     `--- mission goal ---\n${input.goal}`,
     `--- declared commands ---\n${JSON.stringify(input.context.commands, null, 1)}`,
     `--- currently failing checks ---\n${(input.context.failingChecks ?? []).join('\n') || '(none)'}`,
@@ -313,14 +333,34 @@ export async function critiqueOracle(input: {
 
 export interface AcceptanceProposal {
   computed: ModeDecision;
+  floor: FindingsFloor;
   mode: AcceptanceMode;
   escalatedByCritic: boolean;
+  escalatedByFindings: boolean;
+  /** False whenever a human must look before this oracle can be accepted. */
+  autoAcceptable: boolean;
 }
 
-/** The mode, computed then possibly escalated. Never lowered. */
+/**
+ * The mode: computed, then raised by whichever of the critic's opinion and the
+ * critic's FINDINGS asks for more scrutiny. Never lowered by either.
+ *
+ * Three inputs, one direction. The findings input exists because a real
+ * critique returned seven findings and an opinion of AUTO, and the opinion was
+ * the only thing the mode listened to.
+ */
 export function proposeAcceptance(criteria: Criterion[], ctx: ProjectContext,
-  criticOpinion: AcceptanceMode | null): AcceptanceProposal {
+  criticOpinion: AcceptanceMode | null,
+  findings: CriticFindingRef[] = []): AcceptanceProposal {
   const computed = computeAcceptanceMode(criteria, ctx);
-  const applied = applyCriticMode(computed.mode, criticOpinion);
-  return { computed, mode: applied.mode, escalatedByCritic: applied.escalated };
+  const byOpinion = applyCriticMode(computed.mode, criticOpinion);
+  const floor = findingsFloor(findings);
+  const withFloor = applyCriticMode(byOpinion.mode, floor.floor);
+  return {
+    computed, floor, mode: withFloor.mode,
+    escalatedByCritic: byOpinion.escalated,
+    escalatedByFindings: withFloor.escalated,
+    // A findings-free critique keeps the old fast path; anything else stops.
+    autoAcceptable: floor.autoAcceptable,
+  };
 }

@@ -127,6 +127,9 @@ export const MISSION_EVENT_TYPES = [
   // change — without it, what the compiler proposed and why it was refused
   // was invisible without re-running the model.
   'ORACLE_COMPILE_REJECTED',
+  // A compile that carried the previous critique back to the compiler, so the
+  // fix loop is visible as its own step rather than as an unexplained v2.
+  'ORACLE_RECOMPILED',
 ] as const;
 
 export type MissionEventType = typeof MISSION_EVENT_TYPES[number];
@@ -276,8 +279,19 @@ export interface MissionRecord {
   oracleVersion: number | null;
   acceptanceMode: string | null;
   oracleAccepted: boolean;
-  /** How consent was given, when it was. */
-  acceptedBy: 'auto' | 'user-confirmed' | 'consent-flag' | null;
+  /**
+   * How consent was given, when it was.
+   *
+   * `default-policy` replaced a value once called `consent-flag`, which was a
+   * lie: no flag was passed and nobody consented — the ABSENCE of
+   * `--review-oracle` was being recorded as though it were approval, and an
+   * oracle with seven unaddressed findings was accepted under that name.
+   */
+  acceptedBy: 'auto' | 'user-confirmed' | 'default-policy' | null;
+  /** Findings that were on the record when the oracle was accepted. */
+  acceptedDespite: Array<{ code: string; criterionId?: string }>;
+  /** Compile attempts that carried the previous critique back to the compiler. */
+  recompiles: number;
   /** Latest outcome per criterion, by id. */
   criterionOutcomes: Record<string, 'PROVEN' | 'FAILED' | 'UNEVALUATED'>;
   evaluations: number;

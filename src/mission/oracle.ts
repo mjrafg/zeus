@@ -368,6 +368,90 @@ export function computeAcceptanceMode(criteria: Criterion[], ctx: ProjectContext
   return { mode: 'OPTIONAL_CONFIRMATION', inputs, reasons };
 }
 
+/* ------------------------------------------------------------------------ *
+ * Findings → consent floor
+ * ------------------------------------------------------------------------ */
+
+export type FindingFamily = 'evaluator-integrity' | 'scope-authority' | 'other';
+
+/**
+ * Which family a critic finding belongs to.
+ *
+ * Matched on SHAPE rather than an enumerated list, because the critic invents
+ * codes: a real critique produced `EVALUATOR_DOES_NOT_PROVE_STATEMENT`,
+ * `RUBRIC_TOO_WEAK` and `AI_JUDGED_MECHANICALLY_PROVABLE`, none of which were
+ * in any list. A closed list would have silently sorted every one of them into
+ * "other". Anything unrecognised still counts as a finding, so it still stops
+ * the default acceptance — an unknown objection is not a resolved one.
+ */
+export function findingFamily(code: string): FindingFamily {
+  if (/EVALUATOR|RUBRIC|MECHANICALLY_PROVABLE/i.test(code)) return 'evaluator-integrity';
+  if (/BEYOND_GOAL|SCOPE|AUTHORITY|MISSING_CRITERION|WRONG_TYPE/i.test(code)) return 'scope-authority';
+  return 'other';
+}
+
+export interface CriticFindingRef { code: string; criterionId?: string; detail?: string }
+
+export interface FindingsFloor {
+  floor: AcceptanceMode;
+  findingCount: number;
+  families: Record<FindingFamily, number>;
+  /** The findings that forced the floor, so the decision can be re-derived. */
+  forcedBy: Array<{ code: string; criterionId?: string }>;
+  reasons: string[];
+  /**
+   * Whether acceptance may proceed without asking anyone. False whenever there
+   * is ANY finding: the default path exists for a critique that objected to
+   * nothing, and seven objections is not nothing.
+   */
+  autoAcceptable: boolean;
+}
+
+/**
+ * The consent floor the critic's FINDINGS impose, independently of its opinion.
+ *
+ * This exists because of a real run. The critic produced seven findings —
+ * including one saying an evaluator does not measure what it claims — and also
+ * returned `modeOpinion: "AUTO"`. The escalate-only rule worked perfectly and
+ * did nothing, because the opinion was the ONLY thing feeding the mode. A
+ * critique that cannot affect the outcome is decoration, so the findings now
+ * feed it directly and the opinion is no longer load-bearing.
+ *
+ * Floors only ever raise. Nothing here can lower the independently computed
+ * mode.
+ */
+export function findingsFloor(findings: CriticFindingRef[]): FindingsFloor {
+  const list = Array.isArray(findings) ? findings.filter((f) => f && typeof f.code === 'string') : [];
+  const families: Record<FindingFamily, number> = { 'evaluator-integrity': 0, 'scope-authority': 0, other: 0 };
+  for (const f of list) families[findingFamily(f.code)] += 1;
+
+  const reasons: string[] = [];
+  let floor: AcceptanceMode = 'AUTO';
+  const forcedBy: Array<{ code: string; criterionId?: string }> = [];
+
+  if (families['evaluator-integrity'] > 0) {
+    // An oracle whose measuring instruments are contested may not be accepted
+    // by default. If the ruler is disputed, nothing measured with it settles
+    // anything.
+    floor = 'REQUIRED_CONSENT';
+    for (const f of list) {
+      if (findingFamily(f.code) === 'evaluator-integrity') forcedBy.push({ code: f.code, criterionId: f.criterionId });
+    }
+    reasons.push(`${families['evaluator-integrity']} finding(s) contest an evaluator's validity`);
+  } else if (list.length > 0) {
+    floor = 'OPTIONAL_CONFIRMATION';
+    for (const f of list) forcedBy.push({ code: f.code, criterionId: f.criterionId });
+    reasons.push(`${list.length} finding(s) from the independent critique`);
+  }
+
+  return {
+    floor, findingCount: list.length, families, forcedBy, reasons,
+    // ANY finding means a human looks. The fast path is for a critique that
+    // objected to nothing.
+    autoAcceptable: list.length === 0,
+  };
+}
+
 /**
  * The critic's opinion, applied.
  *

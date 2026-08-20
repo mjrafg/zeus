@@ -112,7 +112,7 @@ that were missing this time. First target for Cycle 2.
 
 Recorded because it was demonstrated, not theorised. A branch-inventory task was
 declared read-only: no merge, rebase, push, commit, branch deletion. During it,
-`git fetch /srv/zeus main:refs/tmp-legacy` was run to establish whether the
+`git fetch <legacy-checkout> main:refs/tmp-legacy` was run to establish whether the
 legacy repository shared history with this one. That command violated none of
 the named prohibitions and was nevertheless a write: it copied 14 commits into
 this repository's object store and created two tags (`extracted-baseline`,

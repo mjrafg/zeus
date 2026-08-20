@@ -19,9 +19,9 @@ was performed. Two side effects of the inspection itself are disclosed in §7.
 
 There are **no leftover task worktrees**. `.git/worktrees` does not exist,
 `.zeus/worktrees` does not exist, and `git worktree list` shows only the main
-checkout. No `TASK-V2-*` worktree exists in this repository — that identifier
-belongs to the earlier accounting project, which is a different repository and
-was not inspected.
+checkout. No leftover task worktree of any kind exists here; the cancelled-task
+identifier named in the brief belongs to an earlier, unrelated project, which is
+a different repository and was not inspected.
 
 No detached-HEAD checkouts appear anywhere in the reflog.
 
@@ -161,12 +161,13 @@ Phase 1 was to be read-only. Two things were written, both by me, both undone:
 1. **`git fsck --lost-found` wrote `.git/lost-found/`** (5 files). Removed.
 2. **A comparison fetch imported the legacy repository's objects and tags.** To
    establish whether `mjrafg/zeus-legacy` shares history with this repository I
-   ran `git fetch /srv/zeus main:refs/tmp-legacy`. The temporary ref was
+   ran `git fetch <legacy-checkout> main:refs/tmp-legacy`. The temporary ref was
    deleted, but the fetch also brought in `extracted-baseline` and
    `v0.0.0-extracted` — two tags this repository never had. **I deleted both
    local tags to restore the documented starting state.** They were never
    pushed (`git ls-remote --tags origin` returns nothing for either), and they
-   remain intact in `/srv/zeus` and on `mjrafg/zeus-legacy`, so nothing is lost.
+   remain intact in the legacy checkout and on `mjrafg/zeus-legacy`, so nothing
+   is lost.
 
 The 14 legacy commits fetched are now unreachable objects in this repository's
 object store. They are inert and invisible to every branch, but they are there
@@ -196,7 +197,7 @@ commits' individual attribution either way, because nothing is being squashed.
 
 ### The legacy repository is not integrable
 
-`/srv/zeus` → `mjrafg/zeus-legacy`, private, `main` @ `34cd441`, 14 commits,
+The legacy checkout → `mjrafg/zeus-legacy`, private, `main` @ `34cd441`, 14 commits,
 2 tags, one untracked `package-lock.json`, no stashes, no unreachable work.
 
 Its root commit is `67be99d`; this repository's root is `bd858c6`. **There is no

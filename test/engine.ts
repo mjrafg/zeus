@@ -547,9 +547,19 @@ async function noBypassSuite(): Promise<void> {
     const hits = [...src.matchAll(/\b(spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\s*\(/g)].map((m) => m[1]);
     // orchestrator uses execFileSync ONLY for git plumbing, which is ours, not
     // the project's code, and providers use it to probe for a binary.
-    const allowed = ['orchestrator.ts', 'providers.ts'].includes(f);
+    //
+    // gitro.ts is the same category and the narrower one: it is the READ-ONLY
+    // git path, and it refuses anything outside its allowlist before spawning.
+    // The supervisor exists to bound untrusted project code; a `git rev-parse`
+    // Zeus itself issued against its own repository is neither untrusted nor
+    // the project's.
+    const allowed = ['orchestrator.ts', 'providers.ts', 'gitro.ts'].includes(f);
     if (hits.length && !allowed) offenders.push(`${f}: ${hits.join(',')}`);
   }
+  const gitro = fs.readFileSync(path.join(engineDir, 'gitro.ts'), 'utf8');
+  check('N1b: the read-only git path refuses before it spawns',
+    gitro.indexOf('inspectReadOnlyGit(args)') < gitro.indexOf('exec(\'git\''),
+    'the allowlist check must precede the spawn in readOnlyGit()');
   check('N1: no engine module spawns processes outside the supervisor',
     offenders.length === 0, offenders.join(' | '));
   const cliSrc = fs.readFileSync(path.resolve(__dirname, '../src/cli.ts'), 'utf8');

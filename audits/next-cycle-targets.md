@@ -9,8 +9,8 @@ secret-redaction regression that reached `origin/main` and the probe defect that
 made it visible only downstream of the push. Findings arriving between cycles are
 recorded here as they happen rather than held for the next Lane G pass.
 
-Target 9 is CLOSED as of 2026-08-20; its entry is kept in place with the
-evidence rather than deleted, so the reasoning survives the fix.
+Targets 8 and 9 are CLOSED as of 2026-08-20; their entries are kept in place
+with the evidence rather than deleted, so the reasoning survives the fix.
 
 `zeus self-audit` in a future cycle should read this file to bias depth toward
 the areas below, and Lane G regenerates it at the end of every cycle.
@@ -84,7 +84,7 @@ Cycle 2 should add a meta-probe: every probe must touch the product's own
 exported API, and a probe whose observed output does not change when the
 relevant module is stubbed is not testing that module.
 
-## 8 — a read-only mode that is enforced rather than promised  · MEDIUM
+## 8 — a read-only mode that is enforced rather than promised  · CLOSED
 
 From finding G-U2. A phase declared read-only was mutated by a command that
 broke none of the stated prohibitions: `git fetch` into a temporary ref, which
@@ -98,6 +98,22 @@ probing first: whether any existing Zeus code path performs a repository write
 while presenting itself as inspection. `zeus revalidate` is the obvious
 candidate, since it already rebases a worktree as part of answering a question
 (finding F-F5 in this cycle).
+
+**CLOSED 2026-08-20**, and built the other way round from the sketch above.
+Listing the object-writing invocations would have been a denylist, and git
+gains subcommands: such a list is wrong every time it does, silently. What
+shipped is an **allowlist** in `src/engine/gitro.ts` — refuse before spawning
+unless the FORM is known to be read-only — with `GIT_WRITE_REFUSED_READONLY`
+and the attempted verb in the refusal.
+
+The probe the entry asked for was worth doing and answered yes: `revalidate`
+did read the project repository through the same callable it used to rebase a
+worktree. Those are now two different callables, so the inspection half cannot
+reach a write even by mistake. Task worktree mutation stays unconstrained,
+which is the point — read-only is a property of a CONTEXT, not of git.
+
+Held by `RO1`–`RO29` in `test/gitro.ts`; see `docs/AUDIT.md` for which ones
+carry which part of the closure.
 
 ## 9 — redaction is per-path, so any new event path can silently lose it  · CLOSED
 

@@ -86,6 +86,38 @@ type that did not exist when the test was written — and by probe `C-C7`, which
 derives the event-type inventory from the candidate's own source so the release
 gate fails when a new type leaks.
 
+**G-U2 a read-only phase that was not** (*found by re-checking by hand, after
+the fact*) → a phase Zeus declared read-only mutated the repository anyway:
+`git fetch` into a temporary ref imported fourteen commits and two tags, and
+`git fsck --lost-found` wrote into `.git/`. Neither broke a stated prohibition,
+because the prohibitions were a list of forbidden things and these were not on
+it.
+
+Read-only is now an execution context with a strict **allowlist**, not a
+description. `src/engine/gitro.ts` refuses anything not known to be read-only
+**before spawning**, with the stable code `GIT_WRITE_REFUSED_READONLY` and the
+attempted verb. A denylist was rejected deliberately: git grows subcommands,
+and a denylist is wrong every time it does — silently. The allowlist is on the
+FORM rather than the first word, because several permitted verbs become writes
+with one option: `branch` without `--list` creates refs, `log --output=FILE`
+and `diff --output=FILE` write files, `merge-tree --write-tree` writes objects,
+and `-c`, `--ext-diff`, `--textconv`, `--git-dir` and `--work-tree` either run
+programs or retarget the repository.
+
+Applied to the inspection paths — the self-audit's reads of the repository
+under audit, `revalidate`'s reads of the project, and the engine's read of
+project HEAD. Task worktree mutation is deliberately NOT routed through it:
+that is where work is supposed to happen.
+
+Held by `RO1`–`RO29` in `test/gitro.ts`. The ones that matter most:
+`RO6`/`RO7` (unknown and future subcommands refused by default — the property a
+denylist cannot have), `RO8`–`RO13` (fetch refused, named, coded, and reported
+to the caller), `RO9` (refused *before* a process is started, proved with a
+spawn seam that records every attempt), and `RO14`/`RO17` — refs, HEAD, object
+count and `.git` contents compared before and after six real mutation attempts
+against a live repository, because a refusal that fires while the write still
+lands is the failure worth fearing.
+
 **P0-2 shell and filesystem confinement** → policy evaluated before every
 spawn: symlink-aware containment, traversal and absolute-path refusal,
 destructive/fork-bomb/persistence/env-poisoning detection, environment

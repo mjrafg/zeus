@@ -17,6 +17,7 @@ import { ProjectLock } from './lock';
 import { ProcessSupervisor, ExecutionResult, killRecorded } from './exec';
 import { ExecutionPolicy, defaultPolicy } from './policy';
 import { prepareDependencies, depsCacheRoot, PrepMethod } from './dependencies';
+import { readOnlyGit } from './gitro';
 import { Provider, AgentResponse, Role } from './providers';
 import { ProjectConfig } from '../config';
 import { adapterById } from '../adapters';
@@ -262,11 +263,14 @@ export class Engine {
     return makeTaskId(this.projectId, n);
   }
 
+  /**
+   * Reads the project's HEAD. Inspection, so it goes through the read-only
+   * boundary — the project repository is not this engine's to modify; only the
+   * task worktree is.
+   */
   private gitSha(): string {
-    try {
-      return require('child_process')
-        .execFileSync('git', ['-C', this.opts.projectRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 15_000 }).trim();
-    } catch { return 'unknown'; }
+    try { return readOnlyGit(this.opts.projectRoot, { timeoutMs: 15_000 })(['rev-parse', 'HEAD']); }
+    catch { return 'unknown'; }
   }
 
   createTask(description: string): TaskRecord {

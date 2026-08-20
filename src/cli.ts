@@ -20,6 +20,7 @@ import { probe, summarize, Capability } from './doctor';
 import { describeDependencyState, cleanDependencyCache, depsCacheRoot } from './engine/dependencies';
 import { Engine, TERMINAL } from './engine/orchestrator';
 import { ProcessSupervisor } from './engine/exec';
+import { readOnlyGit } from './engine/gitro';
 import { deriveBudgets } from './engine/budget';
 import { report as isolationReport } from './engine/isolation';
 import { claudeProvider, codexProvider, mockProvider, Provider } from './engine/providers';
@@ -734,7 +735,17 @@ function cmdRevalidate(argv: string[]): number {
       });
     } catch (e: any) { return `${String(e?.stdout ?? '')}${String(e?.stderr ?? '')}`; }
   };
-  const inProject = git(ctx.root);
+  // The project repository is being asked a question here, not changed: the
+  // integration target is inspected, and only the TASK's own worktree is
+  // rebased. Finding G-U2 was a read-only phase that mutated a repository, so
+  // the two are now different callables rather than the same one used
+  // carefully.
+  const readOnly = readOnlyGit(ctx.root, {
+    onRefusal: (r) => err(`${C.r}✗${C.x} ${r.message}`),
+  });
+  const inProject = (args: string[]): string => {
+    try { return readOnly(args); } catch (e: any) { return `${e?.message ?? e}`; }
+  };
   const inWorktree = git(rec.worktree);
 
   const access: GitAccess = {

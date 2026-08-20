@@ -38,12 +38,22 @@ export function redactionSuite(): void {
       `${types.length} types: ${types.map((t) => t.type).join(', ')}`);
     // A scan that reads prose is not reading the code: the first version of
     // this inventory picked up the example in its own doc comment.
+    //
+    // Two shapes are legitimate, because producers write events two ways: at a
+    // call site (`type: 'X'`) and in a central registry (`*_EVENT_TYPES`),
+    // which is how Mission Mode declares a vocabulary that is part of a
+    // contract. Both are code. A comment is still neither.
+    const fromCode = types.filter((t) => {
+      const text = fs.readFileSync(path.join(REPO, t.file), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+      const atCallSite = new RegExp(`type:\\s*'${t.type}'`).test(text);
+      const inRegistry = /_EVENT_TYPES\s*(?::[^=]*)?=\s*\[[\s\S]*?\]/.test(text)
+        && new RegExp(`'${t.type}'`).test(text);
+      return atCallSite || inRegistry;
+    });
     check('RS1b: every discovered type comes from a real producer, not a comment',
-      types.every((t) => {
-        const text = fs.readFileSync(path.join(REPO, t.file), 'utf8')
-          .replace(/\/\*[\s\S]*?\*\//g, '');
-        return new RegExp(`type:\\s*'${t.type}'`).test(text);
-      }), types.map((t) => `${t.type}@${t.file}`).filter((x) => /SOMETHING/.test(x)).join(','));
+      fromCode.length === types.length,
+      types.filter((t) => !fromCode.includes(t)).map((t) => `${t.type}@${t.file}`).join(', '));
 
     const store = new EventStore(path.join(TMP, 'all-types'));
     const taskId = 'proj/T-0001';

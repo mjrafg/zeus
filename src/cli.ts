@@ -21,6 +21,9 @@ import { describeDependencyState, cleanDependencyCache, depsCacheRoot } from './
 import { Engine, TERMINAL } from './engine/orchestrator';
 import { ProcessSupervisor } from './engine/exec';
 import { readOnlyGit } from './engine/gitro';
+import { MissionRegistry } from './mission/registry';
+import { ScopeMismatchError, localLabel as missionLabel } from './mission/types';
+import { reconstructRatchet, ratchetRef, readRatchet } from './mission/ratchet';
 import { deriveBudgets } from './engine/budget';
 import { report as isolationReport } from './engine/isolation';
 import { claudeProvider, codexProvider, mockProvider, Provider } from './engine/providers';
@@ -75,6 +78,10 @@ ${C.b}Usage${C.x}
   zeus self-audit [--lane A-F] [--cycle-id <id>]  audit this checkout adversarially, on a disposable copy
   zeus self-check                             gate for Zeus's own commits: boundary checks + the non-service suite
   zeus clean --deps                           remove this project's prepared dependency caches
+  zeus mission create "<goal>"                 record a mission goal (no planning, no model)
+  zeus mission status <id> [--json]           reconstructed mission state
+  zeus mission list                           missions in this project
+  zeus mission cancel <id> [--reason "..."]   cancel a mission and its live tasks
   zeus version
   zeus help
 
@@ -696,6 +703,127 @@ function cmdClean(argv: string[]): number {
   return 0;
 }
 
+/**
+ * `zeus mission` — stage 1 of Mission Mode.
+ *
+ * Deterministic throughout. `create` records a goal and nothing else: it does
+ * not plan, and it does not call a model. A mission at this stage is an
+ * identity with a log, which is exactly as much as the foundation needs to be
+ * worth building on.
+ */
+async function cmdMission(argv: string[]): Promise<number> {
+  const ctx = requireProject();
+  if (!ctx) return 2;
+  const [sub, ...rest] = argv;
+  const json = rest.includes('--json') || argv.includes('--json');
+  const engine = engineFor(ctx.root, ctx.cfg);
+  const missions = new MissionRegistry({
+    events: engine.events, projectId: engine.projectId, stateRoot: engine.stateRoot,
+  });
+
+  const resolve = (raw: string): string => (raw.includes('/') ? raw : `${engine.projectId}/${raw}`);
+  const guard = <T>(fn: () => T): T | null => {
+    try { return fn(); } catch (e: any) {
+      if (e instanceof ScopeMismatchError) { err(`${C.r}✗${C.x} ${e.message}`); return null; }
+      throw e;
+    }
+  };
+
+  switch (sub) {
+    case 'create': {
+      const goal = rest.find((a) => !a.startsWith('--'));
+      if (!goal) { err('usage: zeus mission create "<goal>"'); return 2; }
+      const head = (() => {
+        try { return readOnlyGit(ctx.root, { timeoutMs: 15_000 })(['rev-parse', 'HEAD']); }
+        catch { return 'unknown'; }
+      })();
+      const rec = missions.create(goal, head);
+      if (json) { out(JSON.stringify(rec, null, 1)); return 0; }
+      out(`${C.g}✓${C.x} ${C.b}${rec.missionId}${C.x}`);
+      out(`  goal      ${rec.goal}`);
+      out(`  base      ${rec.baseSha.slice(0, 12)}`);
+      out(`  ${C.dim}no plan yet — mission create records a goal; planning arrives with the execution loop${C.x}`);
+      return 0;
+    }
+
+    case 'list': {
+      const ids = missions.list();
+      const recs = ids.map((id) => missions.mission(id)).filter((r): r is NonNullable<typeof r> => !!r);
+      if (json) { out(JSON.stringify(recs, null, 1)); return 0; }
+      if (!recs.length) { out(`${C.dim}no missions in this project${C.x}`); return 0; }
+      for (const r of recs) {
+        const state = r.terminated ? `${r.terminationReason} / ${r.achievement}` : 'ACTIVE';
+        out(`  ${C.b}${missionLabel(r.missionId).padEnd(8)}${C.x} ${state.padEnd(28)} ${r.goal.slice(0, 60)}`);
+      }
+      return 0;
+    }
+
+    case 'status': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission status <id> [--json]'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      const ratchet = readRatchet(ctx.root, id);
+      if (json) { out(JSON.stringify({ ...rec, ratchetRef: ratchetRef(id), ratchetRefSha: ratchet }, null, 1)); return 0; }
+      out(`${C.b}${rec.missionId}${C.x} ${rec.terminated ? `${C.dim}(terminated)${C.x}` : ''}`);
+      out(`  goal            ${rec.goal}`);
+      out(`  created         ${rec.createdAt}  ${C.dim}base ${rec.baseSha.slice(0, 12)}${C.x}`);
+      out(`  events          ${rec.events}`);
+      out(`  plan            ${rec.planVersion === null ? `${C.dim}none${C.x}` : `v${rec.planVersion} (${rec.plan?.nodes.length ?? 0} node(s))`}`);
+      if (rec.planInvalidations.length) out(`  invalidations   ${rec.planInvalidations.length}`);
+      out(`  spawned tasks   ${rec.spawned.length}`);
+      for (const t of rec.spawned) {
+        out(`    ${missionLabel(t.taskId).padEnd(8)} ${(t.outcome ?? 'RUNNING').padEnd(22)} ${C.dim}node ${t.nodeId || '-'}${C.x}`);
+      }
+      out(`  checkpoints     ${rec.checkpoints.length}`);
+      out(`  ratchet         ${rec.ratchetSha ? rec.ratchetSha.slice(0, 12) : `${C.dim}not advanced${C.x}`}`
+        + `  ${C.dim}${ratchetRef(id)}${C.x}`);
+      if (rec.ratchetSha && ratchet !== rec.ratchetSha) {
+        // The log is the truth; the ref is a pointer that can be lost.
+        out(`  ${C.y}!${C.x} the ref does not match the log (${ratchet ?? 'absent'}); `
+          + 'it can be rebuilt from the events');
+      }
+      out(`  achievement     ${rec.achievement}`);
+      out(`  termination     ${rec.terminationReason ?? `${C.dim}—${C.x}`}`);
+      if (rec.escalations) out(`  escalations     ${rec.escalations}`);
+      return 0;
+    }
+
+    case 'reconstruct-ratchet': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission reconstruct-ratchet <id>'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      const r = reconstructRatchet(ctx.root, rec);
+      if (json) { out(JSON.stringify(r, null, 1)); return 0; }
+      out(`${C.g}✓${C.x} ${r.ref} ${r.action}${r.after ? ` → ${r.after.slice(0, 12)}` : ''}`);
+      return 0;
+    }
+
+    case 'cancel': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission cancel <id> [--reason "..."]'); return 2; }
+      const id = resolve(raw);
+      const reasonIdx = rest.indexOf('--reason');
+      const reason = reasonIdx >= 0 ? (rest[reasonIdx + 1] ?? 'cancelled') : 'cancelled by operator';
+      const r = guard(() => missions.cancel(id, reason));
+      if (r === null) return 2;
+      if (json) { out(JSON.stringify(r, null, 1)); return r.cancelled ? 0 : 1; }
+      if (!r.cancelled) { err(`${C.y}!${C.x} ${id} is unknown or already terminated`); return 1; }
+      out(`${C.g}✓${C.x} ${id} CANCELLED — ${r.tasks.length} task(s) affected, ${r.killed} process tree(s) killed`);
+      return 0;
+    }
+
+    default:
+      err('usage: zeus mission <create|status|list|cancel|reconstruct-ratchet>');
+      return 2;
+  }
+}
+
 function cmdSelfCheck(argv: string[]): number {
   const root = findProjectRoot() ?? process.cwd();
   const json = argv.includes('--json');
@@ -858,6 +986,7 @@ export async function main(argv: string[]): Promise<number> {
     case 'self-audit': return cmdSelfAudit(rest);
     case 'self-check': return cmdSelfCheck(rest);
     case 'clean': return cmdClean(rest);
+    case 'mission': return cmdMission(rest);
     default: err(`unknown command "${cmd}"`); usage(); return 2;
   }
 }

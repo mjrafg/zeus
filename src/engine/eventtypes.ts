@@ -21,6 +21,24 @@ import * as path from 'path';
 const TYPE_LITERAL = /\btype:\s*'([A-Z][A-Z0-9_]*)'/g;
 
 /**
+ * The second shape: a central registry of event names.
+ *
+ * Mission Mode declares its event vocabulary in one place —
+ * `MISSION_EVENT_TYPES` — because the names are part of a contract and a name
+ * invented at a call site is a name nobody can search for. Scanning only for
+ * `type: 'X'` would have missed every one of them, and the redaction
+ * coverage probe would have gone on reporting "complete" while a whole family
+ * of event types went unexercised. That is probe staleness, so the scanner
+ * learns the shape rather than the mission code bending to the scanner.
+ *
+ * The suffix is load-bearing: `RESERVED_MISSION_EVENT_NAMES` deliberately does
+ * NOT match, because names reserved for later stages are not events anyone
+ * emits, and an inventory should describe what exists.
+ */
+const TYPE_REGISTRY = /\b[A-Z][A-Z0-9_]*_EVENT_TYPES\s*(?::[^=]*)?=\s*\[([\s\S]*?)\]/g;
+const REGISTRY_MEMBER = /'([A-Z][A-Z0-9_]*)'/g;
+
+/**
  * Block comments are removed before scanning.
  *
  * Found by running this against itself: the doc comment that ILLUSTRATED the
@@ -59,6 +77,11 @@ export function discoverEventTypes(repoRoot: string,
       const text = fs.readFileSync(file, 'utf8').replace(BLOCK_COMMENT, '');
       for (const m of text.matchAll(TYPE_LITERAL)) {
         if (!found.has(m[1])) found.set(m[1], path.relative(repoRoot, file));
+      }
+      for (const reg of text.matchAll(TYPE_REGISTRY)) {
+        for (const member of reg[1].matchAll(REGISTRY_MEMBER)) {
+          if (!found.has(member[1])) found.set(member[1], path.relative(repoRoot, file));
+        }
       }
     }
   }

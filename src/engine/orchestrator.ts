@@ -18,6 +18,7 @@ import { ProcessSupervisor, ExecutionResult, killRecorded } from './exec';
 import { ExecutionPolicy, defaultPolicy } from './policy';
 import { prepareDependencies, depsCacheRoot, PrepMethod } from './dependencies';
 import { readOnlyGit } from './gitro';
+import { isMissionId, requireScope, ScopeMismatchError } from '../mission/types';
 import { Provider, AgentResponse, Role } from './providers';
 import { ProjectConfig } from '../config';
 import { adapterById } from '../adapters';
@@ -273,7 +274,14 @@ export class Engine {
     catch { return 'unknown'; }
   }
 
-  createTask(description: string): TaskRecord {
+  /**
+   * Creates a task.
+   *
+   * `missionId` is present ONLY for a task a mission spawned. A standalone
+   * task's TASK_CREATED payload is byte-for-byte what it always was — this
+   * stage adds a field to missions' tasks, not to everyone's.
+   */
+  createTask(description: string, opts: { missionId?: string } = {}): TaskRecord {
     const taskId = this.nextTaskId();
     const worktree = path.resolve(this.opts.projectRoot,
       this.opts.config.paths?.worktrees ?? '.zeus/worktrees', taskIdToDir(taskId));
@@ -282,15 +290,22 @@ export class Engine {
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       worktree, baseSha: this.gitSha(), cancelRequested: false,
     };
+    if (opts.missionId) requireScope('MISSION', opts.missionId);
     this.record({ taskId, type: 'TASK_CREATED', payload: {
       description, worktree, baseSha: rec.baseSha, projectId: this.projectId,
       adapter: this.opts.config.project?.adapter,
+      ...(opts.missionId ? { missionId: opts.missionId } : {}),
     } });
     return rec;
   }
 
   /** The task's current record, derived from its log. Never stored twice. */
   task(taskId: string): TaskRecord | null {
+    // A mission id is not a task id, and the two are strings of the same
+    // shape. Returning null here would be indistinguishable from "no such
+    // task" and would let a caller quietly operate on the wrong domain
+    // object; the failure a caller needs is the loud one.
+    if (isMissionId(taskId)) throw new ScopeMismatchError('TASK', taskId);
     const evs = this.spans.sync('state.read-log', 'PERSISTENCE', () => this.events.read(taskId));
     if (!evs.length) return null;
     const created = evs.find((e) => e.type === 'TASK_CREATED');

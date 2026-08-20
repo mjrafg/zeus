@@ -28,6 +28,7 @@ import { dependencySuite } from './dependencies';
 import { cgroupSuite } from './cgroup';
 import { redactionSuite } from './redaction';
 import { gitReadOnlySuite } from './gitro';
+import { missionSuite } from './mission';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-test-'));
 const mk = (name: string, files: Record<string, string>): string => {
@@ -340,6 +341,7 @@ function identitySuite(): void {
   await cgroupSuite();
   redactionSuite();
   gitReadOnlySuite();
+  await missionSuite();
   identitySuite();
   const t = totals();
   console.log(`\nzeus tests: ${t.passed} passed, ${t.failed} failed`);

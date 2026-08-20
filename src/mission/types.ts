@@ -67,6 +67,11 @@ export function localLabel(id: string): string {
   return id.includes('/') ? id.slice(id.lastIndexOf('/') + 1) : id;
 }
 
+/** The project half of an id. `proj/M-0007` → `proj`. */
+export function projectOf(id: string): string {
+  return id.includes('/') ? id.slice(0, id.lastIndexOf('/')) : '';
+}
+
 /* ------------------------------------------------------------------------ *
  * Event vocabulary
  * ------------------------------------------------------------------------ */

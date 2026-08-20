@@ -9,9 +9,10 @@
  *     happens to point somewhere. Anyone can delete, move or forge the ref;
  *     none of that changes what the mission proved, and `reconstructRatchet`
  *     puts it back from the log.
- *   * **It lives under `refs/zeus/`.** Not `refs/heads/`, so it can never
- *     collide with a user's branch, never appear in `git branch`, and never be
- *     pushed by a plain `git push`.
+ *   * **It lives under `refs/zeus/<project>/`.** Not `refs/heads/`, so it can
+ *     never collide with a user's branch, never appear in `git branch`, and
+ *     never be pushed by a plain `git push` — and it is scoped by project, so
+ *     two Zeus projects in one repository cannot share a ratchet.
  *
  * Writing a ref is a repository WRITE. It therefore goes through ordinary git,
  * and the read-only context from finding G-U2 refuses it — `update-ref` is not
@@ -20,12 +21,40 @@
  */
 
 import { execFileSync } from 'child_process';
-import { MissionRecord, localLabel, requireScope } from './types';
+import { sha256 } from '../engine/events';
+import { MissionRecord, localLabel, projectOf, requireScope } from './types';
 
-/** `proj/M-0007` → `refs/zeus/mission/M-0007/green`. */
+/**
+ * A project id that is legal inside a ref path.
+ *
+ * Ref names are stricter than filenames, so the directory sanitisation cannot
+ * be reused: `EventStore.dirName` maps unsafe characters to `~`, and `~` is
+ * one of the characters git forbids in a ref. Reusing it would have produced
+ * refs git refuses to create.
+ *
+ * Injective on purpose. Collapsing unsafe characters means two different
+ * project ids can reduce to the same string, and two projects sharing one
+ * ratchet is the exact failure this scoping exists to prevent — so when
+ * sanitisation changes anything, a short digest of the ORIGINAL id is
+ * appended. Identical input gives an identical ref; different input does not.
+ */
+export function refSafeProject(projectId: string): string {
+  const cleaned = projectId.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  const safe = cleaned || 'project';
+  return safe === projectId ? safe : `${safe}-${sha256(projectId).slice(0, 8)}`;
+}
+
+/**
+ * `proj/M-0007` → `refs/zeus/mission/proj/M-0007/green`.
+ *
+ * Project-scoped, because the mission id is. A ref named only by the local
+ * label would be a second truth-bearing name with a narrower scope than the
+ * id it stands for, and two Zeus projects in one repository would silently
+ * share a ratchet.
+ */
 export function ratchetRef(missionId: string): string {
   requireScope('MISSION', missionId);
-  return `refs/zeus/mission/${localLabel(missionId)}/green`;
+  return `refs/zeus/mission/${refSafeProject(projectOf(missionId))}/${localLabel(missionId)}/green`;
 }
 
 function git(repoRoot: string, args: string[]): string {

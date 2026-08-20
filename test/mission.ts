@@ -27,7 +27,9 @@ import {
 } from '../src/mission/types';
 import { MissionRegistry, reconstructFromEvents } from '../src/mission/registry';
 import { validatePlan, PlanFindingCode, globsOverlap } from '../src/mission/plan';
-import { ratchetRef, advanceRatchet, readRatchet, deleteRatchet, reconstructRatchet } from '../src/mission/ratchet';
+import {
+  ratchetRef, advanceRatchet, readRatchet, deleteRatchet, reconstructRatchet, refSafeProject,
+} from '../src/mission/ratchet';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-mission-'));
 const REPO = path.resolve(__dirname, '..');
@@ -51,6 +53,7 @@ function node(id: string, over: Partial<TaskNode> = {}): TaskNode {
     estimatedTier: 'FAST', estimatedCost: 1, risk: 'LOW', ...over,
   };
 }
+const localLabelOf = (id: string): string => id.slice(id.lastIndexOf('/') + 1);
 const graph = (nodes: TaskNode[], version = 1): PlanGraph => ({ version, nodes });
 const codes = (g: PlanGraph): PlanFindingCode[] => validatePlan(g).findings.map((f) => f.code);
 
@@ -433,9 +436,31 @@ export async function missionSuite(): Promise<void> {
     const m = missions.create('ratchet me', 'sha');
     const head = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 
-    check('MI60: the ref is namespaced under zeus/, so it cannot be a user branch',
-      ratchetRef(m.missionId) === `refs/zeus/mission/${'M-0001'}/green`
+    check('MI60: the ref is namespaced under zeus/ AND scoped by project',
+      ratchetRef(m.missionId) === 'refs/zeus/mission/p/M-0001/green'
       && !ratchetRef(m.missionId).startsWith('refs/heads/'), ratchetRef(m.missionId));
+    // git's ref-name rules are stricter than the filesystem's, so the ref name
+    // is checked by git rather than by our reading of the rules.
+    const legal = (ref: string): boolean => {
+      try {
+        execFileSync('git', ['check-ref-format', ref], { stdio: 'ignore' });
+        return true;
+      } catch { return false; }
+    };
+    check('MI60b: the generated ref is one git will actually accept',
+      legal(ratchetRef(m.missionId)));
+    // Directory sanitisation cannot be reused: it maps unsafe characters to
+    // `~`, which is one of the characters git forbids in a ref.
+    check('MI60c: a project id needing sanitisation still yields a legal ref',
+      ['a b/M-0001', 'weird~name/M-0001', 'has:colon/M-0001', 'dot.name/M-0001', '../M-0001']
+        .every((id) => legal(ratchetRef(id))),
+      ['a b/M-0001', 'weird~name/M-0001', 'has:colon/M-0001', 'dot.name/M-0001', '../M-0001']
+        .filter((id) => !legal(ratchetRef(id))).map((id) => ratchetRef(id)).join(', '));
+    check('MI60d: sanitisation stays injective — two ids that collapse alike stay distinct',
+      refSafeProject('a b') !== refSafeProject('a-b')
+      && refSafeProject('a:b') !== refSafeProject('a b')
+      && refSafeProject('plain') === 'plain',
+      `${refSafeProject('a b')} vs ${refSafeProject('a-b')}`);
 
     check('MI61: nothing has advanced it yet', missions.mission(m.missionId)!.ratchetSha === null
       && readRatchet(root, m.missionId) === null);
@@ -468,6 +493,35 @@ export async function missionSuite(): Promise<void> {
     const rr = reconstructRatchet(root, m2.mission(other.missionId)!);
     check('MI66: a mission with no checkpoint has nothing to restore, and says so',
       rr.action === 'nothing-to-restore' && rr.expected === null);
+
+    // Two projects in ONE repository, both with an M-0001. This is the
+    // collision the scoping exists to prevent, so it is exercised rather than
+    // argued: both refs live, both reconstruct, neither sees the other.
+    const alphaStore = new EventStore(path.join(root, '.zeus/state-alpha'));
+    const betaStore = new EventStore(path.join(root, '.zeus/state-beta'));
+    const alpha = new MissionRegistry({ events: alphaStore, projectId: 'alpha' });
+    const beta = new MissionRegistry({ events: betaStore, projectId: 'beta' });
+    const am = alpha.create('alpha goal', 'sha');
+    const bm = beta.create('beta goal', 'sha');
+    check('MI69: two projects can both hold an M-0001',
+      localLabelOf(am.missionId) === localLabelOf(bm.missionId)
+      && am.missionId !== bm.missionId, `${am.missionId} / ${bm.missionId}`);
+    check('MI69b: and their ratchet refs are distinct',
+      ratchetRef(am.missionId) !== ratchetRef(bm.missionId)
+      && ratchetRef(am.missionId) === 'refs/zeus/mission/alpha/M-0001/green'
+      && ratchetRef(bm.missionId) === 'refs/zeus/mission/beta/M-0001/green');
+    const second = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    alpha.checkpoint(am.missionId, second, ['alpha invariant']);
+    beta.checkpoint(bm.missionId, second, ['beta invariant']);
+    reconstructRatchet(root, alpha.mission(am.missionId)!);
+    reconstructRatchet(root, beta.mission(bm.missionId)!);
+    check('MI69c: each reconstructs from its OWN log, into its own ref',
+      readRatchet(root, am.missionId) === second && readRatchet(root, bm.missionId) === second
+      && alpha.mission(am.missionId)!.checkpoints[0].invariants[0] === 'alpha invariant'
+      && beta.mission(bm.missionId)!.checkpoints[0].invariants[0] === 'beta invariant');
+    deleteRatchet(root, am.missionId);
+    check('MI69d: deleting one project\'s ratchet leaves the other untouched',
+      readRatchet(root, am.missionId) === null && readRatchet(root, bm.missionId) === second);
 
     // G-U2: moving a ref is a repository WRITE.
     const ro = readOnlyGit(root);
@@ -571,7 +625,8 @@ export async function missionSuite(): Promise<void> {
       parsed.missionId.endsWith('/M-0001') && parsed.achievement === 'UNEVALUATED'
       && parsed.terminationReason === null && parsed.planVersion === null
       && Array.isArray(parsed.spawned) && Array.isArray(parsed.checkpoints)
-      && parsed.ratchetRef === `refs/zeus/mission/M-0001/green` && parsed.ratchetRefSha === null,
+      && parsed.ratchetRef === ratchetRef(parsed.missionId) && parsed.ratchetRefSha === null
+      && /^refs\/zeus\/mission\/.+\/M-0001\/green$/.test(parsed.ratchetRef),
       JSON.stringify({ id: parsed.missionId, a: parsed.achievement }));
 
     await run('mission', 'create', 'a second mission');

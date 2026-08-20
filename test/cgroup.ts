@@ -176,6 +176,51 @@ export async function cgroupSuite(): Promise<void> {
     }
 
     // -------------------------------------------------------------------
+    section('a scope that never started is infrastructure, not a verdict');
+    {
+      // The third member of the CG21/CG23 family. CG21: a project's own exit
+      // code must not become a resource event. CG23: a resource event must not
+      // become a cancellation. Here: a scope that systemd REFUSED TO CREATE
+      // must not become a failing test — the command never ran, so there is
+      // no verdict about the code to report.
+      const collision = await sup.run({
+        id: 'unit-collision', projectId: 'cg', taskId: 'T-cg-collision', cls: 'light',
+        command: sh('collide.sh',
+          'echo "Failed to start transient scope unit: Unit zeus-already-taken.scope already exists" >&2\nexit 1'),
+        args: [], cwd: TMP, policy: defaultPolicy(TMP, TMP), confineFilesystem: false,
+        timeoutSeconds: 30,
+      } as any);
+      check('CG24: a unit-name collision is INFRASTRUCTURE_FAILURE, not FAILED',
+        collision.outcome === 'INFRASTRUCTURE_FAILURE',
+        `${collision.outcome} exit=${collision.exitCode}`);
+      check('CG25: and it is not a product signal — nothing was learned about the code',
+        collision.productSignal === false);
+      const plain = await sup.run({
+        id: 'ordinary-failure', projectId: 'cg', taskId: 'T-cg-collision', cls: 'light',
+        command: sh('plainfail.sh', 'echo "3 tests failed" >&2\nexit 1'),
+        args: [], cwd: TMP, policy: defaultPolicy(TMP, TMP), confineFilesystem: false,
+      } as any);
+      check('CG26: an ordinary non-zero exit is still a failing test',
+        plain.outcome === 'FAILED' && plain.productSignal === true, plain.outcome);
+
+      // Prevention: the unit name is unique per execution regardless of what
+      // the caller's job id contains.
+      const req = { policy: defaultPolicy(TMP, TMP), budgets: deriveBudgets(),
+        jobId: 'a-fixed-job-id', confineFilesystem: false };
+      const a1 = wrap('true', [], req as any, backends);
+      const a2 = wrap('true', [], req as any, backends);
+      check('CG27: two executions sharing a job id get DIFFERENT unit names',
+        !!a1.unit && !!a2.unit && a1.unit !== a2.unit, `${a1.unit} vs ${a2.unit}`);
+      check('CG28: and the job id is still legible inside the unit name',
+        a1.unit!.startsWith('zeus-a-fixed-job-id-'), a1.unit ?? '');
+      // The product path that actually had the fixed-name defect.
+      const runner = fs.readFileSync(path.resolve(__dirname, '../src/selfaudit/runner.ts'), 'utf8');
+      check('CG29: the self-audit runner still uses a stable job id — uniqueness is the wrapper\'s job',
+        /id: `\$\{spec\.lane\}-\$\{probe\.id\}`/.test(runner),
+        'if this id gains a timestamp the note in isolation.ts should be updated');
+    }
+
+    // -------------------------------------------------------------------
     section('cgroup lifecycle: nothing leaks');
     check('CG15: a contained execution leaves no transient unit behind',
       zeusUnits().length <= before, zeusUnits().join(','));

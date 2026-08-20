@@ -867,10 +867,18 @@ async function cmdMission(argv: string[]): Promise<number> {
         return 3;
       }
       if (!compiled.validation.valid) {
+        // The attempt is evidence even though the mission has not moved.
+        missions.recordCompileRejected(id, {
+          findings: compiled.validation.findings, criteria: compiled.criteria,
+          compilerProviderId: compiled.compilerProviderId,
+          structuredHash: compiled.structuredHash,
+          ...(compiled.providerUsage ? { providerUsage: compiled.providerUsage } : {}),
+        });
         out(`${C.r}✗${C.x} the compiled criteria are not a contract:`);
         for (const f of compiled.validation.findings) {
           out(`  ${C.r}${f.code}${C.x} ${f.criterionId ?? ''} ${C.dim}${f.detail}${C.x}`);
         }
+        out(`  ${C.dim}recorded as ORACLE_COMPILE_REJECTED; the mission is unchanged and can be recompiled${C.x}`);
         return 1;
       }
 

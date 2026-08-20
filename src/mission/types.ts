@@ -122,6 +122,11 @@ export const MISSION_EVENT_TYPES = [
   'ORACLE_EVALUATED',
   'EVALUATOR_REVISED',
   'ORACLE_SEMANTICS_REFUSED',
+  // A compile the deterministic validation refused. The mission stays
+  // pre-oracle and retryable; this is a record of the ATTEMPT, not a state
+  // change — without it, what the compiler proposed and why it was refused
+  // was invisible without re-running the model.
+  'ORACLE_COMPILE_REJECTED',
 ] as const;
 
 export type MissionEventType = typeof MISSION_EVENT_TYPES[number];

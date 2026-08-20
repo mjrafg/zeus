@@ -66,6 +66,23 @@ export const EVALUATOR_FOR: Record<CriterionType, Evaluator['kind']> = {
 
 export interface Criterion {
   criterionId: string;
+  /**
+   * The compiler's own name for this criterion, kept for readability.
+   *
+   * The model names things well — `unit-tests-pass`, `no-scope-creep` — and
+   * those names are worth showing a human. They are NOT identity: the
+   * canonical id is assigned by Zeus, because asking a model to produce our
+   * internal `/C-NNNN` format is asking it to count, and asking it to count is
+   * asking for collisions.
+   */
+  slug?: string;
+  /**
+   * Set when the compiler named a declared command by its KEY and
+   * normalisation resolved it to the command string. Recorded rather than
+   * silently rewritten: a reader should be able to see that a substitution
+   * happened.
+   */
+  resolvedFromKey?: string;
   type: CriterionType;
   /** The human-meaningful claim. IMMUTABLE once the oracle is accepted. */
   statement: string;

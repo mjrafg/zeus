@@ -587,8 +587,18 @@ export class ProcessSupervisor {
         if (OUT_OF_MEMORY.test(out)) {
           return finish('RESOURCE_LIMIT_EXCEEDED', code, signal ?? null);
         }
-        // The sandbox could not start the inner command: infrastructure, not code.
-        if (/bwrap: execvp .*: No such file|systemd-run: .*not found|execvp: No such file/i.test(out)) {
+        // The sandbox or the scope could not start the inner command:
+        // infrastructure, not code.
+        //
+        // `Unit ... already exists` belongs here for the reason the whole
+        // outcome vocabulary exists. A transient unit name that collides means
+        // the command NEVER RAN — systemd refused to create the scope — and
+        // reporting that as FAILED is Zeus telling a person their code is
+        // broken because two runs picked the same name. Found when an
+        // orphaned scope from an interrupted run made the next execution exit
+        // 1 instantly, and it read as a failing test.
+        if (/bwrap: execvp .*: No such file|systemd-run: .*not found|execvp: No such file/i.test(out)
+          || /Unit .* already exists|Failed to (start|create) transient (scope|service)/i.test(out)) {
           return finish('INFRASTRUCTURE_FAILURE', code, signal ?? null);
         }
         finish(code === 0 ? 'COMPLETED' : 'FAILED', code, signal ?? null);

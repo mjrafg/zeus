@@ -105,8 +105,11 @@ export async function oracleSuite(): Promise<void> {
       moved.filter((n) => !discovered.includes(n)).join(', '));
     // Pinned, not assumed: the probe went stale once, and the registry fix is
     // what stops it happening again.
-    check('OR12: the event-type total is pinned at 43',
-      discovered.length === 43, `${discovered.length} types`);
+    check('OR12: the event-type total is pinned at 44',
+      discovered.length === 44, `${discovered.length} types`);
+    check('OR12b: ORACLE_COMPILE_REJECTED is emitted and discovered automatically',
+      (MISSION_EVENT_TYPES as readonly string[]).includes('ORACLE_COMPILE_REJECTED')
+      && discovered.includes('ORACLE_COMPILE_REJECTED'));
     check('OR13: names still reserved are still not counted as events',
       RESERVED_MISSION_EVENT_NAMES.every((n) => !discovered.includes(n)));
 
@@ -122,6 +125,39 @@ export async function oracleSuite(): Promise<void> {
       !raw.includes(secret) && /\[redacted:api-key\]/.test(raw));
     check('OR15: and the chain still verifies over the mission log',
       store.verify(m.missionId).ok);
+  }
+
+  // ---------------------------------------------------------------------
+  section('oracle: a refused compile leaves evidence');
+  {
+    const store = new EventStore(path.join(TMP, 'rejected'));
+    const missions = new MissionRegistry({ events: store, projectId: 'p' });
+    const m = missions.create('a goal whose compile will be refused', 'sha');
+    const proposed = [criterion({ evaluator: { kind: 'command', command: 'make widgets', expect: 'PASSED' } })];
+    const validation = validateOracle(proposed, CTX);
+    missions.recordCompileRejected(m.missionId, {
+      findings: validation.findings, criteria: proposed, compilerProviderId: 'mock',
+      structuredHash: 'sha256:abc',
+    });
+    const evs = store.read(m.missionId);
+    const rejected = evs.find((e) => e.type === 'ORACLE_COMPILE_REJECTED');
+    check('OR16: the refused attempt is recorded, not merely printed',
+      !!rejected && (rejected.payload as any).criterionCount === 1
+      && (rejected.payload as any).retryable === true);
+    check('OR17: with what the compiler proposed AND why it was refused',
+      Array.isArray((rejected!.payload as any).criteria)
+      && (rejected!.payload as any).findings.some((f: any) => f.code === 'UNRESOLVABLE_EVALUATOR'));
+    const rec = missions.mission(m.missionId)!;
+    check('OR18: and the mission is still pre-oracle — a record, not a state change',
+      rec.oracle === null && rec.oracleAccepted === false && rec.oracleVersion === null);
+    // The redacting sink covers it like every other payload.
+    const secret = 'sk-live-REJECTEDCOMPILE0123456789';
+    missions.recordCompileRejected(m.missionId, {
+      findings: [], criteria: [criterion({ statement: `token ${secret}` })],
+      compilerProviderId: 'mock', structuredHash: 'sha256:def',
+    });
+    check('OR19: a secret in a refused proposal is redacted too',
+      !fs.readFileSync(store.logPath(m.missionId), 'utf8').includes(secret));
   }
 
   // ---------------------------------------------------------------------
@@ -182,6 +218,41 @@ export async function oracleSuite(): Promise<void> {
       && /^sha256:/.test(compiled.structuredHash), JSON.stringify(compiled.validation.findings));
     check('OR29: normalisation fills ids rather than throwing on a partial criterion',
       normaliseCriteria('p/M-0001', [{ type: 'EXECUTABLE' }])[0].criterionId === 'p/M-0001/C-0001');
+
+    // The shape mismatches the first supervised compile hit. The model's
+    // criteria were semantically excellent and were refused on bookkeeping.
+    const slugged = normaliseCriteria('p/M-0001', [
+      { criterionId: 'unit-tests-pass', type: 'EXECUTABLE',
+        evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' } },
+      { criterionId: 'typecheck-passes', type: 'EXECUTABLE',
+        evaluator: { kind: 'command', command: 'typecheck', expect: 'PASSED' } },
+    ], CTX);
+    check('OR29b: a model-supplied id becomes a SLUG; the canonical id is ours',
+      slugged[0].criterionId === 'p/M-0001/C-0001' && slugged[0].slug === 'unit-tests-pass'
+      && slugged[1].criterionId === 'p/M-0001/C-0002' && slugged[1].slug === 'typecheck-passes',
+      JSON.stringify(slugged.map((c) => [c.criterionId, c.slug])));
+    check('OR29c: a bare command KEY resolves to the command line, and says so',
+      (slugged[0].evaluator as any).command === CTX.commands.unitTest
+      && slugged[0].resolvedFromKey === 'unitTest',
+      `${(slugged[0].evaluator as any).command} (from ${slugged[0].resolvedFromKey})`);
+    check('OR29d: and what the model produced now VALIDATES',
+      validateOracle(slugged.map((c) => ({ ...c, required: true, affectedBy: [],
+        requiresAuthority: [], derivedFrom: ['unitTest'], statement: 'the check passes' })), CTX).valid);
+    const literal = normaliseCriteria('p/M-0001', [{ type: 'EXECUTABLE',
+      evaluator: { kind: 'command', command: 'node -e process.exit(0)', expect: 'PASSED' } }], CTX);
+    check('OR29e: a command line given literally is left alone, with no false provenance',
+      (literal[0].evaluator as any).command === 'node -e process.exit(0)'
+      && literal[0].resolvedFromKey === undefined);
+    const unknown = normaliseCriteria('p/M-0001', [{ type: 'EXECUTABLE',
+      evaluator: { kind: 'command', command: 'notAKey', expect: 'PASSED' } }], CTX);
+    check('OR29f: an unknown key stays unknown and is still refused — resolution is not leniency',
+      (unknown[0].evaluator as any).command === 'notAKey'
+      && validateOracle(unknown.map((c) => ({ ...c, statement: 'x', required: true, affectedBy: [],
+        requiresAuthority: [], derivedFrom: [] })), CTX)
+        .findings.some((f) => f.code === 'UNRESOLVABLE_EVALUATOR'));
+    check('OR29g: the prompt now distinguishes a command NAME from a command LINE',
+      /Use\s*\n?.*the COMMAND LINE, not the name/s.test(
+        fs.readFileSync(path.resolve(__dirname, '../src/mission/compile.ts'), 'utf8')));
   }
 
   // ---------------------------------------------------------------------

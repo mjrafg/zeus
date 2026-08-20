@@ -39,6 +39,8 @@ export interface CompileInput {
 
 export interface CompileResult {
   ok: boolean;
+  /** Provider-reported cost/tokens for the compile, when the CLI volunteered them. */
+  providerUsage?: unknown;
   /** Set when the PROVIDER failed. Infrastructure, not a failed compile. */
   infrastructureFailure: string | null;
   criteria: Criterion[];
@@ -60,23 +62,35 @@ const arr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is str
  * produced a bad criterion" into "Zeus crashed", and loses the finding that
  * would have told someone which criterion.
  */
-export function normaliseCriteria(missionId: string, raw: unknown): Criterion[] {
+export function normaliseCriteria(missionId: string, raw: unknown, ctx?: ProjectContext): Criterion[] {
   const list = Array.isArray(raw) ? raw : [];
+  const commands = ctx?.commands ?? {};
   return list.map((c: any, i) => {
     const ev = c?.evaluator ?? {};
     const kind = str(ev.kind);
+    // The compiler names a declared command by its KEY roughly as often as by
+    // its value, because the prompt hands it a map. Resolving the key here is
+    // bookkeeping, not leniency: the command still has to be one this project
+    // declared, and an unknown key stays unknown and fails validation.
+    const rawCommand = str(ev.command);
+    const resolvedFromKey = rawCommand && commands[rawCommand] ? rawCommand : undefined;
+    const command = resolvedFromKey ? commands[resolvedFromKey] : rawCommand;
     const evaluator = kind === 'rubric'
       ? { kind: 'rubric' as const, rubric: str(ev.rubric), artifacts: arr(ev.artifacts) }
       : kind === 'probe'
-        ? { kind: 'probe' as const, command: str(ev.command),
+        ? { kind: 'probe' as const, command,
             expect: (ev.expect === 'TEST_FAILED' ? 'TEST_FAILED' : 'PASSED') as 'PASSED' | 'TEST_FAILED',
             requiresNetwork: ev.requiresNetwork === true }
         : kind === 'command'
-          ? { kind: 'command' as const, command: str(ev.command),
+          ? { kind: 'command' as const, command,
               expect: (ev.expect === 'TEST_FAILED' ? 'TEST_FAILED' : 'PASSED') as 'PASSED' | 'TEST_FAILED' }
           : (ev as any);
+    const supplied = str(c?.criterionId);
     return {
-      criterionId: str(c?.criterionId) || makeCriterionId(missionId, i + 1),
+      // ALWAYS canonical, and always ours. The model's id becomes a slug.
+      criterionId: makeCriterionId(missionId, i + 1),
+      ...(supplied && supplied !== makeCriterionId(missionId, i + 1) ? { slug: supplied } : {}),
+      ...(resolvedFromKey ? { resolvedFromKey } : {}),
       type: c?.type,
       statement: str(c?.statement),
       evaluator,
@@ -95,7 +109,13 @@ const COMPILE_HEADER = [
   ' "statement":"...","evaluator":{...},"affectedBy":[],"required":true,',
   ' "requiresAuthority":[],"derivedFrom":[]}]}',
   '',
-  'An EXECUTABLE criterion carries {"kind":"command","command":"<a declared command>","expect":"PASSED"}.',
+  'An EXECUTABLE criterion carries {"kind":"command","command":"<command>","expect":"PASSED"}.',
+  'The declared commands are given below as a MAP of name -> command line. Use',
+  'the COMMAND LINE, not the name. If the map contains "unitTest": "npm test",',
+  'then write   "command": "npm test"   and NOT   "command": "unitTest".',
+  '',
+  'Do not invent a criterionId; omit it, or use a short descriptive slug such as',
+  '"unit-tests-pass". Zeus assigns the canonical identifier.',
   'An AI_JUDGED criterion carries {"kind":"rubric","rubric":"<what passing means>","artifacts":["path"]}.',
   'An EXTERNAL_FACT criterion carries {"kind":"probe","command":"...","expect":"PASSED","requiresNetwork":false}.',
   '',
@@ -154,9 +174,10 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
     };
   }
 
-  const criteria = normaliseCriteria(input.missionId, (res.structured as any).criteria);
+  const criteria = normaliseCriteria(input.missionId, (res.structured as any).criteria, input.context);
   return {
     ok: true, infrastructureFailure: null, criteria,
+    ...(res.providerUsage ? { providerUsage: res.providerUsage } : {}),
     validation: validateOracle(criteria, input.context),
     compilerProviderId: input.provider.id,
     structuredHash: oracleHash(criteria),

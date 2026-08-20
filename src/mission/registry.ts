@@ -299,6 +299,26 @@ export class MissionRegistry {
     });
   }
 
+  /**
+   * Records a compile the validation refused.
+   *
+   * The mission is unchanged and can simply be retried — but "unchanged" used
+   * to mean "no trace", so a refusal was only visible to whoever was watching
+   * the terminal at the time. The proposed criteria are recorded AS RECEIVED
+   * (the redacting sink handles them like any other payload), because the
+   * question a reader has is what the compiler actually said.
+   */
+  recordCompileRejected(missionId: string, spec: {
+    findings: unknown[]; criteria: unknown[]; compilerProviderId: string;
+    providerUsage?: unknown; structuredHash: string;
+  }): void {
+    this.append(missionId, 'ORACLE_COMPILE_REJECTED', {
+      ...spec, criterionCount: Array.isArray(spec.criteria) ? spec.criteria.length : 0,
+      retryable: true,
+      detail: 'the compiled criteria did not validate; the mission is unchanged and can be recompiled',
+    });
+  }
+
   recordCritique(missionId: string, critique: {
     valid: boolean; findings: unknown[]; modeOpinion: string | null;
     promptHash: string; hashes: Record<string, string>; violations: unknown[];

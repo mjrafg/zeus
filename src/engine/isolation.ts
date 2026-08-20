@@ -9,6 +9,7 @@
 
 import * as fs from 'fs';
 import { spawnSync } from 'child_process';
+import { randomBytes } from 'crypto';
 import { ExecutionPolicy } from './policy';
 import { Budgets } from './budget';
 
@@ -228,6 +229,19 @@ export function rlimitWrap(cmd: string, args: string[], budgets: Budgets): { com
   return { command: 'sh', args: ['-c', script, 'zeus-rlimit', cmd, ...args] };
 }
 
+/**
+ * A suffix no other execution on this host will produce.
+ *
+ * Process id plus a monotonic counter plus randomness: the counter separates
+ * executions within one process, the pid separates processes, and the random
+ * component covers a recycled pid meeting a restarted counter.
+ */
+let unitSeq = 0;
+function uniqueUnitSuffix(): string {
+  unitSeq += 1;
+  return `${process.pid.toString(36)}${unitSeq.toString(36)}${randomBytes(3).toString('hex')}`;
+}
+
 export interface IsolationRequest {
   policy: ExecutionPolicy;
   budgets: Budgets;
@@ -269,7 +283,18 @@ export function wrap(cmd: string, args: string[], req: IsolationRequest,
   }
 
   if (useScope) {
-    unit = `zeus-${req.jobId}`.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 90);
+    // Unique per execution BY CONSTRUCTION, not by whatever the caller's job
+    // id happened to contain.
+    //
+    // Most callers already build ids with a timestamp, which is nearly
+    // collision-free — but "nearly" here means two executions starting in the
+    // same millisecond, and `src/selfaudit/runner.ts` used a fixed
+    // `<lane>-<probe>` id with no time component at all. A leftover scope from
+    // an interrupted audit then made the next run of that probe fail to start,
+    // and systemd refuses a duplicate transient unit rather than replacing it.
+    // Deriving uniqueness here fixes every call site at once instead of asking
+    // each of them to remember.
+    unit = `zeus-${req.jobId}-${uniqueUnitSuffix()}`.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 90);
     const props = [
       '--user', '--scope', '--collect', '--quiet', `--unit=${unit}`,
       `--property=MemoryMax=${req.budgets.memoryMaxMb}M`,

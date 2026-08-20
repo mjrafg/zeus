@@ -1,6 +1,6 @@
 {
   "auditedAt": "v0.1.0-rc.1 readiness review",
-  "scope": "src/ — the shipped runtime, which is all this repository contains. Findings raised against an earlier, unrelated prototype are marked OBSOLETE where the defect cannot occur in the current design.",
+  "scope": "src/ \u2014 the shipped runtime, which is all this repository contains. Findings raised against an earlier, unrelated prototype are marked OBSOLETE where the defect cannot occur in the current design.",
   "findings": [
     {
       "id": "P0-1",
@@ -10,9 +10,9 @@
       "resolution": "ProcessSupervisor: host-derived budgets with a control-plane reservation, per-execution memory/CPU/PID caps, worker caps injected into the environment and argv, wall clock, process-group and cgroup-scope termination.",
       "regressionTests": [
         "A: five heavy jobs never overlap (max concurrency 1)",
-        "R1: the pathological task is bounded by the wall clock",
-        "R3: all 100 descendants are killed, not just the parent",
-        "R5: the control plane can still execute while a task misbehaved",
+        "EN-R1: the pathological task is bounded by the wall clock",
+        "EN-R3: all 100 descendants are killed, not just the parent",
+        "EN-R5: the control plane can still execute while a task misbehaved",
         "B1: budgets are derived from the host, not hard-coded",
         "B2: capacity is reserved for the control plane"
       ]
@@ -24,15 +24,15 @@
       "status": "FIXED",
       "resolution": "ExecutionPolicy evaluated before every spawn: symlink-aware path containment, traversal and absolute-path refusal, destructive/fork-bomb/persistence/env-poisoning detection, environment allowlist with an always-deny secret list, and bubblewrap filesystem+network confinement for project commands.",
       "regressionTests": [
-        "X2: ../ traversal is refused",
-        "X4: a symlink pointing out of the worktree is refused",
+        "EN-X2: ../ traversal is refused",
+        "EN-X4: a symlink pointing out of the worktree is refused",
         "X6: rm -rf / is refused",
         "X8: a fork bomb is refused",
         "X11: writing a shell profile for persistence is refused",
         "X12: re-introducing a stripped credential is refused",
         "X16: secrets never reach a project command",
-        "S2: a policy-denied command never spawns",
-        "S3: a cwd outside the worktree is refused"
+        "EN-S2: a policy-denied command never spawns",
+        "EN-S3: a cwd outside the worktree is refused"
       ],
       "residualRisk": "The implementer agent is intentionally allowed to edit its worktree and run project commands; confinement bounds it to that worktree, but a malicious project command that stays inside the worktree is still executed."
     },
@@ -43,13 +43,13 @@
       "status": "FIXED",
       "resolution": "ProjectLock: O_EXCL lease with owner identity, PID, hostname, heartbeat and TTL; stale detection by liveness and expiry; atomic replace on renewal. EventStore additionally refuses duplicate sequence/id, detects chain breaks and tampering, quarantines a torn final line and fsyncs each append.",
       "regressionTests": [
-        "L2: a second instance is refused, with a specific reason",
-        "L3: a separate OS PROCESS is also refused the lease",
-        "L5: a crashed owner's lease is reclaimed",
+        "EN-L2: a second instance is refused, with a specific reason",
+        "EN-L3: a separate OS PROCESS is also refused the lease",
+        "L5: a crashed owner's lease is reclaimed, and the takeover is stated",
         "L6: an expired lease from another host is reclaimed",
-        "V2: an edited event is detected",
-        "V3: a torn final line is excluded, not parsed as truth",
-        "V5: a SIGKILL during appends leaves a readable, verifiable log"
+        "EN-V2: an edited event is detected",
+        "EN-V3: a torn final line is excluded, not parsed as truth",
+        "EN-V5: a SIGKILL during appends leaves a readable, verifiable log"
       ]
     },
     {
@@ -60,7 +60,7 @@
       "resolution": "The heavyweight suite belonged to an earlier prototype. In the portable engine there is no such runner: every check goes through the supervisor, which owns the timeout and the process-group kill, so the defect is structurally absent rather than patched.",
       "regressionTests": [
         "B: a hung job is stopped by the wall clock",
-        "B: the whole process tree dies, not just the shell"
+        "B-3: the whole process tree dies, not just the shell"
       ]
     },
     {
@@ -70,7 +70,7 @@
       "status": "OBSOLETE",
       "resolution": "The portable engine performs no merge and no deploy at all; acceptance ends at COMPLETED and shipping is a separate, explicitly enabled operation. There is no deploy path to get wrong.",
       "regressionTests": [
-        "E3: the task reaches a terminal state"
+        "EN-E3: the task reaches a terminal state"
       ]
     },
     {
@@ -78,11 +78,11 @@
       "severity": "P0",
       "title": "Cancellation did not work across processes",
       "status": "FIXED",
-      "discoveredBy": "CLI verification during this phase — `zeus cancel` reported success while the process tree kept running",
+      "discoveredBy": "CLI verification during this phase \u2014 `zeus cancel` reported success while the process tree kept running",
       "resolution": "Every spawn records its process group in an on-disk run registry under the project state root; cancel kills recorded groups from any process, prunes stale entries and records PROCESSES_TERMINATED evidence.",
       "regressionTests": [
-        "C11: a running execution is recorded on disk where another process can find it",
-        "C12: a SEPARATE process can cancel and the tree really dies",
+        "EN-C11: a running execution is recorded on disk where another process can find it",
+        "EN-C12: a SEPARATE process can cancel and the tree really dies",
         "C13: the registry entry is removed after the kill"
       ]
     },
@@ -93,7 +93,7 @@
       "status": "FIXED",
       "resolution": "A required check that does not execute yields REQUIRED_TEST_NOT_RUN and the task ends NEEDS_RECONCILIATION. A project with no executable verification at all cannot claim acceptance unless policy.allowUnverifiedAcceptance is explicitly set.",
       "regressionTests": [
-        "Q5: a policy denial of a REQUIRED test is REQUIRED_TEST_NOT_RUN",
+        "EN-Q5: a policy denial of a REQUIRED test is REQUIRED_TEST_NOT_RUN",
         "Q8: a required test that never ran blocks acceptance",
         "Q9: a project with no executable verification cannot claim acceptance",
         "Q10: an explicit opt-in allows acceptance without tests"
@@ -120,9 +120,9 @@
         "TB5: provider-call exhaustion is detected",
         "TB7: queue wait is tracked separately and does not count as execution",
         "TB8: unmeasured cost is reported as unknown, never invented",
-        "TB10: a budget breach stops the task and asks a human",
+        "TB10: a budget breach stops the task and asks a human, not silently continues",
         "TB11: the breach records budget, limit and observed usage",
-        "TB12: budget usage survives a process restart"
+        "TB12: budget usage survives a process restart (recomputed from the log)"
       ]
     },
     {
@@ -155,10 +155,10 @@
       "status": "ACCEPTED_RISK",
       "resolution": "Deliberate policy, documented per phase in docs/RECOVERY.md. DESIGN and REVIEW are read-only (SAFE_AUTO_RETRY), VERIFY is repeatable (SAFE_AUTO_RESUME), IMPLEMENT/FIX/FINAL_ACCEPTANCE are side-effecting (REQUIRES_RECONCILIATION), merge/deploy would be NEVER_AUTO_RESUME. Nothing auto-resumes today: the residual cost is operator time after a crash, versus duplicated side effects on a user repository if it were automated.",
       "regressionTests": [
-        "C7: a crash mid-phase is visible as a started-but-unfinished phase",
-        "C8: the dirty worktree is preserved, not reset",
-        "C9: the log still verifies after the crash",
-        "C10: missing final JSON is NOT read as \"nothing happened\""
+        "EN-C7: a crash mid-phase is visible as a started-but-unfinished phase",
+        "EN-C8: the dirty worktree is preserved, not reset",
+        "EN-C9: the log still verifies after the crash",
+        "EN-C10: missing final JSON is NOT read as \"nothing happened\""
       ]
     },
     {
@@ -168,9 +168,9 @@
       "status": "FIXED",
       "resolution": "Provider outages (429/529/overloaded/transport) and infrastructure outcomes are classified separately and send the task to NEEDS_RECONCILIATION, never to FAILED or BLOCKED. A missing toolchain is INFRASTRUCTURE_FAILURE, not a failing test.",
       "regressionTests": [
-        "Q6: a spawn failure is INFRASTRUCTURE_FAILURE",
-        "S4b: a missing toolchain is INFRASTRUCTURE_FAILURE, never a failing test",
-        "S4c: the same holds under filesystem confinement"
+        "EN-Q6: a spawn failure is INFRASTRUCTURE_FAILURE",
+        "EN-S4b: a missing toolchain is INFRASTRUCTURE_FAILURE, never a failing test",
+        "EN-S4c: the same holds under filesystem confinement, where the wrapper hides it"
       ]
     },
     {
@@ -188,7 +188,7 @@
       "status": "OBSOLETE",
       "resolution": "Every check runs with an explicit, policy-validated cwd inside the worktree; there is no ambient working directory to get wrong.",
       "regressionTests": [
-        "S3: a cwd outside the worktree is refused"
+        "EN-S3: a cwd outside the worktree is refused"
       ]
     },
     {
@@ -199,8 +199,20 @@
       "regressionTests": [
         "RI1: a clean review payload is valid and carries its provenance",
         "RI2: every delivered section is hashed for later checking",
-        "RI4: forbidden kinds are refused (8 kinds)",
-        "RI5: forbidden material smuggled inside an allowed section is caught (6 cases)",
+        "RI4-1: planner-reasoning is refused by policy",
+        "RI4-2: planner-plan is refused by policy",
+        "RI4-3: implementer-transcript is refused by policy",
+        "RI4-4: implementer-rationale is refused by policy",
+        "RI4-5: previous-review is refused by policy",
+        "RI4-6: adjudication is refused by policy",
+        "RI4-7: acceptance-verdict is refused by policy",
+        "RI4-8: area-context is refused by policy",
+        "RI5-1: planner chain-of-thought smuggled inside an allowed section is caught",
+        "RI5-2: planner design output smuggled inside an allowed section is caught",
+        "RI5-3: implementer transcript smuggled inside an allowed section is caught",
+        "RI5-4: previous review smuggled inside an allowed section is caught",
+        "RI5-5: adjudication smuggled inside an allowed section is caught",
+        "RI5-6: area context smuggled inside an allowed section is caught",
         "RI6: a contaminated payload is never handed to the reviewer",
         "RI8: the developer payload contains exactly what the reviewer is denied",
         "RI9: a reviewer claiming context it was never given is recorded"
@@ -230,7 +242,7 @@
         "PK2: no runtime source imports anything from outside src/",
         "PK3: the repository carries no prototype, archive or vendored tree",
         "PB1: the repository carries no archive, prototype or legacy tree",
-        "PB10: the artifact contains no archive, prototype or state paths"
+        "PB10-2: the artifact contains no archive, prototype or state paths"
       ]
     },
     {
@@ -239,8 +251,8 @@
       "title": "No LICENSE",
       "status": "FIXED",
       "regressionTests": [
-        "BR6: the package declares AGPL-3.0-only and ships a LICENSE",
-        "BR7: the artifact contains the licence text"
+        "BR16: the package declares AGPL-3.0-only and ships the licence",
+        "PB15: the artifact ships the AGPL licence"
       ],
       "resolution": "Zeus is licensed AGPL-3.0-only. LICENSE holds the full text, package.json declares \"AGPL-3.0-only\", scripts/package.sh ships it in the artifact, and docs/LICENSING.md explains the network clause and what it means for users, modifiers and contributors."
     },
@@ -252,14 +264,18 @@
       "resolution": "Every product-facing surface identifies the product as Zeus: CLI (zeus), project directory (.zeus/), user paths (~/.local/share/zeus, ~/.config/zeus), installer, setup wizard, doctor, docs, package metadata and artifact name. The old identity survives only in src/migrate.ts and the bin/autopilot deprecation shim, both deliberate and both scanned for. Git history was not rewritten.",
       "regressionTests": [
         "BR1: no product-facing source names the old product",
-        "BR2: the CLI identifies itself as zeus",
-        "BR3: init creates .zeus/ and never .autopilot/",
-        "BR4: user data and config paths are the Zeus ones",
-        "BR5: the deprecation alias forwards and says so once",
-        "BR8: migration moves a legacy layout without destroying anything",
-        "BR9: migration is idempotent",
-        "BR10: a conflicting destination is reported, never overwritten",
-        "PB12: the release artifact carries no stale branding"
+        "BR2: the CLI executable is zeus",
+        "BR3: zeus --help works and identifies the product",
+        "BR6: zeus init creates .zeus/ and never .autopilot/",
+        "BR5b: user data and config live under zeus, XDG-respecting",
+        "BR15b: it forwards to zeus and produces the real answer",
+        "BR15c: it says once, on stderr, that the command was renamed",
+        "BR11: migration moves the directory",
+        "BR13d: the legacy directory is never deleted",
+        "BR12: migration is idempotent \u2014 a second run finds nothing to do",
+        "BR13: both layouts existing is a reported conflict, not a merge",
+        "BR13b: nothing is moved when there is a conflict",
+        "PB13: the artifact carries no stale product branding"
       ]
     }
   ]

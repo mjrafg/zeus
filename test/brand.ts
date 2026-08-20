@@ -336,11 +336,13 @@ export async function brandSuite(): Promise<void> {
       pkg.license === 'AGPL-3.0-only' && pkg.files.includes('LICENSE'));
     check('BR16b: LICENSE is the AGPL text, not a placeholder',
       licence.includes('GNU AFFERO GENERAL PUBLIC LICENSE') && licence.includes('Version 3, 19 November 2007'));
-    for (const f of ['CONTRIBUTING.md', 'CODE_OF_CONDUCT.md', 'SECURITY.md',
+    // Indexed, because the gates refuse by name and six checks answering to
+    // "BR17" make a refusal ambiguous. The filename stays in the description.
+    for (const [i, f] of (['CONTRIBUTING.md', 'CODE_OF_CONDUCT.md', 'SECURITY.md',
       '.github/pull_request_template.md', '.github/ISSUE_TEMPLATE/bug_report.yml',
-      '.github/ISSUE_TEMPLATE/feature_request.yml']) {
+      '.github/ISSUE_TEMPLATE/feature_request.yml']).entries()) {
       const text = fs.existsSync(path.join(REPO, f)) ? fs.readFileSync(path.join(REPO, f), 'utf8') : '';
-      check(`BR17: ${f} exists and is branded Zeus`,
+      check(`BR17-${i + 1}: ${f} exists and is branded Zeus`,
         text.length > 0 && /zeus/i.test(text) && !/\bautopilot\b/i.test(text));
     }
   }

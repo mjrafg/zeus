@@ -179,47 +179,47 @@ export function setupSuite(): void {
   {
     const p = new FakeProbe(healthyMachine());
     const sys = systemInfo(p);
-    check('S1: the operating system, distribution and architecture are identified',
+    check('SET-S1: the operating system, distribution and architecture are identified',
       sys.platform === 'linux' && sys.distro === 'Ubuntu 24.04' && sys.arch === 'x64' && sys.supported);
 
     const all = detectAll(p);
-    check('S2: every declared dependency is probed, including the ones that are absent',
+    check('SET-S2: every declared dependency is probed, including the ones that are absent',
       all.length === DEPENDENCIES.length &&
       all.filter((d) => d.spec.tier !== 'optional').every((d) => d.state === 'installed') &&
       all.filter((d) => ['graphify', 'docker', 'gh'].includes(d.spec.id)).every((d) => d.state === 'missing'));
-    check('S3: versions are captured, not just presence',
+    check('SET-S3: versions are captured, not just presence',
       all.find((d) => d.spec.id === 'node')?.version === '18.16.1' &&
       all.find((d) => d.spec.id === 'git')?.version === '2.43.0');
 
     const bare = new FakeProbe({ bins: {} });
     const missing = detectAll(bare);
-    check('S4: absent tools are reported missing rather than assumed',
+    check('SET-S4: absent tools are reported missing rather than assumed',
       missing.every((d) => d.state === 'missing'));
 
     const old = new FakeProbe(healthyMachine({
       handle: [{ when: /^node --version/, reply: () => ok('v16.20.2') }],
     }));
     const node = detect(old, DEPENDENCIES.find((d) => d.id === 'node')!);
-    check('S5: an unsupported Node version is distinguished from an absent one',
+    check('SET-S5: an unsupported Node version is distinguished from an absent one',
       node.state === 'unsupported-version' && node.major === 16);
 
     const mac = new FakeProbe({ platform: 'darwin', bins: {} });
-    check('S6: Linux-only tools are not reported missing on other platforms',
+    check('SET-S6: Linux-only tools are not reported missing on other platforms',
       detect(mac, DEPENDENCIES.find((d) => d.id === 'bubblewrap')!).state === 'installed');
     const win = new FakeProbe({ platform: 'win32', bins: {} });
-    check('S7: an unsupported platform is named as such',
+    check('SET-S7: an unsupported platform is named as such',
       !systemInfo(win).supported && /UNSUPPORTED_PLATFORM/.test(systemInfo(win).note));
   }
 
   section('setup: package managers and privilege');
   {
     const apt = new FakeProbe(healthyMachine());
-    check('S8: the platform package manager is detected', detectPackageManager(apt)?.id === 'apt');
+    check('SET-S8: the platform package manager is detected', detectPackageManager(apt)?.id === 'apt');
     const none = new FakeProbe({ bins: { git: '/usr/bin/git' } });
-    check('S9: no package manager is a reportable state, not a crash', detectPackageManager(none) === null);
+    check('SET-S9: no package manager is a reportable state, not a crash', detectPackageManager(none) === null);
 
     const cmd = installCommand(detectPackageManager(apt)!, ['jq'], privileges(apt));
-    check('S10: the exact privileged command is available to show the user',
+    check('SET-S10: the exact privileged command is available to show the user',
       cmd.display === 'sudo apt-get install -y jq' && cmd.requiresSudo);
     const asRoot = new FakeProbe(healthyMachine({ user: 'root' }));
     check('S11: running as root does not add a pointless sudo',

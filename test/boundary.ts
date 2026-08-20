@@ -164,7 +164,7 @@ export async function boundarySuite(): Promise<void> {
     // asserts the runtime carries zero historical coupling.
     const AUDIT_EXEMPT = `audits${path.sep}`;
     const files = productFiles(r);
-    check('PB7: product-facing files were actually scanned', files.length > 20, `${files.length} files`);
+    check('PB7-2: product-facing files were actually scanned', files.length > 20, `${files.length} files`);
     const scanned = files.filter((f) => !path.relative(REPO, f).startsWith(AUDIT_EXEMPT));
     const exempted = files.length - scanned.length;
     check('PB7b: the audits/ exemption is bounded and visible',
@@ -187,7 +187,7 @@ export async function boundarySuite(): Promise<void> {
   }
 
   const listing = execFileSync('tar', ['tzf', path.join(relDir, tarball)], { encoding: 'utf8' });
-  check('PB10: the artifact contains no archive, prototype or state paths',
+  check('PB10-2: the artifact contains no archive, prototype or state paths',
     !/internal\/|reference\/|tools\/|\.zeus\/|worktrees\/|node_modules/.test(listing),
     listing.split('\n').filter((l) => /internal|reference|tools/.test(l)).join());
 

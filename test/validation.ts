@@ -67,15 +67,15 @@ export async function validationSuite(): Promise<void> {
 
   section('surface classification: what a path is, and how far it reaches');
   {
-    check('V1: a session helper is high risk, whatever else it looks like',
+    check('VAL-V1: a session helper is high risk, whatever else it looks like',
       classifyPath('src/lib/session-store.ts').highRisk);
-    check('V2: AUTHORS.md is documentation, not authentication',
+    check('VAL-V2: AUTHORS.md is documentation, not authentication',
       classifyPath('AUTHORS.md').surface === 'documentation' && !classifyPath('AUTHORS.md').highRisk);
-    check('V3: a lockfile is a dependency manifest and high risk',
+    check('VAL-V3: a lockfile is a dependency manifest and high risk',
       classifyPath('pnpm-lock.yaml').surface === 'dependency-manifest' && classifyPath('pnpm-lock.yaml').highRisk);
-    check('V4: a test for auth is BOTH a test surface and high risk',
+    check('VAL-V4: a test for auth is BOTH a test surface and high risk',
       classifyPath('test/auth.spec.ts').testSurface && classifyPath('test/auth.spec.ts').highRisk);
-    check('V5: a snapshot is a test surface', classifyPath('src/__snapshots__/a.snap').testSurface);
+    check('VAL-V5: a snapshot is a test surface', classifyPath('src/__snapshots__/a.snap').testSurface);
     check('V6: CI configuration is high risk', classifyPath('.github/workflows/ci.yml').highRisk);
     check('V7: an unrecognised path is unknown, not assumed harmless',
       classifyPath('weird/thing.qqq').surface === 'unknown');
@@ -88,20 +88,20 @@ export async function validationSuite(): Promise<void> {
       { path: 'src/lib/session.ts', removed: ['  const ttl = 3600;'], added: ['  const ttl = 86400;'] },
     ]));
     const d = resolveTier({ diff, adapterId: 'node', confidence: 'KNOWN' });
-    check('Q1: the tier is DEEP — the maximum, not the average', d.tier === 'DEEP');
-    check('Q2: FAST is refused because not every hunk qualified', d.fastEligible === false);
-    check('Q3: per-hunk classification is recorded for both surfaces',
+    check('VAL-Q1: the tier is DEEP — the maximum, not the average', d.tier === 'DEEP');
+    check('VAL-Q2: FAST is refused because not every hunk qualified', d.fastEligible === false);
+    check('VAL-Q3: per-hunk classification is recorded for both surfaces',
       d.perHunk.length === 2 &&
       d.perHunk.some((h) => h.file === 'src/components/Header.tsx' && h.tier === 'FAST') &&
       d.perHunk.some((h) => h.file === 'src/lib/session.ts' && h.tier === 'DEEP'));
-    check('Q4: the decision names the hunk that set the tier',
+    check('VAL-Q4: the decision names the hunk that set the tier',
       d.reasons.some((r) => r.includes('src/lib/session.ts')));
-    check('Q5: a label change on its own really would be FAST',
+    check('VAL-Q5: a label change on its own really would be FAST',
       resolveTier({
         diff: parseDiff(diffFor([{ path: 'src/components/Header.tsx', removed: ['  <span>Sign in</span>'], added: ['  <span>Log in</span>'] }])),
         adapterId: 'node', confidence: 'KNOWN',
       }).tier === 'FAST');
-    check('Q6: bundling cannot lower a tier — only raise it',
+    check('VAL-Q6: bundling cannot lower a tier — only raise it',
       maxTier('FAST', 'DEEP') === 'DEEP' && maxTier('DEEP', 'FAST') === 'DEEP');
   }
 
@@ -130,25 +130,25 @@ export async function validationSuite(): Promise<void> {
     ]));
     const contract = designContract({ requiredTests: ['npm test'], plan: 'fix refunds' });
     const r = inspectIntegrity(diff, contract);
-    check('R1: deleting a test with no justification is a blocking finding',
+    check('VAL-R1: deleting a test with no justification is a blocking finding',
       r.blocking.some((f) => f.code === 'TEST_DELETED_WITHOUT_JUSTIFICATION'));
-    check('R2: the finding names the file and quotes the evidence',
+    check('VAL-R2: the finding names the file and quotes the evidence',
       r.blocking[0].file === 'test/payments.spec.ts' && r.blocking[0].evidence.length > 0);
-    check('R3: the removed test is recorded by name',
+    check('VAL-R3: the removed test is recorded by name',
       r.testsRemoved.some((t) => t.includes('refunds on cancel')));
 
     const justified = inspectIntegrity(diff, designContract({
       requiredTests: ['npm test'],
       testChangeJustifications: [{ path: 'test/payments.spec.ts', reason: 'the refund flow was removed from the product in this task' }],
     }));
-    check('R4: an explicit, per-path justification in the design clears it',
+    check('VAL-R4: an explicit, per-path justification in the design clears it',
       !justified.blocking.some((f) => f.code === 'TEST_DELETED_WITHOUT_JUSTIFICATION'));
-    check('R5: a justification for a DIFFERENT file does not clear it',
+    check('VAL-R5: a justification for a DIFFERENT file does not clear it',
       inspectIntegrity(diff, designContract({
         requiredTests: ['npm test'],
         testChangeJustifications: [{ path: 'test/other.spec.ts', reason: 'unrelated cleanup of an obsolete suite' }],
       })).blocking.length > 0);
-    check('R6: a one-word "justification" is not a justification',
+    check('VAL-R6: a one-word "justification" is not a justification',
       designContract({ testChangeJustifications: [{ path: 'test/a.ts', reason: 'cleanup' }] }).testChangeJustifications.length === 0);
   }
 
@@ -160,12 +160,12 @@ export async function validationSuite(): Promise<void> {
       added: ["  it.skip('charges the card', async () => {"],
     }]));
     const r = inspectIntegrity(diff, designContract({ requiredTests: ['npm test'] }));
-    check('S1: the skip is detected and surfaced', r.testsDisabled.length === 1);
-    check('S2: the annotation and the test name are both captured',
+    check('VAL-S1: the skip is detected and surfaced', r.testsDisabled.length === 1);
+    check('VAL-S2: the annotation and the test name are both captured',
       r.testsDisabled[0].annotation === '.skip' && r.testsDisabled[0].name === 'charges the card');
-    check('S3: it is raised for the reviewer explicitly',
+    check('VAL-S3: it is raised for the reviewer explicitly',
       r.findings.some((f) => f.code === 'TEST_DISABLED' && f.severity === 'REVIEW'));
-    check('S4: the change also marks the test surface as changed',
+    check('VAL-S4: the change also marks the test surface as changed',
       r.findings.some((f) => f.code === 'TEST_SURFACE_CHANGED'));
 
     const other = parseDiff(diffFor([
@@ -174,7 +174,7 @@ export async function validationSuite(): Promise<void> {
       { path: 'pkg/c_test.go', added: ['\tt.Skip("flaky")'] },
     ]));
     const r2 = inspectIntegrity(other, designContract({}));
-    check('S5: xit, pytest skip marks and t.Skip are all recognised',
+    check('VAL-S5: xit, pytest skip marks and t.Skip are all recognised',
       r2.testsDisabled.length === 3);
   }
 
@@ -246,11 +246,11 @@ export async function validationSuite(): Promise<void> {
       { attempt: 2, passed: true, conclusive: true, detail: 'passed' },
     ];
     const flake = attribute({ taskId: 'p/T-0001', checkName: 'unit-test', originalFailure: 'assert', attempts: intermittent });
-    check('V1: intermittent is SUSPECTED_FLAKE, not VALIDATION_MISS',
+    check('VAL-V1-2: intermittent is SUSPECTED_FLAKE, not VALIDATION_MISS',
       flake.attribution === 'SUSPECTED_FLAKE');
-    check('V2: a flake is recorded against the test, not the task',
+    check('VAL-V2-2: a flake is recorded against the test, not the task',
       flake.attributedToTask === false);
-    check('V3: a flake may never tune the impact analyzer',
+    check('VAL-V3-2: a flake may never tune the impact analyzer',
       flake.influencesImpactAnalyzer === false);
 
     const consistent: RetryAttempt[] = [
@@ -258,14 +258,14 @@ export async function validationSuite(): Promise<void> {
       { attempt: 2, passed: false, conclusive: true, detail: 'failed' },
     ];
     const miss = attribute({ taskId: 'p/T-0001', checkName: 'unit-test', originalFailure: 'assert', attempts: consistent });
-    check('V4: consistent failure is VALIDATION_MISS and stays attributed',
+    check('VAL-V4-2: consistent failure is VALIDATION_MISS and stays attributed',
       miss.attribution === 'VALIDATION_MISS' && miss.attributedToTask && miss.influencesImpactAnalyzer);
-    check('V5: a flake verdict cannot suppress a real miss — they are different inputs',
+    check('VAL-V5-2: a flake verdict cannot suppress a real miss — they are different inputs',
       miss.attribution !== flake.attribution && miss.attributedToTask !== flake.attributedToTask);
 
     const inconclusive = attribute({ taskId: 'p/T-0001', checkName: 'unit-test', originalFailure: 'oom',
       attempts: [{ attempt: 1, passed: false, conclusive: false, detail: 'infrastructure failure' }] });
-    check('V6: an infrastructure failure during retry proves nothing and the failure stays attributed',
+    check('V6-2: an infrastructure failure during retry proves nothing and the failure stays attributed',
       inconclusive.attribution === 'INCONCLUSIVE' && inconclusive.attributedToTask);
 
     let runs = 0;
@@ -274,7 +274,7 @@ export async function validationSuite(): Promise<void> {
       async (n) => { runs += 1; return { passed: n === 2, conclusive: true, detail: `attempt ${n}` }; },
       4,
     );
-    check('V7: the retry loop stops as soon as intermittency is proven',
+    check('V7-2: the retry loop stops as soon as intermittency is proven',
       byRetry.attribution === 'SUSPECTED_FLAKE' && runs === 2);
 
     const records = ['e2e', 'e2e', 'e2e', 'unit'].map((c, i) => ({ checkName: c, taskId: `p/T-000${i}`, at: '2026-01-01' }));
@@ -287,8 +287,8 @@ export async function validationSuite(): Promise<void> {
   {
     const code = parseDiff(diffFor([{ path: 'app/thing.rb', removed: ['  x = 1'], added: ['  x = 2'] }]));
     const d = resolveTier({ diff: code, adapterId: 'generic', confidence: 'UNKNOWN' });
-    check('W1: a small code change under the generic adapter is NORMAL, not FAST', d.tier === 'NORMAL');
-    check('W2: the reason names the adapter, so it is not mistaken for a path rule',
+    check('W1-2: a small code change under the generic adapter is NORMAL, not FAST', d.tier === 'NORMAL');
+    check('W2-2: the reason names the adapter, so it is not mistaken for a path rule',
       d.escalations.some((e) => e.rule === 'genericAdapterFloor'));
 
     const docs = parseDiff(diffFor([{ path: 'docs/intro.md', added: ['prose'] }]));
@@ -310,32 +310,32 @@ export async function validationSuite(): Promise<void> {
     const state: ExpansionState = { granted: 0, budget: 2, findingsPerExpansion: [] };
 
     const vague = evaluateExpansion({ behavior: 'run everything to be safe' }, state);
-    check('X1: a request naming no behaviour is rejected',
+    check('VAL-X1: a request naming no behaviour is rejected',
       !vague.accepted && vague.code === 'REVIEW_EXPANSION_VAGUE');
-    check('X2: the rejection is recorded with the request itself',
+    check('VAL-X2: the rejection is recorded with the request itself',
       vague.request.behavior === 'run everything to be safe' && vague.detail.length > 20);
-    check('X3: the rejection explains what a good request looks like',
+    check('VAL-X3: the rejection explains what a good request looks like',
       /session refresh|name the behaviour/i.test(vague.detail));
-    check('X4: "not sure, just run the full suite" is also rejected',
+    check('VAL-X4: "not sure, just run the full suite" is also rejected',
       !evaluateExpansion({ behavior: 'not sure what this affects, full regression please' }, state).accepted);
 
     const concrete = evaluateExpansion({ behavior: 'session refresh may break for expired tokens' }, state);
-    check('Y1: a request naming a concrete behaviour is accepted',
+    check('VAL-Y1: a request naming a concrete behaviour is accepted',
       concrete.accepted && concrete.code === 'REVIEW_EXPANSION_ACCEPTED');
-    check('Y2: it counts against the budget', /1\/2/.test(concrete.detail));
+    check('VAL-Y2: it counts against the budget', /1\/2/.test(concrete.detail));
 
     const d = resolveTier({ diff: parseDiff(diffFor([{ path: 'src/pages/A.tsx', added: ['<p>x</p>'] }])), adapterId: 'node', confidence: 'KNOWN' });
-    check('Y3: an accepted expansion escalates the tier',
+    check('VAL-Y3: an accepted expansion escalates the tier',
       applyExpansion(d, { behavior: 'session refresh may break' }).tier === escalate(d.tier));
 
     const spent: ExpansionState = { granted: 2, budget: 2, findingsPerExpansion: [0, 0] };
     const over = evaluateExpansion({ behavior: 'token refresh may double-charge on retry' }, spent);
-    check('Y4: past the budget it is refused, not silently honoured',
+    check('VAL-Y4: past the budget it is refused, not silently honoured',
       !over.accepted && over.code === 'REVIEW_EXPANSION_BUDGET_EXHAUSTED');
-    check('Y5: the refusal is still recorded', over.request.behavior.length > 0);
-    check('Y6: repeated expansion with no findings is reported as unproductive',
+    check('VAL-Y5: the refusal is still recorded', over.request.behavior.length > 0);
+    check('VAL-Y6: repeated expansion with no findings is reported as unproductive',
       unproductiveExpansion(spent)?.code === 'REVIEW_EXPANSION_UNPRODUCTIVE');
-    check('Y7: productive expansions are not reported as unproductive',
+    check('VAL-Y7: productive expansions are not reported as unproductive',
       unproductiveExpansion({ granted: 2, budget: 2, findingsPerExpansion: [1, 0] }) === null);
     check('Y8: a wordy request with a real identifier still counts as concrete',
       assessConcreteness({ behavior: 'run everything, because the sessionRefresh path may be affected' }).concrete);
@@ -488,36 +488,36 @@ export async function validationSuite(): Promise<void> {
   section('configuration: the anti-gaming rules are not preferences');
   {
     const cfg: any = defaultConfig(TMP);
-    check('C1: a new project gets the fastest-safe profile',
+    check('VAL-C1: a new project gets the fastest-safe profile',
       cfg.validation.strategy === 'fastest-safe' && cfg.validation.hardening.reviewerExpansionBudget === 2);
-    check('C2: the defaults enable every hardening rule',
+    check('VAL-C2: the defaults enable every hardening rule',
       cfg.validation.hardening.mixedDiffMaxTier && cfg.validation.hardening.testSurfaceRisk
       && cfg.validation.hardening.unknownPlusRiskDirectDeep);
-    check('C3: the generic-adapter floor defaults to normal',
+    check('VAL-C3: the generic-adapter floor defaults to normal',
       cfg.validation.hardening.genericAdapterFloor === 'normal');
 
     const disabled = JSON.parse(JSON.stringify(cfg));
     disabled.validation.hardening.mixedDiffMaxTier = false;
-    check('C4: trying to disable mixed-diff resolution is a config ERROR, not a silent no-op',
+    check('VAL-C4: trying to disable mixed-diff resolution is a config ERROR, not a silent no-op',
       validateConfig(disabled).some((p) => p.level === 'error' && /mixedDiffMaxTier/.test(p.message)));
     disabled.validation.hardening.mixedDiffMaxTier = true;
     disabled.validation.hardening.testSurfaceRisk = false;
-    check('C5: the same for test-surface risk',
+    check('VAL-C5: the same for test-surface risk',
       validateConfig(disabled).some((p) => p.level === 'error' && /testSurfaceRisk/.test(p.message)));
 
     const fastFloor = JSON.parse(JSON.stringify(cfg));
     fastFloor.validation.hardening.genericAdapterFloor = 'fast';
-    check('C6: the generic adapter may not be given a FAST floor',
+    check('VAL-C6: the generic adapter may not be given a FAST floor',
       validateConfig(fastFloor).some((p) => p.level === 'error' && /genericAdapterFloor/.test(p.message)));
 
     const badStrategy = JSON.parse(JSON.stringify(cfg));
     badStrategy.validation.strategy = 'yolo';
-    check('C7: an unknown validation strategy is rejected',
+    check('VAL-C7: an unknown validation strategy is rejected',
       validateConfig(badStrategy).some((p) => p.level === 'error' && /validation\.strategy/.test(p.message)));
 
     const bigBudget = JSON.parse(JSON.stringify(cfg));
     bigBudget.validation.hardening.reviewerExpansionBudget = 9;
-    check('C8: a very large expansion budget is warned about, not silently accepted',
+    check('VAL-C8: a very large expansion budget is warned about, not silently accepted',
       validateConfig(bigBudget).some((p) => p.level === 'warning' && /reviewerExpansionBudget/.test(p.message)));
   }
 

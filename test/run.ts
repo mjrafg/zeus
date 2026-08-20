@@ -16,7 +16,7 @@ import { defaultConfig, renderConfig, validateConfig, readConfig, writeConfig, f
 import { probe, summarize } from '../src/doctor';
 import { main } from '../src/cli';
 
-import { check, section, totals } from './harness';
+import { check, section, totals, duplicateCheckNames, seenNames } from './harness';
 import { engineSuites } from './engine';
 import { boundarySuite } from './boundary';
 import { setupSuite } from './setup';
@@ -48,16 +48,16 @@ section('yaml subset: round-trip and rejection');
     policy: { protectedPaths: ['package.json', '.github/'], maxFilesChanged: 25 } };
   const text = stringify(obj as any);
   const back = parse(text) as any;
-  check('Y1: nested maps round-trip', back.project.adapter === 'node' && back.version === 1);
-  check('Y2: lists of scalars round-trip', Array.isArray(back.policy.protectedPaths) &&
+  check('CLI-Y1: nested maps round-trip', back.project.adapter === 'node' && back.version === 1);
+  check('CLI-Y2: lists of scalars round-trip', Array.isArray(back.policy.protectedPaths) &&
     back.policy.protectedPaths[1] === '.github/');
-  check('Y3: null and boolean survive', back.commands.unitTest === null && back.commands.flag === true);
-  check('Y4: numbers stay numbers', back.policy.maxFilesChanged === 25);
-  check('Y5: comments are ignored', (parse('# c\na: 1\nb: two # trailing\n') as any).b === 'two');
+  check('CLI-Y3: null and boolean survive', back.commands.unitTest === null && back.commands.flag === true);
+  check('CLI-Y4: numbers stay numbers', back.policy.maxFilesChanged === 25);
+  check('CLI-Y5: comments are ignored', (parse('# c\na: 1\nb: two # trailing\n') as any).b === 'two');
   let threw = false;
   try { parse('a:\n\tb: 1\n'); } catch { threw = true; }
-  check('Y6: tab indentation is rejected loudly, not half-parsed', threw);
-  check('Y7: strings needing quotes are quoted', /"true"/.test(stringify({ a: 'true' } as any)));
+  check('CLI-Y6: tab indentation is rejected loudly, not half-parsed', threw);
+  check('CLI-Y7: strings needing quotes are quoted', /"true"/.test(stringify({ a: 'true' } as any)));
 }
 
 section('project detection (no repository code is executed)');
@@ -113,32 +113,32 @@ section('config generation and validation');
 {
   const root = mk('cfg-app', { 'package.json': JSON.stringify({ scripts: { test: 'jest' } }), 'package-lock.json': '' });
   const cfg = defaultConfig(root);
-  check('C1: merge and deploy are OFF by default',
+  check('CLI-C1: merge and deploy are OFF by default',
     cfg.policy.autoMerge === false && cfg.policy.autoDeploy === false);
-  check('C2: heavy suites are serialized and bounded by default',
+  check('CLI-C2: heavy suites are serialized and bounded by default',
     cfg.resources.globalHeavyTestConcurrency === 1 && cfg.resources.heavyTestTimeoutSeconds === 180 &&
     cfg.resources.maxTestWorkers === 2);
-  check('C3: billing is subscription-CLI only', cfg.providers.billing === 'subscription-cli-only');
+  check('CLI-C3: billing is subscription-CLI only', cfg.providers.billing === 'subscription-cli-only');
   const file = writeConfig(root, cfg);
-  check('C4: config is written where init promises', file.endsWith('.zeus/config.yaml'));
+  check('CLI-C4: config is written where init promises', file.endsWith('.zeus/config.yaml'));
   const back = readConfig(root)!;
-  check('C5: written config reads back identically',
+  check('CLI-C5: written config reads back identically',
     back.project.adapter === 'node' && back.commands.unitTest === 'npm run test' &&
     back.policy.maxFilesChanged === 25);
-  check('C6: a clean config validates', validateConfig(back).filter((p) => p.level === 'error').length === 0);
-  check('C7: an absolute state path is rejected',
+  check('CLI-C6: a clean config validates', validateConfig(back).filter((p) => p.level === 'error').length === 0);
+  check('CLI-C7: an absolute state path is rejected',
     validateConfig({ ...back, paths: { ...back.paths, state: '/etc' } }).some((p) => p.level === 'error'));
-  check('C8: path traversal out of the project is rejected',
+  check('CLI-C8: path traversal out of the project is rejected',
     validateConfig({ ...back, paths: { ...back.paths, logs: '../../etc' } }).some((p) => p.level === 'error'));
-  check('C9: paid billing is rejected outright',
+  check('CLI-C9: paid billing is rejected outright',
     validateConfig({ ...back, providers: { ...back.providers, billing: 'api-key' } })
       .some((p) => p.level === 'error'));
-  check('C10: raising heavy-test concurrency warns', 
+  check('CLI-C10: raising heavy-test concurrency warns', 
     validateConfig({ ...back, resources: { ...back.resources, globalHeavyTestConcurrency: 4 } })
       .some((p) => p.level === 'warning'));
-  check('C11: the rendered file carries an explanatory header',
+  check('CLI-C11: the rendered file carries an explanatory header',
     renderConfig(cfg).startsWith('# Zeus project configuration.'));
-  check('C12: project root is found from a subdirectory',
+  check('CLI-C12: project root is found from a subdirectory',
     findProjectRoot(path.join(root, 'nested')) === null || true);
 }
 
@@ -189,9 +189,9 @@ section('engine commands are honest about not being wired yet');
   const root = mk('engine-app', { 'package.json': '{}' });
   const cwd = process.cwd();
   process.chdir(root); await main(['init']); const rc = await main(['run', 'nope', '--mock']); process.chdir(cwd);
-  check('E1: run executes the real engine and returns a real code', typeof rc === 'number');
-  check('E2: version is reported', (await main(['version'])) === 0);
-  check('E3: unknown commands exit non-zero', (await main(['nope'])) === 2);
+  check('CLI-E1: run executes the real engine and returns a real code', typeof rc === 'number');
+  check('CLI-E2: version is reported', (await main(['version'])) === 0);
+  check('CLI-E3: unknown commands exit non-zero', (await main(['nope'])) === 2);
 }
 
 }
@@ -230,17 +230,17 @@ async function governorTests(): Promise<void> {
   const results = await Promise.all([1, 2, 3, 4, 5].map(heavy));
   check('A: five heavy jobs never overlap (max concurrency 1)',
     gov.maxObserved.get('heavy') === 1, `maxObserved=${gov.maxObserved.get('heavy')}`);
-  check('A: all five still completed', results.every((r) => r.outcome === 'COMPLETED'));
-  check('A: later jobs record the time they spent queued',
+  check('A-2: all five still completed', results.every((r) => r.outcome === 'COMPLETED'));
+  check('A-3: later jobs record the time they spent queued',
     results.filter((r) => r.queueWaitMs > 100).length >= 3);
-  check('A: the governor is idle again afterwards',
+  check('A-4: the governor is idle again afterwards',
     gov.activeCount('heavy') === 0 && gov.queueDepth('heavy') === 0);
 
   // Light and heavy classes are independent pools.
   const gov2 = new ResourceGovernor({ ...DEFAULT_LIMITS, globalHeavyConcurrency: 1, globalLightConcurrency: 3 });
   await Promise.all([1, 2, 3].map((i) =>
     gov2.run({ id: `l${i}`, projectId: 'p1', cls: 'light', command: quick, args: [], cwd: TMP2 })));
-  check('A: light jobs use their own, wider pool', (gov2.maxObserved.get('light') ?? 0) > 1);
+  check('A-5: light jobs use their own, wider pool', (gov2.maxObserved.get('light') ?? 0) > 1);
 
   // (B) one pathological job: the wall clock and the tree kill contain it.
   const pidFile = path.join(TMP2, 'child.pid');
@@ -249,12 +249,12 @@ async function governorTests(): Promise<void> {
   const timed = await gov.run({ id: 'hang1', projectId: 'p1', cls: 'heavy', command: hang, args: [], cwd: TMP2, timeoutSeconds: 2 });
   check('B: a hung job is stopped by the wall clock',
     timed.outcome === 'TIMEOUT' && Date.now() - t0 < 25_000, `${timed.outcome} in ${Date.now() - t0}ms`);
-  check('B: a timeout is NOT reported as a product signal', timed.productSignal === false);
+  check('B-2: a timeout is NOT reported as a product signal', timed.productSignal === false);
   await new Promise((r) => setTimeout(r, 800));
   const childPid = Number((fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '0').trim());
   const childGone = !childPid || (() => { try { process.kill(childPid, 0); return false; } catch { return true; } })();
-  check('B: the whole process tree dies, not just the shell', childGone, `childPid=${childPid}`);
-  check('B: the slot is returned after a timeout', gov.activeCount('heavy') === 0);
+  check('B-3: the whole process tree dies, not just the shell', childGone, `childPid=${childPid}`);
+  check('B-4: the slot is returned after a timeout', gov.activeCount('heavy') === 0);
 
   // Failure classification: code failure vs resource exhaustion.
   const failing = sh('fail.sh', 'echo "1 test failed"; exit 1');
@@ -262,10 +262,10 @@ async function governorTests(): Promise<void> {
   check('C: a non-zero exit IS a product signal', failed.outcome === 'FAILED' && failed.productSignal === true);
   const oom = sh('oom.sh', 'echo "FATAL ERROR: JavaScript heap out of memory"; exit 134');
   const oomRes = await gov.run({ id: 'o1', projectId: 'p1', cls: 'heavy', command: oom, args: [], cwd: TMP2 });
-  check('C: an out-of-memory death is RESOURCE_EXHAUSTED, not a code failure',
+  check('C-2: an out-of-memory death is RESOURCE_EXHAUSTED, not a code failure',
     oomRes.outcome === 'RESOURCE_EXHAUSTED' && oomRes.productSignal === false);
   const missing = await gov.run({ id: 's1', projectId: 'p1', cls: 'heavy', command: path.join(TMP2, 'nope.sh'), args: [], cwd: TMP2 });
-  check('C: a spawn failure is infrastructure, not code',
+  check('C-3: a spawn failure is infrastructure, not code',
     missing.outcome === 'SPAWN_ERROR' && missing.productSignal === false);
 
   // (D) cancellation kills the tree and frees the slot for the next job.
@@ -275,22 +275,55 @@ async function governorTests(): Promise<void> {
   const cancelled = await longRun;
   check('D: cancelling a project kills its running job',
     killedN === 1 && cancelled.outcome === 'CANCELLED', `killed=${killedN} outcome=${cancelled.outcome}`);
-  check('D: a cancelled job is not misreported as a timeout or a code failure',
+  check('D-2: a cancelled job is not misreported as a timeout or a code failure',
     cancelled.productSignal === false);
-  check('D: the slot is free for the next task', gov.activeCount('heavy') === 0);
+  check('D-3: the slot is free for the next task', gov.activeCount('heavy') === 0);
   const after = await gov.run({ id: 'after', projectId: 'p1', cls: 'heavy', command: quick, args: [], cwd: TMP2 });
-  check('D: the next queued job can start immediately afterwards', after.outcome === 'COMPLETED');
+  check('D-4: the next queued job can start immediately afterwards', after.outcome === 'COMPLETED');
 
   // Isolation is reported honestly, whatever the kernel offers.
   const snap = gov.snapshot();
   check('E: capabilities and limits are visible for the control centre',
     typeof snap.capabilities.cgroup2 === 'boolean' && snap.limits.globalHeavyConcurrency === 1 &&
     Array.isArray(snap.liveJobs));
-  check('E: the fallback isolation mode is named, not hidden',
+  check('E-2: the fallback isolation mode is named, not hidden',
     ['systemd-run', 'process-group'].includes(after.isolation));
-  check('E: shutdown reports how many trees it terminated', typeof gov.shutdown('test') === 'number');
+  check('E-3: shutdown reports how many trees it terminated', typeof gov.shutdown('test') === 'number');
 
   fs.rmSync(TMP2, { recursive: true, force: true });
+}
+
+/**
+ * The suite's own identity.
+ *
+ * Runs last, because it asserts about every check that ran before it. The
+ * gates refuse by name: `zeus self-check` parses `FAIL <name>` and shows that
+ * name to the operator, and `docs/AUDIT-STATUS.json` maps findings to the
+ * tests that hold them closed. Both are only as good as the names being
+ * unique, and 171 checks shared one before this ran.
+ */
+function identitySuite(): void {
+  section('the suite\'s own identity: one name, one check');
+  const dups = duplicateCheckNames();
+  check('UNIQ1: every check name is globally unique',
+    dups.length === 0,
+    dups.length
+      ? dups.map((d) => `${d.token} x${d.count} [${d.names.map((n) => n.slice(0, 40)).join(' | ')}]`).join('\n        ')
+      : `${seenNames().length} checks, all distinct`);
+
+  // The other half of the same promise: a finding whose named regression test
+  // does not exist is a closure nobody can verify.
+  const statusPath = path.resolve(__dirname, '../docs/AUDIT-STATUS.json');
+  if (fs.existsSync(statusPath)) {
+    const names = new Set(seenNames());
+    const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+    const referenced: string[] = [];
+    for (const f of status.findings ?? []) for (const t of f.regressionTests ?? []) referenced.push(t);
+    const missing = referenced.filter((r) => !names.has(r));
+    check('UNIQ2: every regression test named in AUDIT-STATUS.json exists',
+      missing.length === 0,
+      missing.length ? missing.slice(0, 8).join(' | ') : `${referenced.length} reference(s) resolve`);
+  }
 }
 
 (async () => {
@@ -307,6 +340,7 @@ async function governorTests(): Promise<void> {
   await cgroupSuite();
   redactionSuite();
   gitReadOnlySuite();
+  identitySuite();
   const t = totals();
   console.log(`\nzeus tests: ${t.passed} passed, ${t.failed} failed`);
   if (t.failures.length) console.log('failures:\n  ' + t.failures.join('\n  '));

@@ -154,9 +154,12 @@ export async function auditRegressionSuite(): Promise<void> {
       ['postgres://user:hunter2@db:5432/app', 'credentialed url'],
       ['DATABASE_PASSWORD=hunter2', 'named secret'],
     ];
-    for (const [secret, what] of cases) {
+    // Indexed: five iterations, five distinct names, because the gates refuse
+    // by name. The shape is invisible to any static reading — the literal
+    // appears once — which is why the suite asserts it at runtime.
+    for (const [i, [secret, what]] of cases.entries()) {
       const r = redactSecrets(`test output before ${secret} and after`);
-      check(`R-C1: ${what} is redacted from recorded output`,
+      check(`R-C1-${i + 1}: ${what} is redacted from recorded output`,
         !r.text.includes(secret) && r.redactions > 0, r.text);
     }
     check('R-C2: ordinary output is left intact',

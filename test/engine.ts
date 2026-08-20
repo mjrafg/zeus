@@ -42,12 +42,12 @@ async function policySuite(): Promise<void> {
   fs.mkdirSync(wt, { recursive: true });
   const policy = defaultPolicy(root, wt);
 
-  check('X1: a path inside the worktree resolves', resolveWithin(wt, 'src/a.ts').ok);
-  check('X2: ../ traversal is refused', !resolveWithin(wt, '../../etc/passwd').ok);
-  check('X3: an absolute path outside is refused', !resolveWithin(wt, '/etc/passwd').ok);
+  check('EN-X1: a path inside the worktree resolves', resolveWithin(wt, 'src/a.ts').ok);
+  check('EN-X2: ../ traversal is refused', !resolveWithin(wt, '../../etc/passwd').ok);
+  check('EN-X3: an absolute path outside is refused', !resolveWithin(wt, '/etc/passwd').ok);
   // Symlink escape: the string stays inside, the kernel would not.
   fs.symlinkSync('/etc', path.join(wt, 'escape'));
-  check('X4: a symlink pointing out of the worktree is refused',
+  check('EN-X4: a symlink pointing out of the worktree is refused',
     !resolveWithin(wt, 'escape/passwd').ok);
   check('X5: a file that does not exist yet is allowed if its parent is inside',
     resolveWithin(wt, 'newdir/new.txt').ok);
@@ -99,24 +99,24 @@ async function supervisorSuite(): Promise<void> {
     budgets.memoryMaxMb <= budgets.poolMemMb && budgets.cpuQuotaPercent <= budgets.poolCpus * 100);
 
   const ok = await sup.run({ id: 'e1', projectId: 'p', cls: 'light', command: 'echo', args: ['hello'], policy });
-  check('S1: a normal command completes and is a product signal',
+  check('EN-S1: a normal command completes and is a product signal',
     ok.outcome === 'COMPLETED' && ok.productSignal && ok.stdout.includes('hello'));
   const denied = await sup.run({ id: 'e2', projectId: 'p', cls: 'light', command: 'cat', args: ['/etc/shadow'], policy });
-  check('S2: a policy-denied command never spawns',
+  check('EN-S2: a policy-denied command never spawns',
     denied.outcome === 'POLICY_DENIED' && denied.pid === null && denied.violations.length > 0);
-  check('S2: a denial is not a product signal', denied.productSignal === false);
+  check('EN-S2-2: a denial is not a product signal', denied.productSignal === false);
   const badCwd = await sup.run({ id: 'e3', projectId: 'p', cls: 'light', command: 'echo', args: ['x'], cwd: '../..', policy });
-  check('S3: a cwd outside the worktree is refused', badCwd.outcome === 'POLICY_DENIED');
+  check('EN-S3: a cwd outside the worktree is refused', badCwd.outcome === 'POLICY_DENIED');
 
   const failing = await sup.run({ id: 'e4', projectId: 'p', cls: 'light', command: 'sh', args: ['-c', 'exit 3'], policy });
-  check('S4: a non-zero exit is FAILED and IS a product signal',
+  check('EN-S4: a non-zero exit is FAILED and IS a product signal',
     failing.outcome === 'FAILED' && failing.exitCode === 3 && failing.productSignal);
 
   const missing = await sup.run({ id: 'e5', projectId: 'p', cls: 'light', command: 'definitely-not-installed-xyz', args: [], policy });
-  check('S4b: a missing toolchain is INFRASTRUCTURE_FAILURE, never a failing test',
+  check('EN-S4b: a missing toolchain is INFRASTRUCTURE_FAILURE, never a failing test',
     missing.outcome === 'INFRASTRUCTURE_FAILURE' && missing.productSignal === false, missing.outcome);
   const confinedTool = await sup.run({ id: 'e6', projectId: 'p', cls: 'light', command: 'definitely-not-installed-xyz', args: [], policy, confineFilesystem: true });
-  check('S4c: the same holds under filesystem confinement, where the wrapper hides it',
+  check('EN-S4c: the same holds under filesystem confinement, where the wrapper hides it',
     confinedTool.outcome === 'INFRASTRUCTURE_FAILURE');
 
   // An agent CLI authenticates out of the real HOME; only confined project
@@ -129,13 +129,13 @@ async function supervisorSuite(): Promise<void> {
     confinedEnv.stdout.trim().startsWith(wt), confinedEnv.stdout.trim());
 
   const iso = isolationReport();
-  check('S5: the isolation backend is reported honestly',
+  check('EN-S5: the isolation backend is reported honestly',
     ['systemd-scope', 'bubblewrap', 'process-group'].includes(iso.selected) &&
     (iso.fallbackMode === (iso.selected === 'process-group')));
-  check('S5: a fallback never claims kernel-enforced limits',
+  check('EN-S5-2: a fallback never claims kernel-enforced limits',
     !iso.fallbackMode || iso.enforces.join() === 'process-group termination');
   const wrapped = wrap('echo', ['x'], { policy, budgets, jobId: 'j1', confineFilesystem: false }, detectBackends());
-  check('S6: when a scope is available the caps are actually passed to it',
+  check('EN-S6: when a scope is available the caps are actually passed to it',
     wrapped.backend !== 'systemd-scope' ||
     (wrapped.args.some((a) => a.startsWith('--property=MemoryMax=')) &&
      wrapped.args.some((a) => a.startsWith('--property=TasksMax='))));
@@ -156,14 +156,14 @@ async function pathologicalSuite(): Promise<void> {
   const before = Date.now();
   const res = await sup.run({ id: 'bomb1', projectId: 'p', taskId: 'T-1', cls: 'heavy', command: bomb, args: [], policy, confineFilesystem: false });
   const elapsed = Date.now() - before;
-  check('R1: the pathological task is bounded by the wall clock',
+  check('EN-R1: the pathological task is bounded by the wall clock',
     res.outcome === 'TIMEOUT' && elapsed < 30_000, `${res.outcome} in ${elapsed}ms`);
-  check('R2: resource/infrastructure failure is not reported as a code failure', res.productSignal === false);
+  check('EN-R2: resource/infrastructure failure is not reported as a code failure', res.productSignal === false);
 
   await new Promise((r) => setTimeout(r, 1500));
   const leaked = spawnSync('sh', ['-c', 'pgrep -f "[s]leep 30033" | wc -l'], { encoding: 'utf8' }).stdout.trim();
-  check('R3: all 100 descendants are killed, not just the parent', leaked === '0', `remaining=${leaked}`);
-  check('R4: the governor slot is released after the kill', sup.activeCount('heavy') === 0);
+  check('EN-R3: all 100 descendants are killed, not just the parent', leaked === '0', `remaining=${leaked}`);
+  check('EN-R4: the governor slot is released after the kill', sup.activeCount('heavy') === 0);
 
   // The control plane stays responsive: a light job runs while a heavy one is
   // still being cleaned up, and unrelated state stays readable.
@@ -171,9 +171,9 @@ async function pathologicalSuite(): Promise<void> {
   store.append({ taskId: 'T-other', type: 'TASK_CREATED', payload: { description: 'unrelated' } });
   const t0 = Date.now();
   const light = await sup.run({ id: 'l1', projectId: 'p2', cls: 'light', command: 'echo', args: ['alive'], policy });
-  check('R5: the control plane can still execute while a task misbehaved',
+  check('EN-R5: the control plane can still execute while a task misbehaved',
     light.outcome === 'COMPLETED' && Date.now() - t0 < 15_000);
-  check('R6: unrelated project state remains readable', store.read('T-other').length === 1);
+  check('EN-R6: unrelated project state remains readable', store.read('T-other').length === 1);
 }
 
 async function lockSuite(): Promise<void> {
@@ -181,11 +181,11 @@ async function lockSuite(): Promise<void> {
   const stateDir = path.join(TMP, 'lock-state');
   const a = new ProjectLock(stateDir, 'proj', 30);
   const r1 = a.acquire();
-  check('L1: the first instance acquires the lease', r1.ok && !!r1.lease);
+  check('EN-L1: the first instance acquires the lease', r1.ok && !!r1.lease);
 
   const b = new ProjectLock(stateDir, 'proj', 30);
   const r2 = b.acquire();
-  check('L2: a second instance is refused, with a specific reason',
+  check('EN-L2: a second instance is refused, with a specific reason',
     !r2.ok && !!r2.heldBy && /owned by/.test(r2.reason ?? ''));
 
   // The real test: a genuinely separate PROCESS, not another object.
@@ -205,13 +205,13 @@ const { ProjectLock } = require(${JSON.stringify(path.resolve(__dirname, '../src
   const childOut = (child.stdout ?? '').trim();
   let parsed: any = null;
   try { parsed = JSON.parse(childOut); } catch { /* reported below */ }
-  check('L3: a separate OS PROCESS is also refused the lease',
+  check('EN-L3: a separate OS PROCESS is also refused the lease',
     parsed ? parsed.ok === false && /owned by/.test(parsed.reason ?? '') : false,
     parsed ? '' : `probe output: ${childOut.slice(0, 120) || (child.stderr ?? '').slice(0, 160)}`);
 
   a.release();
   const r3 = b.acquire();
-  check('L4: after release, another instance may take over', r3.ok);
+  check('EN-L4: after release, another instance may take over', r3.ok);
   b.release();
 
   // Crash recovery: a lease whose owner process is gone is reclaimed.
@@ -247,7 +247,7 @@ async function eventStoreSuite(): Promise<void> {
   store.append({ taskId: id, type: 'TASK_CREATED', payload: { description: 'x' } });
   store.append({ taskId: id, type: 'STATE_CHANGED', payload: { to: 'DESIGN' } });
   store.append({ taskId: id, type: 'STATE_CHANGED', payload: { to: 'IMPLEMENT' } });
-  check('V1: events are chained and verify end to end', store.verify(id).ok && store.verify(id).events === 3);
+  check('EN-V1: events are chained and verify end to end', store.verify(id).ok && store.verify(id).events === 3);
 
   // Tampering must be detectable.
   const file = store.logPath(id);
@@ -255,25 +255,25 @@ async function eventStoreSuite(): Promise<void> {
   const tampered = JSON.parse(lines[1]); tampered.payload.to = 'COMPLETED';
   fs.writeFileSync(file, [lines[0], JSON.stringify(tampered), lines[2]].join('\n') + '\n');
   const v = store.verify(id);
-  check('V2: an edited event is detected', !v.ok && v.problems.some((p) => /modified after it was written/.test(p)));
+  check('EN-V2: an edited event is detected', !v.ok && v.problems.some((p) => /modified after it was written/.test(p)));
   fs.writeFileSync(file, lines.join('\n') + '\n');
-  check('V2: restoring the log restores integrity', store.verify(id).ok);
+  check('EN-V2-2: restoring the log restores integrity', store.verify(id).ok);
 
   // A crash mid-append leaves a torn final line.
   fs.appendFileSync(file, '{"id":"EV-partial","taskId":"T-0001","seq":4,"ts":"2026');
   const torn = store.read(id);
-  check('V3: a torn final line is excluded, not parsed as truth', torn.length === 3);
+  check('EN-V3: a torn final line is excluded, not parsed as truth', torn.length === 3);
   const repaired = store.read(id, { repair: true });
-  check('V3: repair quarantines the torn line instead of deleting it',
+  check('EN-V3-2: repair quarantines the torn line instead of deleting it',
     repaired.length === 3 && fs.readdirSync(store.taskDir(id)).some((f) => f.includes('.torn-')));
-  check('V3: the log verifies again after repair', store.verify(id).ok);
+  check('EN-V3-3: the log verifies again after repair', store.verify(id).ok);
 
   // Corruption that is NOT the final line must not be silently tolerated.
   const good = fs.readFileSync(file, 'utf8');
   fs.writeFileSync(file, good.replace(/\n/, '\nnot-json\n'));
   let threw = false;
   try { store.read(id); } catch { threw = true; }
-  check('V4: corruption in the middle of the log raises, never guesses', threw);
+  check('EN-V4: corruption in the middle of the log raises, never guesses', threw);
   fs.writeFileSync(file, good);
 
   // Appends survive a real process crash: the child is SIGKILLed mid-run.
@@ -292,9 +292,9 @@ async function eventStoreSuite(): Promise<void> {
   const crashStore = new EventStore(crashState);
   const recovered = crashStore.read('T-crash', { repair: true });
   const rv = crashStore.verify('T-crash');
-  check('V5: a SIGKILL during appends leaves a readable, verifiable log',
+  check('EN-V5: a SIGKILL during appends leaves a readable, verifiable log',
     rv.ok, `events=${recovered.length} problems=${rv.problems.slice(0, 1).join('')}`);
-  check('V5: every recovered event is intact and sequential',
+  check('EN-V5-2: every recovered event is intact and sequential',
     recovered.every((e, i) => e.seq === i + 1));
 }
 
@@ -315,15 +315,15 @@ async function lifecycleSuite(): Promise<void> {
     projectRoot: root, config: cfg, supervisor: sup,
     providers: { planner: mockProvider(), implementer: mockProvider(), reviewer: mockProvider() },
   });
-  check('E1: the project lease is acquired before any state is written', engine.acquire().ok);
+  check('EN-E1: the project lease is acquired before any state is written', engine.acquire().ok);
   const rec = engine.createTask('Fix the login validation bug');
   const final = await engine.run(rec.taskId);
   const evs = engine.events.read(rec.taskId);
   const states = evs.filter((e) => e.type === 'STATE_CHANGED').map((e) => (e.payload as any).to);
-  check('E2: the lifecycle runs NEW → DESIGN → IMPLEMENT → VERIFY → REVIEW → FINAL_ACCEPTANCE',
+  check('EN-E2: the lifecycle runs NEW → DESIGN → IMPLEMENT → VERIFY → REVIEW → FINAL_ACCEPTANCE',
     ['DESIGN', 'IMPLEMENT', 'VERIFY', 'REVIEW', 'FINAL_ACCEPTANCE'].every((s) => states.includes(s)),
     states.join(' → '));
-  check('E3: the task reaches a terminal state', final === 'COMPLETED', final);
+  check('EN-E3: the task reaches a terminal state', final === 'COMPLETED', final);
   check('E4: the event log verifies', engine.events.verify(rec.taskId).ok);
   // The task log must describe THIS project only; the boundary suite owns the
   // list of identifiers that must never appear anywhere product-facing.
@@ -337,13 +337,13 @@ async function lifecycleSuite(): Promise<void> {
 
   section('required-test correctness: outcomes stay distinct (Phase 11)');
   const mk = (o: any) => classifyCheck(o as any, true);
-  check('Q1: COMPLETED is PASSED', mk({ outcome: 'COMPLETED' }) === 'PASSED');
-  check('Q2: a non-zero exit is TEST_FAILED', mk({ outcome: 'FAILED' }) === 'TEST_FAILED');
-  check('Q3: a timeout is TEST_TIMEOUT, not TEST_FAILED', mk({ outcome: 'TIMEOUT' }) === 'TEST_TIMEOUT');
-  check('Q4: an OOM is RESOURCE_LIMIT_EXCEEDED', mk({ outcome: 'RESOURCE_LIMIT_EXCEEDED' }) === 'RESOURCE_LIMIT_EXCEEDED');
-  check('Q5: a policy denial of a REQUIRED test is REQUIRED_TEST_NOT_RUN',
+  check('EN-Q1: COMPLETED is PASSED', mk({ outcome: 'COMPLETED' }) === 'PASSED');
+  check('EN-Q2: a non-zero exit is TEST_FAILED', mk({ outcome: 'FAILED' }) === 'TEST_FAILED');
+  check('EN-Q3: a timeout is TEST_TIMEOUT, not TEST_FAILED', mk({ outcome: 'TIMEOUT' }) === 'TEST_TIMEOUT');
+  check('EN-Q4: an OOM is RESOURCE_LIMIT_EXCEEDED', mk({ outcome: 'RESOURCE_LIMIT_EXCEEDED' }) === 'RESOURCE_LIMIT_EXCEEDED');
+  check('EN-Q5: a policy denial of a REQUIRED test is REQUIRED_TEST_NOT_RUN',
     mk({ outcome: 'POLICY_DENIED' }) === 'REQUIRED_TEST_NOT_RUN');
-  check('Q6: a spawn failure is INFRASTRUCTURE_FAILURE',
+  check('EN-Q6: a spawn failure is INFRASTRUCTURE_FAILURE',
     mk({ outcome: 'INFRASTRUCTURE_FAILURE' }) === 'INFRASTRUCTURE_FAILURE');
   check('Q7: only PASSED lets acceptance continue',
     checkAllowsAcceptance('PASSED') &&
@@ -364,7 +364,7 @@ async function lifecycleSuite(): Promise<void> {
   const final2 = await engine2.run(rec2.taskId);
   check('Q8: a required test that never ran blocks acceptance',
     final2 === 'NEEDS_RECONCILIATION', final2);
-  check('Q8: and the reason names the outcome, not a fake failure',
+  check('Q8-2: and the reason names the outcome, not a fake failure',
     engine2.events.read(rec2.taskId).some((e) => e.type === 'STATE_CHANGED' &&
       /REQUIRED_TEST_NOT_RUN/.test(String((e.payload as any).reason ?? ''))));
   engine2.release();
@@ -382,7 +382,7 @@ async function lifecycleSuite(): Promise<void> {
   const final3 = await engine3.run(rec3.taskId);
   check('Q9: a project with no executable verification cannot claim acceptance',
     final3 === 'NEEDS_RECONCILIATION', final3);
-  check('Q9: and the absence of verification is recorded explicitly',
+  check('Q9-2: and the absence of verification is recorded explicitly',
     engine3.events.read(rec3.taskId).some((e) => e.type === 'NO_VERIFICATION_CONFIGURED'));
   engine3.release();
 
@@ -414,19 +414,19 @@ async function cancelAndCrashSuite(): Promise<void> {
   const running = engine.run(rec.taskId);
   await new Promise((r) => setTimeout(r, 3000));
   const st = engine.task(rec.taskId)!;
-  check('C1: status is observable while the task runs', !!st && st.state !== 'NEW', st.state);
-  check('C1: logs are readable while the task runs', engine.logs(rec.taskId).length > 0);
+  check('EN-C1: status is observable while the task runs', !!st && st.state !== 'NEW', st.state);
+  check('EN-C1-2: logs are readable while the task runs', engine.logs(rec.taskId).length > 0);
 
   const cancelled = engine.cancel(rec.taskId, 'operator cancelled');
   const final = await running;
-  check('C2: cancel terminates the running process tree', cancelled.killed >= 1, `killed=${cancelled.killed}`);
-  check('C3: the task ends cancelled, not failed', engine.task(rec.taskId)!.state === 'CANCELLED', final);
-  check('C4: evidence is preserved after cancellation',
+  check('EN-C2: cancel terminates the running process tree', cancelled.killed >= 1, `killed=${cancelled.killed}`);
+  check('EN-C3: the task ends cancelled, not failed', engine.task(rec.taskId)!.state === 'CANCELLED', final);
+  check('EN-C4: evidence is preserved after cancellation',
     engine.events.read(rec.taskId).length > 3 && engine.events.verify(rec.taskId).ok);
-  check('C5: governor resources are released', sup.activeCount('heavy') === 0 && sup.activeCount('agent') === 0);
+  check('EN-C5: governor resources are released', sup.activeCount('heavy') === 0 && sup.activeCount('agent') === 0);
   await new Promise((r) => setTimeout(r, 800));
   const leaked = spawnSync('sh', ['-c', 'pgrep -f "[s]leep 30011" | wc -l'], { encoding: 'utf8' }).stdout.trim();
-  check('C6: no orphan remains from the cancelled task', leaked === '0', `remaining=${leaked}`);
+  check('EN-C6: no orphan remains from the cancelled task', leaked === '0', `remaining=${leaked}`);
   engine.release();
 
   // The real cancellation case: `zeus cancel` runs in a DIFFERENT process
@@ -452,13 +452,13 @@ async function cancelAndCrashSuite(): Promise<void> {
   const beforeKill = spawnSync('sh', ['-c', 'pgrep -f "[s]leep 30022" | wc -l'], { encoding: 'utf8' }).stdout.trim();
   const { killRecorded, listRunRecords, registryDirFor } = require('../src/engine/exec');
   const recorded = listRunRecords(registryDirFor(state3));
-  check('C11: a running execution is recorded on disk where another process can find it',
+  check('EN-C11: a running execution is recorded on disk where another process can find it',
     recorded.length === 1 && recorded[0].taskId === 'T-XPROC' && recorded[0].pgid > 1,
     `records=${recorded.length} sleeps=${beforeKill}`);
   const killedX = killRecorded(state3, { taskId: 'T-XPROC' }, 'cancelled from another process');
   await new Promise((r) => setTimeout(r, 1500));
   const afterKill = spawnSync('sh', ['-c', 'pgrep -f "[s]leep 30022" | wc -l'], { encoding: 'utf8' }).stdout.trim();
-  check('C12: a SEPARATE process can cancel and the tree really dies',
+  check('EN-C12: a SEPARATE process can cancel and the tree really dies',
     killedX.killed === 1 && afterKill === '0', `killed=${killedX.killed} remaining=${afterKill}`);
   check('C13: the registry entry is removed after the kill',
     listRunRecords(registryDirFor(state3)).length === 0);
@@ -479,12 +479,12 @@ async function cancelAndCrashSuite(): Promise<void> {
   const evs = after.read('T-0001');
   const lastStarted = evs.filter((e) => e.type === 'AGENT_STARTED').pop();
   const finished = evs.some((e) => e.type === 'AGENT_FINISHED' || e.type === 'AGENT_FAILED');
-  check('C7: a crash mid-phase is visible as a started-but-unfinished phase',
+  check('EN-C7: a crash mid-phase is visible as a started-but-unfinished phase',
     !!lastStarted && !finished);
-  check('C8: the dirty worktree is preserved, not reset',
+  check('EN-C8: the dirty worktree is preserved, not reset',
     fs.existsSync(path.join(root2, 'wt/dirty.js')));
-  check('C9: the log still verifies after the crash', after.verify('T-0001').ok);
-  check('C10: missing final JSON is NOT read as "nothing happened"',
+  check('EN-C9: the log still verifies after the crash', after.verify('T-0001').ok);
+  check('EN-C10: missing final JSON is NOT read as "nothing happened"',
     evs.some((e) => e.type === 'AGENT_STARTED') && evs.length === 3);
 }
 
@@ -623,10 +623,14 @@ async function reviewIndependenceSuite(): Promise<void> {
     ok.prompt.includes('Add a JSDoc comment'));
 
   // Forbidden by KIND.
-  for (const kind of ['planner-reasoning', 'planner-plan', 'implementer-transcript',
-    'implementer-rationale', 'previous-review', 'adjudication', 'acceptance-verdict', 'area-context'] as const) {
+  // The index is part of the name because a loop emits several checks and the
+  // gates refuse BY NAME: eight checks all answering to "RI4" made a refusal
+  // ambiguous, and no static reading of this file could see it — the literal
+  // appears once.
+  for (const [i, kind] of (['planner-reasoning', 'planner-plan', 'implementer-transcript',
+    'implementer-rationale', 'previous-review', 'adjudication', 'acceptance-verdict', 'area-context'] as const).entries()) {
     const bad = buildReviewPayload({ ...base, inputs: [...clean, { kind, label: `LEAK-${kind}`, content: 'x' }] });
-    check(`RI4: ${kind} is refused by policy`,
+    check(`RI4-${i + 1}: ${kind} is refused by policy`,
       !bad.valid && bad.violations.some((v) => v.kind === kind) && bad.prompt === '');
   }
 
@@ -639,10 +643,10 @@ async function reviewIndependenceSuite(): Promise<void> {
     ['adjudication', 'ADJUDICATION: finding R-1 rejected'],
     ['area context', 'AREA CONTEXT\nareas: authentication-ui'],
   ];
-  for (const [what, content] of smuggled) {
+  for (const [i, [what, content]] of smuggled.entries()) {
     const bad = buildReviewPayload({ ...base,
       inputs: [{ kind: 'diff', label: 'DIFF', content: `--- a/x\n${content}` }] });
-    check(`RI5: ${what} smuggled inside an allowed section is caught`,
+    check(`RI5-${i + 1}: ${what} smuggled inside an allowed section is caught`,
       !bad.valid && bad.violations.some((v) => v.kind === 'content-scan'), bad.violations.map((v) => v.detail).join());
   }
 

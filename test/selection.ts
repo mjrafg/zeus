@@ -68,7 +68,7 @@ export async function selectionSuite(): Promise<void> {
   section('test 3/4: what a suite starts is classified, and the unknown is not assumed cheap');
   {
     const integration = CLASSES.find((c) => c.check === 'integration-test')!;
-    check('S3: a suite that starts a database is SERVICE_DEPENDENT',
+    check('SEL-S3: a suite that starts a database is SERVICE_DEPENDENT',
       integration.klass === 'SERVICE_DEPENDENT', `${integration.klass} — ${integration.signals.join('; ')}`);
     check('S3b: the verdict cites the signal it found',
       integration.signals.some((s) => /container runtime|database/i.test(s)));
@@ -77,13 +77,13 @@ export async function selectionSuite(): Promise<void> {
     check('S3c: a browser-driving suite is E2E', e2e.klass === 'E2E');
 
     const mystery = classifyCheck('custom', 'make verify-everything', proj);
-    check('S4: an unclassifiable suite is UNKNOWN, never UNIT',
+    check('SEL-S4: an unclassifiable suite is UNKNOWN, never UNIT',
       mystery.klass === 'UNKNOWN', mystery.klass);
-    check('S4b: and selection treats UNKNOWN as service-dependent',
+    check('SEL-S4b: and selection treats UNKNOWN as service-dependent',
       mystery.treatAsService === true);
 
     const unit = CLASSES.find((c) => c.check === 'unit-test')!;
-    check('S4c: a plain runner with no service signal is UNIT',
+    check('SEL-S4c: a plain runner with no service signal is UNIT',
       unit.klass === 'UNIT', `${unit.klass} — ${unit.signals.join('; ')}`);
   }
 
@@ -100,13 +100,13 @@ export async function selectionSuite(): Promise<void> {
 
     const names = (l: typeof verify) => l.selected.map((c) => c.name).sort().join(',');
 
-    check('S1: a FAST task selects no integration suite',
+    check('SEL-S1: a FAST task selects no integration suite',
       !verify.selected.some((c) => c.name === 'integration-test'),
       `selected: ${names(verify) || '(none)'}`);
     check('S1b: the deterministic floor still runs at FAST',
       verify.selected.some((c) => c.name === 'typecheck' && c.required)
       && verify.selected.some((c) => c.name === 'unit-test' && c.required));
-    check('S2: VERIFY and FINAL_ACCEPTANCE select identically for the same diff and tier',
+    check('SEL-S2: VERIFY and FINAL_ACCEPTANCE select identically for the same diff and tier',
       names(verify) === names(final), `${names(verify)} vs ${names(final)}`);
     check('S2b: REVIEW_EXPANSION selects identically too — one path, not three',
       names(verify) === names(expansion));
@@ -150,7 +150,7 @@ export async function selectionSuite(): Promise<void> {
       + 'Do not start frontend/backend/database services. '
       + 'Use lightweight static or targeted checks only.';
     const set = parseConstraints(text);
-    check('S5: the prose becomes structured constraints',
+    check('SEL-S5: the prose becomes structured constraints',
       set.has('NO_SERVICE_DEPENDENT') && set.has('NO_E2E'),
       set.constraints.map((c) => c.kind).join(', '));
 
@@ -177,7 +177,7 @@ export async function selectionSuite(): Promise<void> {
       phase: 'VERIFY', tier: 'FAST', commands: svcRequired,
       classifications: svcClasses, constraints: set, affectedSurfaces: [],
     });
-    check('S6: a required test forbidden by the task produces a conflict state',
+    check('SEL-S6: a required test forbidden by the task produces a conflict state',
       conflicted.conflict?.code === 'REQUIRED_TEST_CONSTRAINT_CONFLICT',
       conflicted.conflict?.detail ?? 'no conflict raised');
     check('S6b: the conflict names the check and says Zeus will not choose',
@@ -204,7 +204,7 @@ export async function selectionSuite(): Promise<void> {
         observedMs: { 'integration-test': 55 * 60_000 },
       },
     });
-    check('S7: the real incident ratio (~110:1) is flagged',
+    check('SEL-S7: the real incident ratio (~110:1) is flagged',
       disproportionate.cost?.disproportionate === true,
       disproportionate.cost?.detail ?? 'no cost assessment');
     check('S7b: it drops to the justified minimum rather than running',
@@ -246,7 +246,7 @@ export async function selectionSuite(): Promise<void> {
     const freeAfter = os.freemem();
     const consumedMb = Math.round((freeBefore - freeAfter) / 2 ** 20);
 
-    check('S8: the runaway is classified RESOURCE_LIMIT_EXCEEDED',
+    check('SEL-S8: the runaway is classified RESOURCE_LIMIT_EXCEEDED',
       res.outcome === 'RESOURCE_LIMIT_EXCEEDED', `${res.outcome} (signal ${res.signal}, code ${res.exitCode})`);
     check('S8b: it is NOT reported as a verdict about the code',
       res.productSignal === false);
@@ -273,7 +273,7 @@ export async function selectionSuite(): Promise<void> {
     fs.chmodSync(shim, 0o755);
 
     const red = runSelfCheck(repo);
-    check('S9: the gate refuses a commit whose suite is failing',
+    check('SEL-S9: the gate refuses a commit whose suite is failing',
       red.ok === false && red.failed === 1);
     check('S9b: the refusal names the failing check, not just a count',
       red.failures.some((f) => f.check === 'PB5'), JSON.stringify(red.failures));
@@ -318,7 +318,7 @@ export async function selectionSuite(): Promise<void> {
   {
     const hooksDir = path.resolve(__dirname, '../.githooks');
     const hook = path.join(hooksDir, 'pre-merge-commit');
-    check('S10: the merge gate exists and is executable',
+    check('SEL-S10: the merge gate exists and is executable',
       fs.existsSync(hook) && (fs.statSync(hook).mode & 0o111) !== 0);
     const hookText = fs.existsSync(hook) ? fs.readFileSync(hook, 'utf8') : '';
     check('S10b: it runs the same gate as pre-commit',
@@ -471,14 +471,14 @@ export async function selectionSuite(): Promise<void> {
       constraints: NO_CONSTRAINTS, affectedSurfaces: [],
     });
     const approved = new Set(ledger.selected.map((c) => approvalKey(c.name, c.command)));
-    check('L1: the approved set keys on name AND command',
+    check('SEL-L1: the approved set keys on name AND command',
       approved.has(approvalKey('typecheck', COMMANDS.typecheck)));
-    check('L2: a check that was refused is not in the approved set',
+    check('SEL-L2: a check that was refused is not in the approved set',
       !approved.has(approvalKey('integration-test', COMMANDS.integrationTest)));
     const orch = fs.readFileSync(path.resolve(__dirname, '../src/engine/orchestrator.ts'), 'utf8');
-    check('L3: runCheck refuses anything absent from the ledger',
+    check('SEL-L3: runCheck refuses anything absent from the ledger',
       /this\.approved\.has\(approvalKey/.test(orch) && /NOT_IN_SELECTION/.test(orch));
-    check('L4: the orchestrator no longer reaches for commands itself',
+    check('SEL-L4: the orchestrator no longer reaches for commands itself',
       !/planFor\(/.test(orch), 'planFor is called only inside selectChecks()');
   }
 

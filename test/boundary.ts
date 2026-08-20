@@ -125,7 +125,8 @@ export async function boundarySuite(): Promise<void> {
   const CREDENTIAL_FIXTURES = [
     'scripts/package.sh',            // the artifact scanner's own patterns
     'test/boundary.ts',              // this file
-    'src/engine/orchestrator.ts',    // redactSecrets(): the shapes it removes
+    'src/engine/redact.ts',          // redactSecrets(): the shapes it removes
+    'test/redaction.ts',             // synthetic secrets the sink must swallow
     'audits/harness/lane-c.ts',      // probes that plant synthetic secrets
     'test/audit.ts',                 // regression fixtures for redaction
   ];

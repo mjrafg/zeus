@@ -113,39 +113,13 @@ export function classifyCheck(res: ExecutionResult, required: boolean): CheckOut
 }
 
 /**
- * Secret-shaped substrings, removed before command output is recorded.
+ * Re-exported so existing callers keep one import site.
  *
- * Zeus strips credentials on the way INTO a project command and then used to
- * write whatever came back out into the append-only log. A test that echoes a
- * token, a failing assertion printing a connection string, a debug logger — any
- * of them made the secret permanent, because the log is hash-chained and
- * redacting later would break the chain.
- *
- * This is a net, not a guarantee: it catches recognisable shapes. Anything it
- * misses is still a reason to keep project output out of evidence bundles.
+ * The guarantee itself no longer lives here: `EventStore.append()` redacts
+ * every payload before hashing it, so nothing in this file has to remember to.
+ * See `src/engine/redact.ts` for why that move happened.
  */
-const SECRET_SHAPES: Array<[RegExp, string]> = [
-  [/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '[redacted:api-key]'],
-  [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[redacted:github-token]'],
-  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '[redacted:slack-token]'],
-  [/\bAKIA[0-9A-Z]{16}\b/g, '[redacted:aws-key-id]'],
-  [/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[redacted:jwt]'],
-  [/\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi, '[redacted:credentialed-url]'],
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted:private-key]'],
-  [/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL))\s*[=:]\s*\S+/g, '$1=[redacted]'],
-];
-
-export function redactSecrets(text: string): { text: string; redactions: number } {
-  let out = text;
-  let redactions = 0;
-  for (const [re, replacement] of SECRET_SHAPES) {
-    out = out.replace(re, (...args) => {
-      redactions += 1;
-      return replacement.includes('$1') ? replacement.replace('$1', String(args[1])) : replacement;
-    });
-  }
-  return { text: out, redactions };
-}
+export { redactSecrets } from './redact';
 
 /** Only a real verdict about the code may let acceptance continue. */
 export function checkAllowsAcceptance(o: CheckOutcome): boolean { return o === 'PASSED'; }
@@ -428,11 +402,7 @@ export class Engine {
     // Off-ledger execution is refused here rather than trusted not to happen.
     if (!this.approved.has(approvalKey(name, commandLine))) {
       this.record({ taskId: rec.taskId, type: 'CHECK_REFUSED', payload: {
-        // Redacted for the same reason the executed path is: a refused command
-        // is still written to the permanent log, and a configured command can
-        // carry a token. Adding this refusal path without the redaction the
-        // executed path already had reopened the leak it closed.
-        name, command: redactSecrets(commandLine).text, required,
+        name, command: commandLine, required,
         code: 'NOT_IN_SELECTION',
         detail: 'this check was not approved by the validation selection path; '
           + 'every phase selects through selectChecks() and nothing runs off-plan',
@@ -471,17 +441,15 @@ export class Engine {
         this.spans.externalUnder(checkId, `check.${name}.total`, 'VALIDATION', sp, ex, { noOutput: true });
       }
     }
-    // The command line is evidence too, and a project's configured command can
-    // itself carry a secret (a token in a URL, a password flag). Redacting the
-    // output while recording the command verbatim leaks it just as permanently.
+    // The command line and the output tail are both project-derived text, and
+    // both are recorded verbatim here: the sink in EventStore.append() redacts
+    // them on the way to disk. Doing it again at this call site would be the
+    // per-producer pattern this deliberately replaced.
     this.record({ taskId: rec.taskId, type: 'CHECK_RESULT', payload: {
-      name, required, outcome, command: redactSecrets(commandLine).text, exitCode: res.exitCode,
+      name, required, outcome, command: commandLine, exitCode: res.exitCode,
       durationMs: res.durationMs, backend: res.backend, isolationFallback: res.isolationFallback,
       productSignal: res.productSignal, violations: res.violations,
-      ...(() => {
-        const r = redactSecrets(res.stdout.slice(-500));
-        return { tail: r.text, ...(r.redactions ? { redactions: r.redactions } : {}) };
-      })(),
+      tail: res.stdout.slice(-500),
     } });
     return { outcome, res };
   }
@@ -559,11 +527,10 @@ export class Engine {
       // failing test: the code under test never ran. Proceeding to checks that
       // cannot pass would turn a broken environment into a verdict about the
       // change.
-      const tail = redactSecrets((deps.output ?? '').slice(-4000));
       this.record({ taskId, type: 'DEPENDENCIES_FAILED', payload: {
         method: deps.method, lockfileHash: deps.lockfileHash, detail: deps.detail,
         outcome: 'INFRASTRUCTURE_FAILURE', attempts: deps.attempts,
-        installOutput: tail.text, ...(tail.redactions ? { redactions: tail.redactions } : {}),
+        installOutput: (deps.output ?? '').slice(-4000),
       } });
       return this.escalateToHuman(taskId, 'NEEDS_RECONCILIATION', 'dependencies', {
         reasonCode: 'MISSING_ENVIRONMENT',

@@ -9,6 +9,9 @@ secret-redaction regression that reached `origin/main` and the probe defect that
 made it visible only downstream of the push. Findings arriving between cycles are
 recorded here as they happen rather than held for the next Lane G pass.
 
+Target 9 is CLOSED as of 2026-08-20; its entry is kept in place with the
+evidence rather than deleted, so the reasoning survives the fix.
+
 `zeus self-audit` in a future cycle should read this file to bias depth toward
 the areas below, and Lane G regenerates it at the end of every cycle.
 
@@ -96,7 +99,7 @@ while presenting itself as inspection. `zeus revalidate` is the obvious
 candidate, since it already rebases a worktree as part of answering a question
 (finding F-F5 in this cycle).
 
-## 9 — redaction is per-path, so any new event path can silently lose it  · HIGH
+## 9 — redaction is per-path, so any new event path can silently lose it  · CLOSED
 
 From the `b4274f8` incident. `CHECK_RESULT` redacts the command line it
 records. The `CHECK_REFUSED` path, added days later in `80a362e`, recorded the
@@ -127,10 +130,47 @@ cannot reach the event store by any path:
   accepts and asserts none of them reach `events.jsonl` — a check that scales
   with the schema rather than with the list someone remembered to write.
 
-This is a design change to the recording boundary, not a patch, and it is
-deliberately **not** being applied as part of the fix that surfaced it.
-Constraining a shape and repairing an instance are different work, and doing
-them in one commit hides which one was verified.
+This was a design change to the recording boundary, not a patch, and it was
+deliberately **not** applied as part of the fix that surfaced it. Constraining
+a shape and repairing an instance are different work, and doing them in one
+commit hides which one was verified.
+
+**CLOSED 2026-08-20.** Redaction moved to `EventStore.append()` — the single
+function through which every event in the product reaches disk: the engine's
+`record()`, the CLI's direct appends, the audit harness, and anything added
+later. It runs on the whole payload, recursively, **before** `hashOf`, so the
+chain seals the redacted representation rather than requiring an edit that
+would break it. The three per-producer calls in `orchestrator.ts` were deleted;
+what remains there is a re-export, not an application.
+
+What was NOT adopted from the proposal: the `Redacted<string>` type. It would
+be a second, weaker copy of a guarantee that runtime enforcement already gives
+unconditionally — the compiler cannot see a payload assembled from `unknown`,
+and a type that is right most of the time next to a sink that is right always
+is a maintenance cost with no coverage gain.
+
+Held by, in `test/redaction.ts`:
+
+| Test | What fails if it regresses |
+|---|---|
+| `RS1` / `RS1b` | the event-type inventory stops being read from the source (29 types found; the first version read its own doc comment and reported a type nobody emits) |
+| `RS2` | any currently emitted event type persists a secret |
+| `RS3` | coverage stops being complete — every discovered type must be exercised |
+| `RS4` | redaction stops reaching nested objects and arrays |
+| `RS5` | a NEWLY invented event type is not covered by default |
+| `RS6` | the hash chain fails on a log freshly produced through the sink |
+| `RS7` / `RS9` | the sealed payload is not the redacted one |
+| `RS8` | a redaction becomes silent instead of counted |
+| `RS10` | ordinary output is altered, or gains a spurious count |
+| `RS11` | a producer starts redacting for itself again (static check) |
+| `RS12` | the sink stops applying it |
+| `RS13` | the assertion would pass against a pass-through substitute |
+| `RS15` | redaction mutates the producer's own object |
+
+And by probe **`C-C7`** in `audits/harness/lane-c.ts`, so the release gate
+refuses an artifact in which any discovered event type leaks — the check that
+would have caught the original regression before it was published rather than
+after.
 
 ## 10 — probe C-C5 was measuring the wrong path  · HIGH
 

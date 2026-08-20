@@ -26,6 +26,7 @@ import { auditRegressionSuite } from './audit';
 import { selectionSuite } from './selection';
 import { dependencySuite } from './dependencies';
 import { cgroupSuite } from './cgroup';
+import { redactionSuite } from './redaction';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-test-'));
 const mk = (name: string, files: Record<string, string>): string => {
@@ -303,6 +304,7 @@ async function governorTests(): Promise<void> {
   await selectionSuite();
   await dependencySuite();
   await cgroupSuite();
+  redactionSuite();
   const t = totals();
   console.log(`\nzeus tests: ${t.passed} passed, ${t.failed} failed`);
   if (t.failures.length) console.log('failures:\n  ' + t.failures.join('\n  '));

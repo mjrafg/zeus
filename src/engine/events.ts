@@ -18,6 +18,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { redactPayload } from './redact';
 
 export interface StoredEvent {
   id: string;
@@ -170,10 +171,28 @@ export class EventStore {
       this.seenIds.set(input.taskId, new Set(existing.map((e) => e.id)));
     }
     const seq = cursor.seq + 1;
+
+    // THE REDACTING SINK.
+    //
+    // Every event in the product reaches disk through this one function: the
+    // engine's `record()`, the CLI's direct appends, the audit harness, and
+    // anything added later. Redacting here rather than at each producer is
+    // what makes the guarantee hold for event types that do not exist yet.
+    //
+    // It happens BEFORE `hashOf`, so the chain seals the redacted
+    // representation. The alternative — hash first, redact after — would make
+    // every redaction a chain break, which is exactly why the original leak
+    // could not simply be cleaned up after the fact.
+    const red = redactPayload(input.payload ?? {});
+    const payload = red.payload as Record<string, unknown>;
+    // A silent redaction is indistinguishable from output that never contained
+    // anything, so the count is part of the record.
+    if (red.redactions > 0) payload.redactions = red.redactions;
+
     const body: Omit<StoredEvent, 'id'> = {
       taskId: input.taskId, seq, ts: new Date().toISOString(), type: input.type,
       prev: cursor.lastId,
-      payload: input.payload ?? {},
+      payload,
     };
     const ev: StoredEvent = { id: this.hashOf(body), ...body };
 

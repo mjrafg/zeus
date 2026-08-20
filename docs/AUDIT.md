@@ -15,7 +15,7 @@ rather than quietly dropped.
 
 | Severity | OPEN | ACCEPTED_RISK | PARTIALLY_FIXED | FIXED | OBSOLETE |
 |---|---|---|---|---|---|
-| **P0** | **0** | 0 | 0 | 4 | 2 |
+| **P0** | **0** | 0 | 0 | 5 | 2 |
 | **P1** | **0** | 1 | 0 | 5 | 4 |
 | P3 | **0** | 0 | 0 | 3 | 0 |
 
@@ -67,6 +67,24 @@ without systemd, a host where the probe fails — Zeus keeps the rlimit ceiling
 and **aggregate exhaustion by many small processes remains possible**. That is
 stated in `zeus doctor`, in the README, and here, rather than being left to the
 reader to discover.
+
+**P0-7 secret redaction is a boundary, not a habit** (*escaped to a public
+remote before it was caught*) → the log is hash-chained and append-only, so a
+secret written into it cannot be removed without breaking the chain. Redaction
+used to live at each producer: `CHECK_RESULT` redacted its command and output,
+a `CHECK_REFUSED` path added months later did not, and the leak was found by
+the release audit one step DOWNSTREAM of the push. Nothing had failed — the
+suite was green and both commit gates held — because the guarantee was opt-in
+and the set of places that had to opt in grew with every event type.
+
+It now lives in `EventStore.append()`, the single function through which every
+event reaches disk, applied to the whole payload recursively and **before** the
+event is hashed, so the chain seals the redacted form. An event type invented
+later is covered by an author who never read the redaction module. Held by
+`RS1`–`RS15` in `test/redaction.ts` — including `RS5`, which writes through a
+type that did not exist when the test was written — and by probe `C-C7`, which
+derives the event-type inventory from the candidate's own source so the release
+gate fails when a new type leaks.
 
 **P0-2 shell and filesystem confinement** → policy evaluated before every
 spawn: symlink-aware containment, traversal and absolute-path refusal,

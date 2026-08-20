@@ -161,8 +161,11 @@ export async function auditRegressionSuite(): Promise<void> {
     }
     check('R-C2: ordinary output is left intact',
       redactSecrets('47 tests passed in 3.2s').text === '47 tests passed in 3.2s');
+    // The guarantee moved from the producer to the sink. Asserting it at the
+    // old call site would now pass only by accident of where a string lives.
     check('R-C3: redaction is applied where the log is written',
-      /redactSecrets\(res\.stdout/.test(fs.readFileSync(path.resolve(__dirname, '../src/engine/orchestrator.ts'), 'utf8')));
+      /redactPayload\(/.test(fs.readFileSync(path.resolve(__dirname, '../src/engine/events.ts'), 'utf8'))
+      && !/redactSecrets\s*\(/.test(fs.readFileSync(path.resolve(__dirname, '../src/engine/orchestrator.ts'), 'utf8')));
   }
 
   section('cycle-1 C3: recursive permission changes on system paths are refused');

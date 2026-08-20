@@ -217,6 +217,55 @@ export const laneC: LaneSpec = {
     },
 
     {
+      id: 'C7', section: '§28', title: 'every event type the candidate emits is redacted at the sink',
+      run(ctx) {
+        // C5 proves one path is redacted. That is the shape of guarantee that
+        // already failed once: CHECK_RESULT was redacted, CHECK_REFUSED was
+        // added later and was not, and the leak reached a public remote with a
+        // green suite behind it. So this probe asks the broader question — can
+        // ANY event type carry a secret to disk — and it derives the type list
+        // from the candidate's own source, so a type added tomorrow is covered
+        // by a probe written today.
+        const { EventStore } = fromAudit(ctx.auditRoot, '../src/engine/events');
+        const { discoverEventTypes } = fromAudit(ctx.auditRoot, '../src/engine/eventtypes');
+
+        const types = discoverEventTypes(ctx.auditRoot).map((t: any) => t.type);
+        const secret = 'sk-live-AUDITSINKPROBE0123456789';
+        const stateRoot = path.join(ctx.tmp, 'c7-state');
+        const store = new EventStore(stateRoot);
+        const taskId = 'audit/T-0001';
+        for (const type of types) {
+          store.append({ taskId, type, payload: { command: `run --token ${secret}`,
+            nested: { deep: [`${secret}`] } } });
+        }
+        const raw = fs.readFileSync(store.logPath(taskId), 'utf8');
+        const leaked = types.filter((t: string) =>
+          (raw.split('\n').find((l: string) => l.includes(`"type":"${t}"`)) ?? '').includes(secret));
+        const chain = store.verify(taskId);
+
+        const observed = compare([
+          ['event types discovered', String(types.length)],
+          ['types leaking the secret', leaked.length ? leaked.join(', ') : 'none'],
+          ['hash chain verifies on the freshly written log', String(chain.ok)],
+          ['excerpt', evidence(raw.split('\n')[0] ?? '', 320)],
+        ]);
+
+        return (!leaked.length && chain.ok && types.length > 10) ? held(observed) : defect(observed, {
+          sections: ['§28'], severity: 'P1',
+          title: 'An event type can carry a secret into the permanent log',
+          detail:
+            `Wrote a synthetic credential through ${types.length} event type(s) discovered in the candidate's `
+            + `source. ${leaked.length} of them persisted it verbatim`
+            + `${chain.ok ? '' : ', and the hash chain did not verify on the resulting log'}.`,
+          impact:
+            'The log is hash-chained and append-only, so a secret written into it cannot be removed without '
+            + 'breaking the chain. A guarantee that lives at individual producers is reopened by the next '
+            + 'producer somebody adds; this is that failure, detected before release rather than after.',
+        });
+      },
+    },
+
+    {
       id: 'C6', section: '§28', title: 'the repository is treated as data, not as instructions',
       run(ctx) {
         // The audited repository contains adversarial fixtures on purpose. If

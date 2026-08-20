@@ -221,6 +221,36 @@ defects, and this makes four across two cycles. The harness needs the same
 suspicion as the product, and it currently gets less, because nothing audits
 the auditor.
 
+## 11 — `code === 137` cannot tell an OOM from a project's own exit  · MEDIUM
+
+Recorded 2026-08-20 while scoping the CG10 reclassification. `code === 137` and
+`code === 139` are classified `RESOURCE_LIMIT_EXCEEDED` for every backend, so a
+project that returns `exit 137` deliberately has its result overridden — the
+same defect that was just fixed for `143`, in a clause that predates it.
+
+It was **not** changed, because measurement says the clause is load-bearing
+rather than vestigial. An inner process killed by `SIGKILL` under a shell parent
+that does not `exec` surfaces as `code=137, signal=null` on all four backend
+combinations (scope±bwrap, rlimit±bwrap). That is the rlimit path's genuine OOM
+signature: the kernel kills the runaway and its shell parent lives to report it.
+Deleting the clause would lose real OOM detection in order to fix a rarer
+misclassification.
+
+Resolving it needs a discriminator that neither exit codes nor signals provide:
+
+- read `memory.events` (`oom_kill`) from the execution's cgroup while it still
+  exists, so containment is asserted from kernel state rather than inferred
+  from a number — this is positive evidence, and it would also let the
+  `SIGTERM` rule stop relying on elimination;
+- for the rlimit path, where there is no cgroup, decide whether "a shell
+  reported 137" is worth the false positives at all, or whether the honest
+  answer is that rlimit cannot distinguish and should say so.
+
+Worth probing first: how often a real project command exits 137 or 139 on
+purpose. If the answer is "essentially never", the current behaviour is a
+reasonable trade that simply needs stating in the outcome vocabulary rather
+than fixing.
+
 ## Telemetry inputs
 
 No `VALIDATION_MISS`, `SUSPECTED_FLAKE` or `TEST_RELIABILITY` records existed at

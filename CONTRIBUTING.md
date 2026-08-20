@@ -59,6 +59,35 @@ Conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`,
 Commits carry a human author. A hook in `.githooks/commit-msg` rejects AI
 attribution trailers; enable it with `git config core.hooksPath .githooks`.
 
+The hooks gate commits (`pre-commit`), merge commits (`pre-merge-commit`) and
+publication (`pre-push`). Never bypass one with `--no-verify`: if a gate is
+wrong, fix the gate.
+
+## History is append-only
+
+**Force-push is never used on this repository.** Not `--force`, and not
+`--force-with-lease` — including on commits you pushed yourself, minutes ago,
+that nobody has pulled.
+
+An incorrect commit is corrected by **a new commit**. A wrong number in a
+document, a typo in a message, a file that should not have been included: all
+of these are fixed forward. The published history is a record of what happened,
+and a record that gets edited to look tidier is worth less than one that shows
+a correction being made.
+
+This applies to agents as much as to people. The rule exists because of a
+specific incident: on 2026-08-20 an overnight report was committed stating
+`Final SHA on main: c36d468`, which stopped being true the moment the report
+itself was committed. The fix was an amend and a `--force-with-lease`, replacing
+a commit that had been on the remote for a few minutes. Nothing was lost and
+the gates ran in full both times — which is exactly why it is worth writing
+down. The reasoning that permits it ("my own commit, just pushed, no one has
+it") is available for every force-push anyone ever wants to do, and a rule that
+holds only when the reasoning is inconvenient is not a rule.
+
+What to do instead, for that case: state the last work commit and describe the
+report's own commit relatively, or correct it in a follow-up commit.
+
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).

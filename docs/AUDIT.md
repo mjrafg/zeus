@@ -68,6 +68,21 @@ and **aggregate exhaustion by many small processes remains possible**. That is
 stated in `zeus doctor`, in the README, and here, rather than being left to the
 reader to discover.
 
+**Decision, 2026-08-20: lingering is enabled deliberately, and kept
+deliberately.** It was turned on for the service account Zeus runs as
+(`loginctl enable-linger`, run as that account, for that account only) because
+without it there is no user manager, without a user manager there is no
+delegated cgroup, and without a delegated cgroup the ceiling is `ulimit -v` —
+which bounds one address space and not the process tree. The decision to keep
+it is the whole closure of this finding: the aggregate-memory failure shape,
+which is the one that actually took a host down, is contained **only while the
+user manager exists**. Disabling lingering does not degrade Zeus gracefully; it
+silently returns the host to the state the outage happened in, with `doctor`,
+the README and this document all correctly reporting the weaker guarantee and
+nobody necessarily reading them. Reversing it is `loginctl disable-linger` for
+that account, and it should be treated as a decision to accept that failure
+mode, not as cleanup.
+
 **P0-7 secret redaction is a boundary, not a habit** (*escaped to a public
 remote before it was caught*) → the log is hash-chained and append-only, so a
 secret written into it cannot be removed without breaking the chain. Redaction

@@ -531,3 +531,151 @@ matched closely, and `UNIQ2` prevents recurrence); or review the P3-8 branding
 entries in particular, which are where six of the eight were. **Recommendation:**
 review P3-8's list once. It is ten minutes of reading, and it is the only place
 in the night's work where I substituted judgement for a mechanical rule.
+
+---
+
+# Morning decisions — resolutions (2026-08-20)
+
+The three decisions this report escalated were answered, plus a scoping check
+on the Step 2 classification fix. Test count across all four: **697 → 704**, 0 failures.
+
+## 1 — Lingering: KEEP
+
+Recorded as a decision, not just a command, in `docs/AUDIT.md` beside the P0-1
+aggregate-memory entry. The short version: the failure shape that took a host
+down is contained *only while the user manager exists*, so disabling lingering
+does not degrade Zeus gracefully — it silently returns the host to the state
+the outage happened in. Reversal is a decision to accept that failure mode, not
+cleanup.
+
+## 2 — Reuse order: hardlink → pnpm-store → copy
+
+Inverted from pnpm-first on the measured evidence: hardlinking a prepared tree
+costs 2 ms (1-dependency fixture) to 31.7 ms (5 deps, 400 files) where
+`pnpm install --frozen-lockfile --offline` costs ~700 ms, and that difference
+is paid on every task after the first.
+
+pnpm-store is not dead code — it is the fallback wherever hardlinks are
+impossible, still feature-detected by making a link and comparing inodes rather
+than by assuming. **Regression test 9's pnpm coverage survives on a genuinely
+cross-device fixture**, not a simulated one: the worktree is created on `tmpfs`
+(`/dev/shm`) while the cache stays on the project's filesystem, so the kernel
+returns `EXDEV` for real.
+
+| Test | Asserts |
+|---|---|
+| `DEP9c` | same filesystem → `hardlink` (the reorder itself) |
+| `DEP9c2-host` | the host offers a second filesystem, so the fallback *can* be exercised — fails loudly rather than skipping |
+| `DEP9c2` | across filesystems the hardlink is attempted and genuinely fails (`hardlink unavailable: EXDEV`) |
+| `DEP9c3` | and `pnpm-store` is what makes that worktree runnable |
+| `DEP9c4` | the fallback result is contained too — no symlink escapes the worktree |
+
+`zeus doctor`'s `wouldUse` was updated to match; doctor predicting a method the
+engine would not choose is worse than doctor saying nothing. The order and its
+justification are recorded on the `PrepMethod` type and at the `WORKTREE`
+record site, alongside the full field semantics.
+
+## 3 — AUDIT-STATUS re-points: independent verification
+
+41 references changed in Step 5. **25 were mechanical** — suite prefix added,
+description byte-identical, identity preserved by construction. The remaining
+**16 were semantic** and were re-verified against the current check bodies, not
+their titles.
+
+| # | Old reference | New reference(s) | Same assertion? |
+|---|---|---|---|
+| 1 | `L5: a crashed owner's lease is reclaimed` | `L5: … , and the takeover is stated` | **Yes** — same check, name was truncated |
+| 2 | `TB10: … asks a human` | `TB10: … , not silently continues` | **Yes** — truncation |
+| 3 | `TB12: budget usage survives a process restart` | `TB12: … (recomputed from the log)` | **Yes** — truncation |
+| 4 | `S4c: the same holds under filesystem confinement` | `EN-S4c: … , where the wrapper hides it` | **Yes** — truncation + prefix |
+| 5 | `RI4: forbidden kinds are refused (8 kinds)` | `RI4-1` … `RI4-8` | **Yes** — was a summary label, never a check name; 8 kinds ↔ 8 checks, one per forbidden kind |
+| 6 | `RI5: … smuggled inside an allowed section is caught (6 cases)` | `RI5-1` … `RI5-6` | **Yes** — same; 6 cases ↔ 6 checks |
+| 7 | `BR6: the package declares AGPL-3.0-only and ships a LICENSE` | `BR16: … and ships the licence` | **Yes** — renumbered, assertion identical (`license === 'AGPL-3.0-only'`, `files` includes LICENSE) |
+| 8 | `BR7: the artifact contains the licence text` | `PB15: the artifact ships the AGPL licence` | **Yes** — the artifact-side claim moved to the boundary suite |
+| 9 | `BR2: the CLI identifies itself as zeus` | `BR2: the CLI executable is zeus` + `BR3: zeus --help works and identifies the product` | **Yes** — one old claim, now split across the bin name and the help banner |
+| 10 | `BR3: init creates .zeus/ and never .autopilot/` | `BR6: zeus init creates .zeus/ and never .autopilot/` | **Yes** — verbatim, renumbered |
+| 11 | `BR4: user data and config paths are the Zeus ones` | `BR5b: user data and config live under zeus, XDG-respecting` | **Yes** |
+| 12 | `BR5: the deprecation alias forwards and says so once` | `BR15b: it forwards …` + `BR15c: it says once, on stderr, …` | **Yes** — exact, both halves |
+| 13 | `BR8: migration moves a legacy layout without destroying anything` | ~~`BR11` + `BR13d`~~ → `BR11` + `BR11b` + `BR11c` + `BR11d` | **NO — mismatch, corrected** (below) |
+| 14 | `BR9: migration is idempotent` | `BR12: migration is idempotent — a second run finds nothing to do` | **Yes** |
+| 15 | `BR10: a conflicting destination is reported, never overwritten` | `BR13` + `BR13b` (+ `BR13c` added) | **Yes** |
+| 16 | `PB12: the release artifact carries no stale branding` | `PB13: the artifact carries no stale product branding` | **Yes** |
+
+### The one mismatch — finding, not a silent re-fix
+
+**Row 13.** `BR8: migration moves a legacy layout *without destroying
+anything*` had been re-pointed at `BR11` (migration moves the directory) plus
+`BR13d` (the legacy directory is never deleted).
+
+`BR13d` is inside the **conflict** block. It asserts that the legacy directory
+survives when migration is *refused* — which is the claim old `BR10` already
+carried, and which says nothing about whether a migration that actually runs
+preserves what it moves. The re-point named a real, passing check that verifies
+a different property: precisely the shape that looks like a correct closure and
+is not.
+
+Corrected to `BR11b` (configuration survives), `BR11c` (the hash-chained event
+log survives byte for byte) and `BR11d` (logs and evidence survive) — the
+checks that assert nothing is destroyed. `BR13c` (neither copy is modified) was
+also added beside `BR13`/`BR13b`, where it belongs.
+
+**One mismatch in 16 semantic re-points.** It was in the P3-8 branding group,
+which is where the review was directed and where six of the changes sat.
+
+## 4 — Force-push: never
+
+Added to `CONTRIBUTING.md` as **History is append-only**, and to the header of
+`.githooks/pre-push` where an agent reading the gate will meet it. The rule
+covers `--force-with-lease` on one's own just-pushed commits explicitly,
+because that is the case with the persuasive excuse. The prior occurrence — the
+overnight report amend of 2026-08-20 — is named as the incident that motivated
+it, together with what should have been done instead.
+
+No hook can enforce this; it is written in both places because it is a rule
+people and agents keep rather than one a gate applies.
+
+## Scoping check — the CG10 reclassification
+
+**Question.** Step 2 reclassified `SIGTERM`/`143` under a systemd scope as
+`RESOURCE_LIMIT_EXCEEDED`. Is that scoped to stops of the scope, or does a
+project test that itself exits 143 get misclassified?
+
+**Answer: it was mis-scoped, and it is fixed.** Reproduced before changing
+anything — a script doing `echo bye; exit 143` under a scope was classified
+`RESOURCE_LIMIT_EXCEEDED` with `productSignal: false`. Zeus refusing to believe
+a test result the test had stated plainly. `128 + SIGTERM` is a common
+convention for "I shut down on request", so this is not a contrived input.
+
+**The fix.** The rule now keys on the **signal alone**: `code === 143` is gone.
+An exit code is the program's own statement; a signal on our direct child is
+something done *to* it.
+
+**Nothing is lost, and this was measured rather than argued.** With
+`OOMPolicy=kill` the whole scope goes down together, so real containment kills
+our direct child too and arrives as `SIGKILL` or `SIGTERM` with a **null** exit
+code — which is exactly what `CG10` observes. A 128+N exit code with a null
+signal means a shell *survived* to report a child's death, which is not the
+tree being stopped.
+
+**Regression tests added** (none existed for this distinction):
+
+* `CG21-143` — a project that exits 143 is `FAILED`, `productSignal: true`.
+* `CG21-1` — the ordinary-failure control.
+* `CG22` — the rule's shape: keys on the signal, and the `code === 143` clause
+  cannot come back.
+
+### One thing left open, and deliberately not changed
+
+`code === 137` and `code === 139` are matched as `RESOURCE_LIMIT_EXCEEDED` for
+**every** backend. That predates this work, and a project that chooses
+`exit 137` is misclassified the same way `exit 143` was.
+
+It was left alone because measurement says it is load-bearing, not vestigial:
+an inner process killed by `SIGKILL` under a shell parent that does not `exec`
+surfaces as **`code=137, signal=null` on all four backend combinations**
+(scope±bwrap, rlimit±bwrap). That is the rlimit path's genuine OOM signature —
+the kernel kills the runaway, its shell parent lives to report it. Removing the
+clause would lose real OOM detection to fix a rarer misclassification, and
+deciding that trade needs a discriminator neither exit codes nor signals
+provide on their own. Recorded as next-cycle target 11 rather than guessed at
+tonight.

@@ -271,10 +271,13 @@
         "BR15b: it forwards to zeus and produces the real answer",
         "BR15c: it says once, on stderr, that the command was renamed",
         "BR11: migration moves the directory",
-        "BR13d: the legacy directory is never deleted",
+        "BR11b: configuration survives",
+        "BR11c: the hash-chained event log survives byte for byte",
+        "BR11d: logs and evidence survive",
         "BR12: migration is idempotent \u2014 a second run finds nothing to do",
         "BR13: both layouts existing is a reported conflict, not a merge",
         "BR13b: nothing is moved when there is a conflict",
+        "BR13c: neither copy is modified",
         "PB13: the artifact carries no stale product branding"
       ]
     }

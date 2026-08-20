@@ -27,6 +27,13 @@
 #
 # Bypassing with `git push --no-verify` is outside any hook's control. That is a
 # stated limit of hook-based enforcement, not a supported route.
+#
+# Neither is force-push. `--force` and `--force-with-lease` are never used on
+# this repository, including on your own commits that nobody has pulled yet: an
+# incorrect commit is corrected by a NEW commit, not by rewriting history. See
+# "History is append-only" in CONTRIBUTING.md for the incident that motivated
+# the rule. A hook cannot enforce this either — it is a rule people and agents
+# keep, which is why it is written down in both places.
 set -e
 
 # Retargeting variables, unset for the same reason pre-merge-commit's gate

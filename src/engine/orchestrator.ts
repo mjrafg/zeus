@@ -225,6 +225,19 @@ export class Engine {
   private approved = new Set<string>();
 
   /**
+   * Adopts a selection ledger as the set of checks that may run.
+   *
+   * The orchestrator calls this after every selection. It exists as a method
+   * rather than an inline assignment so that the approval step is a named,
+   * auditable transition — and so anything driving the engine goes through the
+   * same door rather than reaching past it.
+   */
+  applySelection(ledger: SelectionLedger, mode: 'replace' | 'extend' = 'replace'): void {
+    if (mode === 'replace') this.approved = new Set();
+    for (const c of ledger.selected) this.approved.add(approvalKey(c.name, c.command));
+  }
+
+  /**
    * The hardening profile in force.
    *
    * Read from config for the tunable parts; the anti-gaming rules are set here
@@ -414,7 +427,11 @@ export class Engine {
     // Off-ledger execution is refused here rather than trusted not to happen.
     if (!this.approved.has(approvalKey(name, commandLine))) {
       this.record({ taskId: rec.taskId, type: 'CHECK_REFUSED', payload: {
-        name, command: commandLine, required,
+        // Redacted for the same reason the executed path is: a refused command
+        // is still written to the permanent log, and a configured command can
+        // carry a token. Adding this refusal path without the redaction the
+        // executed path already had reopened the leak it closed.
+        name, command: redactSecrets(commandLine).text, required,
         code: 'NOT_IN_SELECTION',
         detail: 'this check was not approved by the validation selection path; '
           + 'every phase selects through selectChecks() and nothing runs off-plan',
@@ -642,7 +659,7 @@ export class Engine {
       },
       costRatioThreshold: Number((cfg as any)?.validation?.hardening?.costRatioThreshold) || DEFAULT_COST_RATIO,
     }));
-    this.approved = new Set(ledger.selected.map((c) => approvalKey(c.name, c.command)));
+    this.applySelection(ledger);
     this.record({ taskId, type: 'VALIDATION_SELECTION', payload: {
       phase: ledger.phase, tier: ledger.tier,
       selected: ledger.selected.map((c) => ({ name: c.name, required: c.required, klass: c.klass, reason: c.reason })),
@@ -950,10 +967,10 @@ export class Engine {
         selected: expandLedger.selected.map((c) => ({ name: c.name, required: c.required, klass: c.klass, reason: c.reason })),
         refused: expandLedger.refused, reasons: expandLedger.reasons,
       } });
+      this.applySelection(expandLedger, 'extend');
       for (const c of expandLedger.selected) {
         if (alreadyRun.has(c.name)) continue;
         alreadyRun.add(c.name);
-        this.approved.add(approvalKey(c.name, c.command));
         const { outcome } = await this.runCheck(rec, c.name, c.command, c.required, c.cls);
         additionalOutcomes.push({ name: c.name, outcome });
       }

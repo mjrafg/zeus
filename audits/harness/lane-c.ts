@@ -151,6 +151,9 @@ export const laneC: LaneSpec = {
       id: 'C5', section: '§28', title: 'command output containing a secret does not land in the event log',
       async run(ctx) {
         const { Engine } = fromAudit(ctx.auditRoot, '../src/engine/orchestrator');
+        const { selectChecks } = fromAudit(ctx.auditRoot, 'validation/selection');
+        const { classifyAll } = fromAudit(ctx.auditRoot, 'validation/testclass');
+        const { parseConstraints } = fromAudit(ctx.auditRoot, 'validation/constraints');
         const { ProcessSupervisor } = fromAudit(ctx.auditRoot, '../src/engine/exec');
         const { deriveBudgets } = fromAudit(ctx.auditRoot, '../src/engine/budget');
         const { mockProvider } = fromAudit(ctx.auditRoot, '../src/engine/providers');
@@ -172,9 +175,19 @@ export const laneC: LaneSpec = {
         // A project's own test prints something secret-shaped. This is ordinary:
         // debug output, a misconfigured logger, a failing assertion echoing config.
         const secret = 'sk-live-AUDITSECRET0123456789abcdef';
-        await engine.runCheck(rec, 'unit-test', `sh -c echo_${'PLACEHOLDER'}`, true, 'light')
-          .catch(() => undefined);
-        const res = await engine.runCheck(rec, 'leaky-test', `printf ${secret}`, true, 'light');
+        const command = `printf ${secret}`;
+        // Checks now run only if the selection path approved them, so the probe
+        // goes through that door rather than around it — an earlier version
+        // called runCheck directly and measured the refusal instead of the
+        // redaction it meant to test.
+        const ledger = selectChecks({
+          phase: 'VERIFY', tier: 'FAST',
+          commands: { typecheck: command },
+          classifications: classifyAll([{ name: 'typecheck', command }], root),
+          constraints: parseConstraints(''), affectedSurfaces: [],
+        });
+        engine.applySelection(ledger);
+        const res = await engine.runCheck(rec, 'typecheck', command, true, 'light');
 
         const raw = fs.readFileSync(engine.events.logPath(rec.taskId), 'utf8');
         const inLog = raw.includes(secret);
@@ -185,7 +198,7 @@ export const laneC: LaneSpec = {
           ['check outcome', String(res.outcome)],
           ['secret present in events.jsonl', String(inLog)],
           ['log path', engine.events.logPath(rec.taskId)],
-          ['excerpt', evidence(raw.split('\n').filter((l) => l.includes('leaky-test')).join('\n'), 320)],
+          ['excerpt', evidence(raw.split('\n').filter((l) => l.includes('CHECK_RESULT')).join('\n'), 320)],
         ]);
 
         return !inLog ? held(observed) : defect(observed, {

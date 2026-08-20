@@ -121,6 +121,76 @@ export function processStartTicks(pid: number): number | null {
 
 export function registryDirFor(stateRoot: string): string { return path.join(stateRoot, 'running'); }
 
+/**
+ * Cancellation intent, written where another OS process can see it.
+ *
+ * `zeus cancel` is a DIFFERENT PROCESS from the one that owns the execution.
+ * It can signal the process group — that is what the run registry is for — but
+ * a signal carries no reason. The owning supervisor saw SIGTERM and had no way
+ * to tell "a human cancelled this" from "the cgroup stopped the unit", so it
+ * classified an ordinary `zeus cancel` as RESOURCE_LIMIT_EXCEEDED. That is a
+ * lie in the permanent record, and telemetry, attribution and any later
+ * convergence logic all read it.
+ *
+ * A tombstone beside the run record carries the intent across the process
+ * boundary.
+ *
+ * ORDERING GUARANTEE, and it is the whole design: the marker is written
+ * **before the first signal is sent**, and fsynced. The owner cannot observe
+ * the death before the intent exists, because the death has not been caused
+ * yet. Writing it afterwards would race — the child can die and `close` can
+ * fire while the killer is still between `kill()` and `writeFileSync`, and the
+ * owner would classify from an empty directory.
+ *
+ * The marker names the process group AND its kernel start time, so a stale
+ * tombstone cannot be adopted by a later execution that happens to reuse the
+ * job id or the pid: identity has to match, not just the name.
+ */
+export interface CancelMarker {
+  jobId: string;
+  pgid: number;
+  startTicks: number | null;
+  reason: string;
+  at: string;
+  /** The pid that asked for the cancellation, for the record. */
+  by: number;
+}
+
+function cancelMarkerPath(dir: string, jobId: string): string {
+  return path.join(dir, `${jobId.replace(/[^A-Za-z0-9_.-]/g, '~')}.cancel`);
+}
+
+export function writeCancelMarker(dir: string, rec: RunRecord, reason: string): void {
+  const marker: CancelMarker = {
+    jobId: rec.jobId, pgid: rec.pgid, startTicks: rec.startTicks ?? null,
+    reason, at: new Date().toISOString(), by: process.pid,
+  };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const file = cancelMarkerPath(dir, rec.jobId);
+    const fd = fs.openSync(file, 'w');
+    try { fs.writeSync(fd, `${JSON.stringify(marker)}\n`); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+  } catch { /* best effort: a missing marker degrades to the old behaviour */ }
+}
+
+/**
+ * Whether THIS execution was cancelled by another process.
+ *
+ * Identity is checked, not just the id: a marker for a different process group
+ * belongs to a different execution and is ignored.
+ */
+export function readCancelMarker(dir: string, jobId: string, pgid: number): CancelMarker | null {
+  try {
+    const m = JSON.parse(fs.readFileSync(cancelMarkerPath(dir, jobId), 'utf8')) as CancelMarker;
+    return m && m.pgid === pgid ? m : null;
+  } catch { return null; }
+}
+
+export function clearCancelMarker(dir: string, jobId: string): void {
+  try { fs.unlinkSync(cancelMarkerPath(dir, jobId)); } catch { /* never existed */ }
+}
+
 function writeRunRecord(dir: string, rec: RunRecord): void {
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -211,13 +281,19 @@ export function killRecorded(stateRoot: string, filter: { taskId?: string; proje
   for (const rec of listRunRecords(dir)) {
     if (filter.taskId && rec.taskId !== filter.taskId) continue;
     if (filter.projectId && rec.projectId !== filter.projectId) continue;
-    if (!groupAlive(rec.pgid)) { removeRunRecord(dir, rec.jobId); pruned += 1; continue; }
+    if (!groupAlive(rec.pgid)) {
+      removeRunRecord(dir, rec.jobId); clearCancelMarker(dir, rec.jobId); pruned += 1; continue;
+    }
     // Alive is not the same as ours.
     const identity = stillOurProcess(rec);
     if (!identity.ours) {
       unverified.push({ jobId: rec.jobId, pid: rec.pid, reason: identity.reason });
-      removeRunRecord(dir, rec.jobId); pruned += 1; continue;
+      removeRunRecord(dir, rec.jobId); clearCancelMarker(dir, rec.jobId); pruned += 1; continue;
     }
+    // Intent first, then the signal. See writeCancelMarker for why the order
+    // is the design and not a detail: after the signal there is a window in
+    // which the owner has already classified.
+    writeCancelMarker(dir, rec, reason);
     if (rec.unit) spawnSync('systemctl', ['--user', 'stop', rec.unit], { timeout: 10_000 });
     for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
       try { if (rec.pgid > 1) process.kill(-rec.pgid, sig); } catch { /* raced */ }
@@ -225,7 +301,6 @@ export function killRecorded(stateRoot: string, filter: { taskId?: string; proje
     removeRunRecord(dir, rec.jobId);
     hit.push(rec); killed += 1;
   }
-  void reason;
   return { killed, pruned, records: hit, unverified };
 }
 
@@ -435,7 +510,12 @@ export class ProcessSupervisor {
         clearTimeout(timer);
         this.kill(req.id, 'cleanup');
         this.live.delete(req.id);
-        if (this.registryDir) removeRunRecord(this.registryDir, req.id);
+        if (this.registryDir) {
+          removeRunRecord(this.registryDir, req.id);
+          // The tombstone has done its job; leaving it would outlive the
+          // execution it describes.
+          clearCancelMarker(this.registryDir, req.id);
+        }
         this.release(req.cls);
         resolve({
           ...base, outcome, exitCode: code, signal, stdout: out, queueWaitMs,
@@ -456,6 +536,15 @@ export class ProcessSupervisor {
       child.on('close', (code, signal) => {
         const job = this.live.get(req.id);
         if (job?.cancelled) return finish('CANCELLED', code, signal ?? null);
+        // Cancellation from ANOTHER process. The signal shape is identical to
+        // a scope stop — SIGTERM, no exit code — so without the intent the
+        // rules below would classify an ordinary `zeus cancel` as a resource
+        // event. Checked before the wall clock too: if a human cancelled it,
+        // that is what happened, whatever else was also true.
+        if (this.registryDir && pgid) {
+          const marker = readCancelMarker(this.registryDir, req.id, pgid);
+          if (marker) return finish('CANCELLED', code, signal ?? null);
+        }
         if (timedOut) return finish('TIMEOUT', null, signal ?? null);
         // A cgroup kill, an OOM exit or the classic heap message are the
         // machine running out of room — never a verdict about the code.

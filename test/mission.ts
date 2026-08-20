@@ -401,8 +401,13 @@ export async function missionSuite(): Promise<void> {
     check('MI51: cancelling the mission kills its live task through the registry',
       result.cancelled && result.killed >= 1 && result.tasks.includes(taskId),
       JSON.stringify({ killed: result.killed, tasks: result.tasks }));
-    check('MI52: and the process really died rather than being reported dead',
-      outcome.outcome !== 'COMPLETED', outcome.outcome);
+    // M1 observed this as `!== 'COMPLETED'`, because a registry-driven kill
+    // reached the process but carried no reason, so the owner classified an
+    // ordinary cancellation as RESOURCE_LIMIT_EXCEEDED. The intent now crosses
+    // the process boundary, so the observation becomes an assertion.
+    check('MI52: and the owner classified it CANCELLED, not a resource event',
+      outcome.outcome === 'CANCELLED' && outcome.productSignal === false,
+      `${outcome.outcome} signal=${outcome.signal}`);
 
     const after = missions.mission(m.missionId)!;
     check('MI53: the mission ends CANCELLED, with achievement left UNEVALUATED',

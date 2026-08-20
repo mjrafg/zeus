@@ -123,6 +123,18 @@ export async function cgroupSuite(): Promise<void> {
       res.budgets.memoryMaxMb === 256 && res.enforced.includes('memory cap (cgroup)'),
       res.enforced.join(', '));
 
+    // Cross-process cancellation carries INTENT through a tombstone beside the
+    // run record. A genuine resource event has no such intent and must not
+    // acquire one: this is the CG21 distinction from the other direction —
+    // there, a project's own exit code must not become a resource event; here,
+    // a resource event must not become a cancellation.
+    const markerDir = path.join(TMP, 'state', 'running');
+    const markers = fs.existsSync(markerDir)
+      ? fs.readdirSync(markerDir).filter((f) => f.endsWith('.cancel')) : [];
+    check('CG23: a real containment carries no cancellation intent, and stays a resource event',
+      markers.length === 0 && res.outcome === 'RESOURCE_LIMIT_EXCEEDED',
+      `${res.outcome}, markers=[${markers.join(',')}]`);
+
     // The host must still be usable afterwards — that is the whole point.
     const alive = spawnSync('true', [], { timeout: 10_000 });
     const free = os.freemem() / 1e6;

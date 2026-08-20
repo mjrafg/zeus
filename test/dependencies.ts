@@ -194,6 +194,38 @@ export async function dependencySuite(): Promise<void> {
     } catch (e: any) { refused = /escapes the worktree/.test(String(e?.message)); }
     check('DEP4d: a symlink whose target leaves the worktree is refused, not created', refused);
 
+    // One writer per worktree, through the shared inode.
+    //
+    // Reuse hardlinks the cache in, so a hardlinked file IS the cached file.
+    // Measured before the fix: an in-place write inside one worktree changed
+    // the cache and every other worktree that had materialised from it.
+    const shared = path.join(wt2, 'node_modules', 'tinydep', 'index.js');
+    const cachedFile = path.join(depsCacheRoot(project),
+      cacheKey('npm', first.lockfileHash!), 'node_modules', 'tinydep', 'index.js');
+    const cachedBefore = fs.readFileSync(cachedFile, 'utf8');
+    check('DEP4e: a materialised dependency really is the cached inode, not a copy',
+      fs.statSync(shared).ino === fs.statSync(cachedFile).ino
+      && fs.statSync(cachedFile).nlink > 1,
+      `nlink=${fs.statSync(cachedFile).nlink}`);
+    let inPlace = 'succeeded';
+    try { fs.writeFileSync(shared, 'module.exports = "PATCHED IN PLACE";\n'); }
+    catch (e: any) { inPlace = `refused (${e.code})`; }
+    check('DEP4f: an in-place write through that inode is REFUSED, not silently shared',
+      inPlace.startsWith('refused'), inPlace);
+    check('DEP4g: so the shared cache is unchanged',
+      fs.readFileSync(cachedFile, 'utf8') === cachedBefore);
+    // And the legitimate shape still works: replacing a file is private,
+    // because unlink + create makes a new inode rather than writing through.
+    fs.unlinkSync(shared);
+    fs.writeFileSync(shared, 'module.exports = "REPLACED";\n');
+    check('DEP4h: replacing a file still works and stays private to the worktree',
+      fs.readFileSync(shared, 'utf8').includes('REPLACED')
+      && fs.readFileSync(cachedFile, 'utf8') === cachedBefore
+      && fs.statSync(shared).ino !== fs.statSync(cachedFile).ino);
+    // Put the worktree back so later checks see what they expect.
+    fs.unlinkSync(shared);
+    fs.linkSync(cachedFile, shared);
+
     // 2 — a changed lockfile is a different cache.
     const wt3 = makeWorktree(project, 'wt-npm-3');
     const lock = path.join(wt3, 'package-lock.json');

@@ -275,6 +275,9 @@ export class EscapingLinkError extends Error {
 /**
  * Copies a tree by hardlink or by content, refusing anything that would escape.
  *
+ * `readOnlyFiles` is used when writing INTO the cache. See `prepareDependencies`
+ * for why a shared dependency tree has to be immutable.
+ *
  * Symlinks are recreated verbatim rather than followed — following them would
  * turn `node_modules/.bin/tsc` into a duplicate of the file it points at and
  * quietly double the size of every tree. Because they are recreated, their
@@ -282,7 +285,8 @@ export class EscapingLinkError extends Error {
  * audited afterwards.
  */
 export function replicateTree(src: string, dest: string, mode: 'link' | 'copy',
-  containRoot: string): { files: number; links: number; dirs: number } {
+  containRoot: string, opts: { readOnlyFiles?: boolean } = {}):
+  { files: number; links: number; dirs: number } {
   const stats = { files: 0, links: 0, dirs: 0 };
   const walk = (from: string, to: string): void => {
     fs.mkdirSync(to, { recursive: true });
@@ -303,6 +307,14 @@ export function replicateTree(src: string, dest: string, mode: 'link' | 'copy',
       if (!entry.isFile()) continue;   // sockets, fifos: never part of a dep tree
       try { fs.unlinkSync(d); } catch { /* first write */ }
       if (mode === 'link') fs.linkSync(s, d); else fs.copyFileSync(s, d);
+      if (opts.readOnlyFiles) {
+        // A hardlink shares an INODE, and permissions live on the inode. Making
+        // the cached file unwritable therefore makes every worktree's view of
+        // it unwritable too — which is the whole point. Directories are left
+        // writable so a file can still be REPLACED (unlink + create), which is
+        // a private operation that does not touch the shared inode.
+        try { fs.chmodSync(d, fs.statSync(d).mode & ~0o222); } catch { /* best effort */ }
+      }
       stats.files += 1;
     }
   };
@@ -566,7 +578,24 @@ export async function prepareDependencies(input: PrepareInput): Promise<Preparat
   // final name sees a finished cache, or nothing at all.
   try {
     const link = canHardlink(cacheRoot, path.dirname(worktreeModules));
-    replicateTree(worktreeModules, path.join(tmp, NODE_MODULES), link.ok ? 'link' : 'copy', tmp);
+    // Published immutable, and that is a correctness boundary rather than
+    // tidiness.
+    //
+    // Reuse hardlinks the cache into each worktree, and a hardlink shares the
+    // inode: measured, an in-place write to `node_modules/pkg/index.js` inside
+    // ONE task's worktree changed the cache and every other worktree that had
+    // materialised from it. `patch-package`, a postinstall script and any tool
+    // that rewrites a file in place all do exactly that, so a single task could
+    // silently poison a content-addressed cache that every later task then
+    // trusts by hash.
+    //
+    // Unwritable files make that attempt fail loudly (EACCES) instead of
+    // succeeding invisibly. Replacing a file still works, because that unlinks
+    // and creates rather than writing through the shared inode. This is the
+    // same guarantee pnpm gives its own content-addressed store, for the same
+    // reason.
+    replicateTree(worktreeModules, path.join(tmp, NODE_MODULES),
+      link.ok ? 'link' : 'copy', tmp, { readOnlyFiles: true });
     fs.writeFileSync(path.join(tmp, MARKER), `${JSON.stringify({
       schema: CACHE_SCHEMA, packageManager: plan.packageManager, lockfile: plan.lockfile,
       lockfileHash: plan.lockfileHash, publishedBy: input.taskId,

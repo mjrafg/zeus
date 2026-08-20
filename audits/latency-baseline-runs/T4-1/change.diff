@@ -1,0 +1,12 @@
+diff --git a/src/lib/session.ts b/src/lib/session.ts
+index d1f4556..7895e6a 100644
+--- a/src/lib/session.ts
++++ b/src/lib/session.ts
+@@ -9,3 +9,7 @@ export function remainingSeconds(s: Session, nowMs: number): number {
+   const left = s.ttlSeconds - (nowMs - s.issuedAt) / 1000;
+   return left > 0 ? Math.floor(left) : 0;
+ }
++
++export function willExpireWithin(s: Session, nowMs: number, withinSeconds: number): boolean {
++  return s.issuedAt + s.ttlSeconds * 1000 <= nowMs + withinSeconds * 1000;
++}

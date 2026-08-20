@@ -1,0 +1,382 @@
+{
+ "cycleId": "cycle-1-final",
+ "head": "67da187902b3aab04835c4129ae4176898215bba",
+ "startedAt": "2026-08-19T14:36:24.357Z",
+ "finishedAt": "2026-08-19T14:36:35.125Z",
+ "lanes": [
+  {
+   "lane": "A",
+   "title": "State / recovery / event integrity",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§7",
+     "title": "Event store append and chain semantics",
+     "status": "TESTED",
+     "probes": [
+      "A1",
+      "A2",
+      "A7",
+      "A8"
+     ]
+    },
+    {
+     "section": "§15",
+     "title": "Crash recovery and torn writes",
+     "status": "TESTED",
+     "probes": [
+      "A3",
+      "A9"
+     ]
+    },
+    {
+     "section": "§16",
+     "title": "Project lease and multi-instance safety",
+     "status": "TESTED",
+     "probes": [
+      "A4",
+      "A5"
+     ]
+    },
+    {
+     "section": "§34",
+     "title": "State path derivation and isolation",
+     "status": "TESTED",
+     "probes": [
+      "A6"
+     ]
+    }
+   ],
+   "probesRun": 9,
+   "probesHeld": 9,
+   "notes": [],
+   "durationMs": 1358,
+   "complete": true
+  },
+  {
+   "lane": "B",
+   "title": "Process / resource / concurrency",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§3",
+     "title": "Single spawn point",
+     "status": "TESTED",
+     "probes": [
+      "B1"
+     ]
+    },
+    {
+     "section": "§4",
+     "title": "Host-derived resource budgets",
+     "status": "TESTED",
+     "probes": [
+      "B4"
+     ]
+    },
+    {
+     "section": "§5",
+     "title": "Process-group termination",
+     "status": "TESTED",
+     "probes": [
+      "B2"
+     ]
+    },
+    {
+     "section": "§6",
+     "title": "Wall-clock enforcement",
+     "status": "TESTED",
+     "probes": [
+      "B3"
+     ]
+    },
+    {
+     "section": "§18",
+     "title": "Run registry and cross-process cancellation",
+     "status": "TESTED",
+     "probes": [
+      "B5",
+      "B6"
+     ]
+    },
+    {
+     "section": "§32",
+     "title": "Concurrency limits",
+     "status": "TESTED",
+     "probes": [
+      "B7"
+     ]
+    },
+    {
+     "section": "§33",
+     "title": "Orphan and leak prevention",
+     "status": "TESTED",
+     "probes": [
+      "B8"
+     ]
+    }
+   ],
+   "probesRun": 8,
+   "probesHeld": 8,
+   "notes": [],
+   "durationMs": 7436,
+   "complete": true
+  },
+  {
+   "lane": "C",
+   "title": "Security / filesystem / shell / secrets",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§21",
+     "title": "Path containment and traversal refusal",
+     "status": "TESTED",
+     "probes": [
+      "C1"
+     ]
+    },
+    {
+     "section": "§22",
+     "title": "Symlink resolution before trust",
+     "status": "TESTED",
+     "probes": [
+      "C2"
+     ]
+    },
+    {
+     "section": "§23",
+     "title": "Destructive and escaping command detection",
+     "status": "TESTED",
+     "probes": [
+      "C3"
+     ]
+    },
+    {
+     "section": "§24",
+     "title": "Environment allowlist and secret stripping",
+     "status": "TESTED",
+     "probes": [
+      "C4"
+     ]
+    },
+    {
+     "section": "§28",
+     "title": "Secret leakage into recorded evidence",
+     "status": "TESTED",
+     "probes": [
+      "C5",
+      "C6"
+     ]
+    },
+    {
+     "section": "§29",
+     "title": "Web surface",
+     "status": "NOT_APPLICABLE",
+     "reason": "Zeus ships no web surface. Verified by inspection of the release artifact allowlist (bin/, dist/, src/, install.sh, README.md, LICENSE) and of src/: there is no HTTP server, no request handler, and no static asset path in the runtime. The Control Center UI referenced elsewhere is unbuilt, so there is nothing to exercise rather than something skipped.",
+     "probes": []
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 6,
+   "notes": [
+    "C6 scanned 73 files for injection-shaped content; 0 hit(s)."
+   ],
+   "durationMs": 566,
+   "complete": true
+  },
+  {
+   "lane": "D",
+   "title": "Validation / false-green / review independence",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§8",
+     "title": "Validation tier selection integrity",
+     "status": "TESTED",
+     "probes": [
+      "D4",
+      "D5",
+      "D14"
+     ]
+    },
+    {
+     "section": "§9",
+     "title": "Deterministic floor authority",
+     "status": "TESTED",
+     "probes": [
+      "D6"
+     ]
+    },
+    {
+     "section": "§10",
+     "title": "Change visibility — what actually gets validated",
+     "status": "TESTED",
+     "probes": [
+      "D1",
+      "D2"
+     ]
+    },
+    {
+     "section": "§11",
+     "title": "Evidence-chain integrity (anti-gaming)",
+     "status": "TESTED",
+     "probes": [
+      "D7",
+      "D8",
+      "D13"
+     ]
+    },
+    {
+     "section": "§12",
+     "title": "Reviewer independence enforcement",
+     "status": "TESTED",
+     "probes": [
+      "D3",
+      "D9"
+     ]
+    },
+    {
+     "section": "§13",
+     "title": "Acceptance semantics and outcome vocabulary",
+     "status": "TESTED",
+     "probes": [
+      "D10"
+     ]
+    },
+    {
+     "section": "§31",
+     "title": "Telemetry honesty",
+     "status": "TESTED",
+     "probes": [
+      "D11"
+     ]
+    },
+    {
+     "section": "§35",
+     "title": "Escalation completeness",
+     "status": "TESTED",
+     "probes": [
+      "D12"
+     ]
+    }
+   ],
+   "probesRun": 14,
+   "probesHeld": 14,
+   "notes": [],
+   "durationMs": 816,
+   "complete": true
+  },
+  {
+   "lane": "E",
+   "title": "Installer / setup / providers / packaging",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§14",
+     "title": "Release artifact composition",
+     "status": "TESTED",
+     "probes": [
+      "E5"
+     ]
+    },
+    {
+     "section": "§25",
+     "title": "Installer safety",
+     "status": "TESTED",
+     "probes": [
+      "E1",
+      "E2"
+     ]
+    },
+    {
+     "section": "§26",
+     "title": "Setup consent",
+     "status": "TESTED",
+     "probes": [
+      "E3"
+     ]
+    },
+    {
+     "section": "§27",
+     "title": "Provider credential handling",
+     "status": "TESTED",
+     "probes": [
+      "E4",
+      "E6"
+     ]
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 6,
+   "notes": [],
+   "durationMs": 101,
+   "complete": true
+  },
+  {
+   "lane": "F",
+   "title": "Git / worktrees / project isolation / revalidate",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§17",
+     "title": "Worktree creation and isolation",
+     "status": "TESTED",
+     "probes": [
+      "F2",
+      "F3"
+     ]
+    },
+    {
+     "section": "§19",
+     "title": "Project state isolation",
+     "status": "TESTED",
+     "probes": [
+      "F6"
+     ]
+    },
+    {
+     "section": "§20",
+     "title": "Task identity and path isolation",
+     "status": "TESTED",
+     "probes": [
+      "F1"
+     ]
+    },
+    {
+     "section": "§30",
+     "title": "Integration revalidation",
+     "status": "TESTED",
+     "probes": [
+      "F4",
+      "F5"
+     ]
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 6,
+   "notes": [],
+   "durationMs": 299,
+   "complete": true
+  }
+ ],
+ "findings": [],
+ "confirmed": 0,
+ "suspected": 0,
+ "bySeverity": {
+  "P0": 0,
+  "P1": 0,
+  "P2": 0,
+  "P3": 0
+ },
+ "coverageGaps": [],
+ "verdict": "CANDIDATE_SAFE_TO_INSTALL",
+ "evidenceChain": [
+  "6 lane(s) ran 49 probe(s) against 67da187902b3",
+  "49 probe(s) observed the invariant holding",
+  "0 finding(s) CONFIRMED by executable reproduction; 0 SUSPECTED (not reproduced)",
+  "0 unfixed P0/P1 finding(s) remain open",
+  "0 charter section(s) untested with no stated reason",
+  "0 lane(s) failed to complete",
+  "no additional defects were found under the tested threat and failure model"
+ ]
+}

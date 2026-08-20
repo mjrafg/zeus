@@ -1,0 +1,53 @@
+# Zeus project configuration.
+# Written by `zeus init`; safe to edit and to commit.
+# Zeus itself is installed per-user and is NOT vendored into this repo.
+version: 1
+project:
+  name: zeus-lat-T2-1-rmTeBT
+  adapter: node
+  root: .
+  packageManager: npm
+commands:
+  install: npm ci
+  build: npm run build
+  unitTest: npm run test
+  integrationTest: null
+  typecheck: npm run typecheck
+  lint: npm run lint
+policy:
+  protectedPaths:
+    - package.json
+    - package-lock.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - .github/
+    - .gitignore
+  maxFilesChanged: 25
+  requireHumanForProtectedPaths: true
+  autoMerge: false
+  autoDeploy: false
+  allowUnverifiedAcceptance: false
+resources:
+  globalHeavyTestConcurrency: 1
+  heavyTestTimeoutSeconds: 180
+  maxTestWorkers: 2
+  maxPlaywrightWorkers: 1
+providers:
+  planner: claude
+  implementer: claude-code
+  reviewer: codex
+  billing: subscription-cli-only
+validation:
+  strategy: fastest-safe
+  hardening:
+    mixedDiffMaxTier: true
+    testSurfaceRisk: true
+    unknownPlusRiskDirectDeep: true
+    genericAdapterFloor: normal
+    reviewerExpansionBudget: 2
+integrations:
+  graphify: auto
+paths:
+  state: .zeus/state
+  logs: .zeus/logs
+  worktrees: .zeus/worktrees

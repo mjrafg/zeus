@@ -1,0 +1,11 @@
+{
+  "subjectSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9",
+  "runs": [
+    { "dir": "T1-1", "originalTmpDir": "zeus-lat-T1-1-PxRr9m", "baseSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9", "tasksInClone": 1, "eventLines": 25 },
+    { "dir": "T1-2", "originalTmpDir": "zeus-lat-T1-2-9e2t3R", "baseSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9", "tasksInClone": 1, "eventLines": 25 },
+    { "dir": "T1-3", "originalTmpDir": "zeus-lat-T1-3-6ZULko", "baseSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9", "tasksInClone": 2, "eventLines": 50 },
+    { "dir": "T2-1", "originalTmpDir": "zeus-lat-T2-1-rmTeBT", "baseSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9", "tasksInClone": 1, "eventLines": 25 },
+    { "dir": "T3-1", "originalTmpDir": "zeus-lat-T3-1-nF90qA", "baseSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9", "tasksInClone": 1, "eventLines": 27 },
+    { "dir": "T4-1", "originalTmpDir": "zeus-lat-T4-1-iuLFfn", "baseSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9", "tasksInClone": 1, "eventLines": 27 }
+  ]
+}

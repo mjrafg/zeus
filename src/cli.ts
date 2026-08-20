@@ -33,6 +33,10 @@ import { revalidateForIntegration, GitAccess } from './validation/revalidate';
 import { impactConfidence } from './validation/tier';
 import { parseDiff } from './validation/diff';
 import { renderEscalation, EscalationPayload } from './validation/escalation';
+import { runtimeState, createAuditCheckout } from './selfaudit/checkout';
+import { runLane, consolidate } from './selfaudit/runner';
+import { renderMarkdown, renderTerminal } from './selfaudit/report';
+import { runSelfCheck, renderRefusal } from './selfaudit/commitgate';
 
 /** Single source of truth: the packaged manifest, not a second literal. */
 export const VERSION: string = (() => {
@@ -66,6 +70,8 @@ ${C.b}Usage${C.x}
   zeus config [get <key> | set <key> <value>]  read or edit this project's configuration
   zeus config [get <key> | set <key> <value>]  read or edit this project's configuration
   zeus revalidate <taskId> [--into <ref>]     recheck a verified task against a moved integration target
+  zeus self-audit [--lane A-F] [--cycle-id <id>]  audit this checkout adversarially, on a disposable copy
+  zeus self-check                             gate for Zeus's own commits: boundary checks + the non-service suite
   zeus version
   zeus help
 
@@ -401,7 +407,11 @@ function cmdDoctor(args: string[]): number {
   out(`\n${C.b}Execution isolation${C.x}`);
   for (const b of iso.backends) out(`  ${mark(b.available ? 'ok' : 'warn')} ${b.id.padEnd(16)} ${b.detail}`);
   out(`  ${C.b}selected backend:${C.x} ${iso.selected}`);
-  out(`  ${C.b}fallback mode:${C.x} ${iso.fallbackMode}${iso.fallbackMode ? `  ${C.y}(resource limits are NOT enforced by the kernel)${C.x}` : ''}`);
+  out(`  ${C.b}fallback mode:${C.x} ${iso.fallbackMode}`);
+  // What is enforced here, not what the configuration asks for.
+  const kernelBacked = iso.resourceEnforcement === 'cgroup';
+  out(`  ${C.b}resource ceilings:${C.x} ${kernelBacked ? `${C.g}cgroup${C.x}` : `${C.y}rlimit only${C.x}`}`);
+  out(`  ${C.dim}${iso.resourceDetail}${C.x}`);
   out(`  ${C.dim}enforces: ${iso.enforces.join(', ')}${C.x}`);
   out(`\n${C.b}Derived budgets${C.x} ${C.dim}(from ${budgets.derivedFrom.cpus} cpus / ${budgets.derivedFrom.totalMemMb} MB)${C.x}`);
   out(`  reserved for control plane : ${budgets.reservedCpus} cpu, ${budgets.reservedMemMb} MB`);
@@ -524,6 +534,117 @@ function cmdStatus(argv: string[]): number {
  * REBASED diff, and says what must rerun. It deliberately stops there: merging
  * is a separate, explicitly enabled operation.
  */
+/**
+ * `zeus self-audit` — Zeus auditing Zeus.
+ *
+ * The first rule is that the running process is never the thing under audit.
+ * A candidate is checked out into a disposable worktree, the permanent harness
+ * in audits/ runs against THAT, and the verdict is reported. Nothing is
+ * installed, nothing is restarted, and the live runtime is not touched — a
+ * defect in the candidate must not be able to disable the checks looking for it.
+ */
+async function cmdSelfAudit(argv: string[]): Promise<number> {
+  const root = findProjectRoot() ?? process.cwd();
+  const laneIdx = argv.indexOf('--lane');
+  const wanted = laneIdx >= 0 ? (argv[laneIdx + 1] ?? '').toUpperCase() : null;
+  const cycleIdx = argv.indexOf('--cycle-id');
+  const json = argv.includes('--json');
+  const keep = argv.includes('--keep');
+
+  const state = runtimeState(root);
+  const cycleId = cycleIdx >= 0 && argv[cycleIdx + 1] && !argv[cycleIdx + 1].startsWith('--')
+    ? argv[cycleIdx + 1]
+    : `c-${state.head.slice(0, 7)}`;
+
+  if (!fs.existsSync(path.join(root, 'audits', 'harness', 'index.ts'))) {
+    err(`${C.r}✗${C.x} no audits/harness in ${root}`);
+    err('  zeus self-audit runs the permanent harness from a source checkout; an installed runtime does not carry it.');
+    return 2;
+  }
+
+  if (!json) {
+    out(`${C.b}Zeus self-audit${C.x}`);
+    out('');
+    out(`  repository   ${state.repoRoot}`);
+    out(`  branch       ${state.branch}${state.dirty ? `  ${C.y}(uncommitted changes present)${C.x}` : ''}`);
+    out(`  HEAD         ${state.head}`);
+    out(`  version      ${state.version}`);
+    out(`  live runtime ${state.runtimeRoot}  ${C.dim}(pid ${state.pid}, never modified by this command)${C.x}`);
+    out('');
+  }
+  if (state.dirty && !json) {
+    out(`  ${C.y}!${C.x} HEAD is audited, not the working tree. Uncommitted changes are NOT in the candidate.`);
+    out('');
+  }
+
+  const checkout = createAuditCheckout(root, cycleId);
+  if (!json) out(`  ${C.g}✓${C.x} disposable candidate at ${checkout.root}`);
+
+  const startedAt = new Date().toISOString();
+  try {
+    // The harness is loaded FROM the candidate, so an audit exercises the
+    // candidate's own probes rather than the runtime's copy of them.
+    const harnessEntry = path.join(checkout.root, 'audits', 'harness', 'index.ts');
+    if (!fs.existsSync(harnessEntry)) {
+      err(`${C.r}✗${C.x} the candidate at ${state.head.slice(0, 12)} does not contain audits/harness`);
+      err('  The audit runs the harness as it exists in the COMMIT under audit, not in your working tree.');
+      err('  Commit the harness first, then re-run. This is deliberate: a harness that only exists');
+      err('  uncommitted would audit a candidate nobody can reproduce.');
+      return 2;
+    }
+    // eslint-disable-next-line
+    const harness = require(harnessEntry);
+    const lanes = (harness.LANES as any[]).filter((l) => !wanted || l.lane.toUpperCase() === wanted);
+    if (!lanes.length) { err(`unknown lane "${wanted}" (available: ${(harness.LANES as any[]).map((l) => l.lane).join(', ')})`); return 2; }
+
+    const results: Awaited<ReturnType<typeof runLane>>[] = [];
+    for (const spec of lanes) {
+      if (!json) out(`  ${C.dim}running lane ${spec.lane} — ${spec.title}${C.x}`);
+      results.push(await runLane(spec, { auditRoot: checkout.root, cycleId }));
+    }
+
+    const cycle = consolidate(cycleId, checkout.head, results, startedAt);
+    const dir = path.join(root, 'audits', 'cycles', cycleId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'findings.json'), `${JSON.stringify(cycle, null, 1)}\n`);
+    fs.writeFileSync(path.join(dir, 'report.md'), `${renderMarkdown(cycle)}\n`);
+
+    if (json) { out(JSON.stringify(cycle, null, 1)); }
+    else {
+      out('');
+      out(renderTerminal(cycle, process.stdout.isTTY));
+      out('');
+      out(`  report  ${path.relative(root, path.join(dir, 'report.md'))}`);
+      out(`  data    ${path.relative(root, path.join(dir, 'findings.json'))}`);
+    }
+    return cycle.verdict === 'CANDIDATE_SAFE_TO_INSTALL' ? 0 : 1;
+  } finally {
+    if (keep) { if (!json) out(`  ${C.dim}candidate kept at ${checkout.root}${C.x}`); }
+    else checkout.dispose();
+  }
+}
+
+
+/**
+ * `zeus self-check` — the gate on Zeus's own commits.
+ *
+ * Used by `.githooks/pre-commit`. Exits non-zero and names the failing checks,
+ * so a refusal says what is wrong rather than that something is.
+ */
+function cmdSelfCheck(argv: string[]): number {
+  const root = findProjectRoot() ?? process.cwd();
+  const json = argv.includes('--json');
+  if (!json) out(`${C.b}zeus self-check${C.x} ${C.dim}${root}${C.x}`);
+  const g = runSelfCheck(root);
+  if (json) { out(JSON.stringify(g, null, 1)); return g.ok ? 0 : 1; }
+  if (g.ok) {
+    out(`  ${C.g}✓${C.x} ${g.passed} passed, 0 failed in ${Math.round(g.durationMs / 1000)}s`);
+    return 0;
+  }
+  err(renderRefusal(g));
+  return 1;
+}
+
 function cmdRevalidate(argv: string[]): number {
   const ctx = requireProject();
   if (!ctx) return 2;
@@ -596,6 +717,10 @@ function cmdRevalidate(argv: string[]): number {
   out(`  ${decision.overlap.length ? `${C.y}!${C.x}` : `${C.g}✓${C.x}`} overlap: ${decision.overlap.join(', ') || 'none'}`);
   out(`  tier ${decision.originalTier} → ${C.b}${decision.tier}${C.x}${decision.escalated ? ' (escalated by overlap)' : ''}`);
   out(`  rerun before integrating: ${[...(decision.plan?.floor ?? []), ...(decision.plan?.additional ?? [])].join(', ') || '(nothing configured)'}`);
+  // This command is not read-only, and an operator running it as "should I
+  // integrate?" deserves to be told that the answer changed the worktree.
+  out(`  ${C.y}!${C.x} the task worktree is now rebased onto ${decision.integrationHead.slice(0, 12)}; `
+    + 'its evidence was recorded against the previous base');
   out(`${C.dim}  ${decision.detail}${C.x}`);
   return 0;
 }
@@ -655,6 +780,8 @@ export async function main(argv: string[]): Promise<number> {
     case 'logs': return cmdLogs(rest);
     case 'config': return cmdConfig(rest);
     case 'revalidate': return cmdRevalidate(rest);
+    case 'self-audit': return cmdSelfAudit(rest);
+    case 'self-check': return cmdSelfCheck(rest);
     default: err(`unknown command "${cmd}"`); usage(); return 2;
   }
 }

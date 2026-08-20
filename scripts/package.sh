@@ -52,6 +52,25 @@ if [ -n "$stale" ]; then
 fi
 [ "$fail" -eq 0 ] || exit 1
 
+# ---- release gate: the permanent self-audit harness --------------------------
+# Every release candidate passes the adversarial suites, or there is no
+# artifact. A gate that can be skipped is a gate that will be, on the day it
+# matters most.
+if [ -d audits/harness ] && [ -d .git ] && [ "${ZEUS_SKIP_SELF_AUDIT:-0}" != "1" ]; then
+  echo "package: running the self-audit harness against HEAD"
+  if [ -x node_modules/.bin/ts-node ]; then
+    if ! node_modules/.bin/ts-node --transpile-only src/cli.ts self-audit --cycle-id "release-${VERSION}" >/dev/null 2>&1; then
+      echo "package: SELF-AUDIT REPORTED OPEN FINDINGS — no artifact was written" >&2
+      echo "package: see audits/cycles/release-${VERSION}/report.md" >&2
+      exit 1
+    fi
+    echo "package: self-audit clean"
+  else
+    echo "package: ts-node unavailable; run 'npm install' so the release gate can run" >&2
+    exit 1
+  fi
+fi
+
 tar czf "$OUT/${NAME}.tar.gz" -C "$OUT" "$NAME"
 ( cd "$OUT" && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" 2>/dev/null || shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
 echo "artifact: $OUT/${NAME}.tar.gz"

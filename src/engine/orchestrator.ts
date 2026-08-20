@@ -23,7 +23,7 @@ import { TaskBudgets, mergeBudgets, usageFrom, checkBudgets } from './taskbudget
 import { buildReviewPayload, DEFAULT_REVIEW_POLICY, ReviewContextPolicy, ReviewInput, reconcileReviewerReport } from './reviewcontext';
 import { parseDiff } from '../validation/diff';
 import {
-  resolveTier, planFor, impactConfidence, TierDecision, HardeningSettings, DEFAULT_HARDENING, Tier,
+  resolveTier, impactConfidence, TierDecision, HardeningSettings, DEFAULT_HARDENING, Tier,
 } from '../validation/tier';
 import {
   designContract, inspectIntegrity, evidenceCoupledFiles, accountForTests, IntegrityReport,
@@ -32,6 +32,10 @@ import {
   evaluateExpansion, applyExpansion, unproductiveExpansion, ExpansionRequest, ExpansionState,
 } from '../validation/expansion';
 import { escalation, EscalationReason, EvidenceRef, NeededInput, renderEscalation } from '../validation/escalation';
+import { SpanRecorder, NO_SPANS } from '../telemetry/spans';
+import { classifyAll, Classification } from '../validation/testclass';
+import { parseConstraints, ConstraintSet, diffViolations } from '../validation/constraints';
+import { selectChecks, SelectionLedger, approvalKey, SelectedCheck, DEFAULT_COST_RATIO } from '../validation/selection';
 
 export type TaskState =
   | 'NEW' | 'DESIGN' | 'IMPLEMENT' | 'VERIFY' | 'REVIEW' | 'FINAL_ACCEPTANCE'
@@ -87,6 +91,11 @@ export interface EngineOptions {
   /** Task-level ceilings. Recomputed from the log, so restarts cannot reset them. */
   taskBudgets?: Partial<TaskBudgets>;
   reviewPolicy?: ReviewContextPolicy;
+  /**
+   * Latency instrumentation. Absent by default, and the null recorder costs
+   * nothing, so an unmeasured run executes exactly the code it always did.
+   */
+  spans?: SpanRecorder;
 }
 
 /** Maps a supervisor result onto the check vocabulary the product reasons in. */
@@ -100,6 +109,41 @@ export function classifyCheck(res: ExecutionResult, required: boolean): CheckOut
     case 'CANCELLED': return 'REQUIRED_TEST_NOT_RUN';
     default: return 'INFRASTRUCTURE_FAILURE';
   }
+}
+
+/**
+ * Secret-shaped substrings, removed before command output is recorded.
+ *
+ * Zeus strips credentials on the way INTO a project command and then used to
+ * write whatever came back out into the append-only log. A test that echoes a
+ * token, a failing assertion printing a connection string, a debug logger — any
+ * of them made the secret permanent, because the log is hash-chained and
+ * redacting later would break the chain.
+ *
+ * This is a net, not a guarantee: it catches recognisable shapes. Anything it
+ * misses is still a reason to keep project output out of evidence bundles.
+ */
+const SECRET_SHAPES: Array<[RegExp, string]> = [
+  [/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '[redacted:api-key]'],
+  [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[redacted:github-token]'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '[redacted:slack-token]'],
+  [/\bAKIA[0-9A-Z]{16}\b/g, '[redacted:aws-key-id]'],
+  [/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[redacted:jwt]'],
+  [/\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi, '[redacted:credentialed-url]'],
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted:private-key]'],
+  [/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL))\s*[=:]\s*\S+/g, '$1=[redacted]'],
+];
+
+export function redactSecrets(text: string): { text: string; redactions: number } {
+  let out = text;
+  let redactions = 0;
+  for (const [re, replacement] of SECRET_SHAPES) {
+    out = out.replace(re, (...args) => {
+      redactions += 1;
+      return replacement.includes('$1') ? replacement.replace('$1', String(args[1])) : replacement;
+    });
+  }
+  return { text: out, redactions };
 }
 
 /** Only a real verdict about the code may let acceptance continue. */
@@ -119,6 +163,7 @@ export class Engine {
     this.lock = new ProjectLock(this.stateRoot, this.projectId);
     this.taskBudgets = mergeBudgets(opts.taskBudgets);
     this.reviewPolicy = opts.reviewPolicy ?? DEFAULT_REVIEW_POLICY;
+    this.spans = opts.spans ?? NO_SPANS;
   }
 
   /**
@@ -127,10 +172,11 @@ export class Engine {
    * finished.
    */
   private budgetBreach(taskId: string): TaskState | null {
-    const usage = usageFrom(this.events.read(taskId));
+    const usage = this.spans.sync('state.budget-recompute', 'PERSISTENCE',
+      () => usageFrom(this.events.read(taskId)));
     const breach = checkBudgets(this.taskBudgets, usage);
     if (!breach) return null;
-    this.events.append({ taskId, type: 'TASK_BUDGET_EXCEEDED', payload: {
+    this.record({ taskId, type: 'TASK_BUDGET_EXCEEDED', payload: {
       budget: breach.budget, limit: breach.limit, observed: breach.observed,
       detail: breach.detail, usage,
     } });
@@ -167,6 +213,16 @@ export class Engine {
 
   readonly taskBudgets: TaskBudgets;
   readonly reviewPolicy: ReviewContextPolicy;
+  readonly spans: SpanRecorder;
+
+  /**
+   * Checks approved by the selection path, keyed by name+command.
+   *
+   * `runCheck` refuses anything absent from this set. That is what makes "one
+   * selection path" structural: a future phase that reaches for a command
+   * directly does not get to run it, it gets a recorded refusal.
+   */
+  private approved = new Set<string>();
 
   /**
    * The hardening profile in force.
@@ -201,9 +257,9 @@ export class Engine {
     evidence: EvidenceRef[]; needed: NeededInput; resumeBehavior: string;
   }): TaskState {
     const { payload, problems } = escalation({ taskId, ...spec });
-    this.events.append({ taskId, type: 'ESCALATION', payload: { ...payload, problems, rendered: renderEscalation(payload) } });
+    this.record({ taskId, type: 'ESCALATION', payload: { ...payload, problems, rendered: renderEscalation(payload) } });
     if (problems.length) {
-      this.events.append({ taskId, type: 'ESCALATION_INCOMPLETE', payload: {
+      this.record({ taskId, type: 'ESCALATION_INCOMPLETE', payload: {
         problems, detail: 'this escalation would have cost a human more time than it should',
       } });
     }
@@ -234,7 +290,7 @@ export class Engine {
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       worktree, baseSha: this.gitSha(), cancelRequested: false,
     };
-    this.events.append({ taskId, type: 'TASK_CREATED', payload: {
+    this.record({ taskId, type: 'TASK_CREATED', payload: {
       description, worktree, baseSha: rec.baseSha, projectId: this.projectId,
       adapter: this.opts.config.project?.adapter,
     } });
@@ -243,7 +299,7 @@ export class Engine {
 
   /** The task's current record, derived from its log. Never stored twice. */
   task(taskId: string): TaskRecord | null {
-    const evs = this.events.read(taskId);
+    const evs = this.spans.sync('state.read-log', 'PERSISTENCE', () => this.events.read(taskId));
     if (!evs.length) return null;
     const created = evs.find((e) => e.type === 'TASK_CREATED');
     if (!created) return null;
@@ -266,10 +322,10 @@ export class Engine {
     const cur = this.task(taskId);
     // Cancellation is absorbing: nothing may advance a cancelled task.
     if (cur?.cancelRequested && to !== 'CANCELLED') {
-      this.events.append({ taskId, type: 'NOTE', payload: { refusedAfterCancel: `${cur.state} -> ${to}` } });
+      this.record({ taskId, type: 'NOTE', payload: { refusedAfterCancel: `${cur.state} -> ${to}` } });
       return;
     }
-    this.events.append({ taskId, type: 'STATE_CHANGED', payload: { from: cur?.state ?? 'NEW', to, phase, ...extra } });
+    this.record({ taskId, type: 'STATE_CHANGED', payload: { from: cur?.state ?? 'NEW', to, phase, ...extra } });
   }
 
   policyFor(rec: TaskRecord): ExecutionPolicy {
@@ -293,7 +349,13 @@ export class Engine {
       // a brand-new project still works.
       try {
         fs.mkdirSync(rec.worktree, { recursive: true });
-        execFileSync('sh', ['-c', `cp -a "${this.opts.projectRoot}/." "${rec.worktree}/" 2>/dev/null || true`], { timeout: 300_000 });
+        // Deliberately NOT a plain `cp -a .`: that clones .git (so the agent's
+        // commits would land in a copy nobody reads), duplicates node_modules,
+        // and copies untracked local files such as .env into a directory the
+        // agent controls.
+        execFileSync('sh', ['-c',
+          `cd "${this.opts.projectRoot}" && tar -cf - --exclude=.git --exclude=node_modules --exclude=.zeus . `
+          + `| tar -xf - -C "${rec.worktree}" 2>/dev/null || true`], { timeout: 300_000 });
         fs.rmSync(path.join(rec.worktree, '.zeus'), { recursive: true, force: true });
         return { ok: true, detail: 'worktree copied (repository has no commit to check out)' };
       } catch (e2: any) {
@@ -305,23 +367,68 @@ export class Engine {
   private async agent(role: Role, rec: TaskRecord, prompt: string, readOnly: boolean): Promise<AgentResponse> {
     const provider = role === 'planner' ? this.opts.providers.planner
       : role === 'implementer' ? this.opts.providers.implementer : this.opts.providers.reviewer;
-    this.events.append({ taskId: rec.taskId, type: 'AGENT_STARTED', payload: { role, provider: provider.id, readOnly } });
+    this.record({ taskId: rec.taskId, type: 'AGENT_STARTED', payload: { role, provider: provider.id, readOnly } });
+    // The provider span covers the whole invocation; the process instants the
+    // supervisor captured are then attached as children, so queue wait, spawn
+    // cost and generation are separable rather than one opaque number.
+    // The reviewer's model time is REVIEW, not PROVIDER: the buckets describe
+    // what the time was spent ON, and a task blocked on its reviewer is blocked
+    // on review whichever process happens to be running.
+    const providerBucket = role === 'reviewer' ? 'REVIEW' : 'PROVIDER';
+    const invokeId = this.spans.start(`provider.invoke.${role}`, providerBucket, { role, provider: provider.id });
     const res = await provider.invoke({
       role, taskId: rec.taskId, projectId: this.projectId, prompt,
       policy: this.policyFor(rec), readOnly,
     }, this.opts.supervisor);
-    this.events.append({ taskId: rec.taskId, type: res.ok ? 'AGENT_FINISHED' : 'AGENT_FAILED', payload: {
+    this.spans.end(invokeId, { outcome: String(res.outcome), promptBytes: prompt.length });
+    const pt = (res as any).timing;
+    if (pt) {
+      const req = BigInt(pt.requestedNs); const sp = BigInt(pt.spawnedNs); const ex = BigInt(pt.exitedNs);
+      const fo = pt.firstOutputNs ? BigInt(pt.firstOutputNs) : null;
+      this.spans.externalUnder(invokeId, `provider.queue+spawn.${role}`, 'IDLE', req, sp, { role });
+      if (fo) {
+        this.spans.externalUnder(invokeId, `provider.startup.${role}`, providerBucket, sp, fo, { role });
+        this.spans.externalUnder(invokeId, `provider.generation.${role}`, providerBucket, fo, ex, { role });
+      } else {
+        this.spans.externalUnder(invokeId, `provider.process.${role}`, providerBucket, sp, ex, { role, noOutput: true });
+      }
+    }
+    this.record({ taskId: rec.taskId, type: res.ok ? 'AGENT_FINISHED' : 'AGENT_FAILED', payload: {
       role, provider: provider.id, outcome: res.outcome, exitCode: res.exitCode,
       durationMs: res.durationMs, infrastructureFailure: res.infrastructureFailure,
       structuredKeys: res.structured ? Object.keys(res.structured) : [],
+      // Values, not just key names: a list of field names is not a diagnosis.
+      diagnostics: res.diagnostics ?? {},
     } });
     return res;
+  }
+
+  /** Every state write goes through here, so PERSISTENCE is measured at source. */
+  private record(input: Parameters<EventStore['append']>[0]): void {
+    this.spans.sync('event.append', 'PERSISTENCE', () => this.events.append(input), { type: String(input.type) });
   }
 
   /** Runs one project command through the supervisor and classifies it. */
   async runCheck(rec: TaskRecord, name: string, commandLine: string, required: boolean,
     cls: 'light' | 'heavy' = 'light'): Promise<{ outcome: CheckOutcome; res: ExecutionResult }> {
+    // Off-ledger execution is refused here rather than trusted not to happen.
+    if (!this.approved.has(approvalKey(name, commandLine))) {
+      this.record({ taskId: rec.taskId, type: 'CHECK_REFUSED', payload: {
+        name, command: commandLine, required,
+        code: 'NOT_IN_SELECTION',
+        detail: 'this check was not approved by the validation selection path; '
+          + 'every phase selects through selectChecks() and nothing runs off-plan',
+      } });
+      return { outcome: 'REQUIRED_TEST_NOT_RUN' as CheckOutcome, res: {
+        id: name, outcome: 'POLICY_DENIED', exitCode: null, signal: null, stdout: '',
+        queueWaitMs: 0, durationMs: 0, pid: null, pgid: null,
+        backend: 'process-group', isolationFallback: false, enforced: [], violations: [],
+        productSignal: false,
+        budgets: { memoryMaxMb: 0, cpuQuotaPercent: 0, maxProcesses: 0, testWorkers: 0 },
+      } as unknown as ExecutionResult };
+    }
     const [cmd, ...args] = commandLine.split(/\s+/);
+    const checkId = this.spans.start('check.' + name, 'VALIDATION', { command: commandLine, required });
     const res = await this.opts.supervisor.run({
       id: `${rec.taskId}-${name}-${Date.now()}`,
       projectId: this.projectId, taskId: rec.taskId, cls,
@@ -330,11 +437,33 @@ export class Engine {
       confineFilesystem: true,          // project commands are the untrusted ones
     });
     const outcome = classifyCheck(res, required);
-    this.events.append({ taskId: rec.taskId, type: 'CHECK_RESULT', payload: {
-      name, required, outcome, command: commandLine, exitCode: res.exitCode,
+    this.spans.end(checkId, { outcome });
+    // Runner startup and actual test execution are wildly different costs and
+    // are normally invisible as one number. First output is the boundary: a
+    // runner has compiled and collected by the time it prints anything.
+    const ct = res.timing;
+    if (ct) {
+      const req = BigInt(ct.requestedNs); const sp = BigInt(ct.spawnedNs); const ex = BigInt(ct.exitedNs);
+      const fo = ct.firstOutputNs ? BigInt(ct.firstOutputNs) : null;
+      this.spans.externalUnder(checkId, `check.${name}.queue+spawn`, 'IDLE', req, sp, {});
+      if (fo) {
+        this.spans.externalUnder(checkId, `check.${name}.runner-startup`, 'VALIDATION', sp, fo, {});
+        this.spans.externalUnder(checkId, `check.${name}.execution`, 'VALIDATION', fo, ex, {});
+      } else {
+        this.spans.externalUnder(checkId, `check.${name}.total`, 'VALIDATION', sp, ex, { noOutput: true });
+      }
+    }
+    // The command line is evidence too, and a project's configured command can
+    // itself carry a secret (a token in a URL, a password flag). Redacting the
+    // output while recording the command verbatim leaks it just as permanently.
+    this.record({ taskId: rec.taskId, type: 'CHECK_RESULT', payload: {
+      name, required, outcome, command: redactSecrets(commandLine).text, exitCode: res.exitCode,
       durationMs: res.durationMs, backend: res.backend, isolationFallback: res.isolationFallback,
       productSignal: res.productSignal, violations: res.violations,
-      tail: res.stdout.slice(-500),
+      ...(() => {
+        const r = redactSecrets(res.stdout.slice(-500));
+        return { tail: r.text, ...(r.redactions ? { redactions: r.redactions } : {}) };
+      })(),
     } });
     return { outcome, res };
   }
@@ -348,15 +477,15 @@ export class Engine {
    * reported is what actually died.
    */
   cancel(taskId: string, reason: string): { cancelled: boolean; killed: number } {
-    this.events.append({ taskId, type: 'CANCEL_REQUESTED', payload: { reason } });
+    this.record({ taskId, type: 'CANCEL_REQUESTED', payload: { reason } });
     const local = this.opts.supervisor.killTask(taskId, reason);
     const recorded = killRecorded(this.stateRoot, { taskId }, reason);
     const killed = local + recorded.killed;
-    this.events.append({ taskId, type: 'PROCESSES_TERMINATED', payload: {
+    this.record({ taskId, type: 'PROCESSES_TERMINATED', payload: {
       local, fromRegistry: recorded.killed, prunedStale: recorded.pruned,
       groups: recorded.records.map((r) => ({ pgid: r.pgid, command: r.command })),
     } });
-    this.events.append({ taskId, type: 'STATE_CHANGED', payload: {
+    this.record({ taskId, type: 'STATE_CHANGED', payload: {
       from: this.task(taskId)?.state ?? 'NEW', to: 'CANCELLED', phase: 'cancelled', killed, reason } });
     return { cancelled: true, killed };
   }
@@ -373,8 +502,8 @@ export class Engine {
     const cfg = this.opts.config;
     const adapter = adapterById(cfg.project?.adapter ?? 'generic');
 
-    const wt = this.prepareWorktree(rec);
-    this.events.append({ taskId, type: 'WORKTREE', payload: wt });
+    const wt = this.spans.sync('worktree.prepare', 'SETUP', () => this.prepareWorktree(rec));
+    this.record({ taskId, type: 'WORKTREE', payload: wt });
     if (!wt.ok) { this.setState(taskId, 'FAILED', 'worktree'); return 'FAILED'; }
 
     // ---- DESIGN ------------------------------------------------------------
@@ -393,13 +522,14 @@ export class Engine {
       this.setState(taskId, state, 'design', { reason: design.infrastructureFailure ?? 'design failed' });
       return state;
     }
-    this.events.append({ taskId, type: 'DESIGN_RECORDED', payload: { design: design.structured ?? {} } });
+    this.record({ taskId, type: 'DESIGN_RECORDED', payload: { design: design.structured ?? {} } });
     if (this.task(taskId)?.cancelRequested) return 'CANCELLED';
 
     const afterDesign = this.budgetBreach(taskId);
     if (afterDesign) return afterDesign;
 
     // ---- IMPLEMENT ---------------------------------------------------------
+    const implementStartedAt = Date.now();
     this.setState(taskId, 'IMPLEMENT', 'implement');
     const impl = await this.agent('implementer', rec, [
       'Implement the following change in the current worktree.',
@@ -412,8 +542,8 @@ export class Engine {
       this.setState(taskId, state, 'implement', { reason: impl.infrastructureFailure ?? 'implementation failed' });
       return state;
     }
-    const changed = this.changedFiles(rec);
-    this.events.append({ taskId, type: 'CODE_CHANGE', payload: { filesChanged: changed } });
+    const changed = this.spans.sync('decision.changed-files', 'DECISION', () => this.changedFiles(rec));
+    this.record({ taskId, type: 'CODE_CHANGE', payload: { filesChanged: changed } });
     if (this.task(taskId)?.cancelRequested) return 'CANCELLED';
 
     const afterImpl = this.budgetBreach(taskId);
@@ -422,14 +552,14 @@ export class Engine {
     // ---- ADAPTIVE VALIDATION -----------------------------------------------
     // Classified per hunk, before anything is run. The tier is the MAXIMUM over
     // every hunk: a risky change bundled with a harmless one buys nothing.
-    const rawDiff = this.diff(rec);
-    const parsed = parseDiff(rawDiff);
+    const rawDiff = this.spans.sync('decision.diff', 'DECISION', () => this.diff(rec));
+    const parsed = this.spans.sync('decision.parse-diff', 'DECISION', () => parseDiff(rawDiff), { bytes: rawDiff.length });
     const hardening = this.hardening();
     const confidence = impactConfidence(parsed, cfg.project?.adapter ?? 'generic');
-    let decision: TierDecision = resolveTier({
+    let decision: TierDecision = this.spans.sync('decision.resolve-tier', 'DECISION', () => resolveTier({
       diff: parsed, adapterId: cfg.project?.adapter ?? 'generic', confidence, hardening,
-    });
-    this.events.append({ taskId, type: 'VALIDATION_PLAN', payload: {
+    }), { files: parsed.files.length });
+    this.record({ taskId, type: 'VALIDATION_PLAN', payload: {
       tier: decision.tier, confidence: decision.confidence, fastEligible: decision.fastEligible,
       perHunk: decision.perHunk, escalations: decision.escalations, reasons: decision.reasons,
       testSurfaceFiles: decision.testSurfaceFiles, highRiskFiles: decision.highRiskFiles,
@@ -439,10 +569,12 @@ export class Engine {
     // ---- EVIDENCE-CHAIN INTEGRITY -------------------------------------------
     // The one place where "the tests passed" could be a lie the platform told
     // itself. These rules are not configurable.
-    const contract = designContract(design.structured);
-    const integrity: IntegrityReport = inspectIntegrity(parsed, contract);
-    const evidenceCoupled = evidenceCoupledFiles(parsed, contract);
-    this.events.append({ taskId, type: 'EVIDENCE_INTEGRITY', payload: {
+    const contract = this.spans.sync('decision.design-contract', 'DECISION', () => designContract(design.structured));
+    const integrity: IntegrityReport = this.spans.sync('decision.integrity', 'DECISION',
+      () => inspectIntegrity(parsed, contract));
+    const evidenceCoupled = this.spans.sync('decision.evidence-coupling', 'DECISION',
+      () => evidenceCoupledFiles(parsed, contract));
+    this.record({ taskId, type: 'EVIDENCE_INTEGRITY', payload: {
       findings: integrity.findings, blocking: integrity.blocking.length,
       testFilesChanged: integrity.testFilesChanged, testsRemoved: integrity.testsRemoved,
       testsDisabled: integrity.testsDisabled, evidenceCoupledFiles: evidenceCoupled,
@@ -476,15 +608,79 @@ export class Engine {
 
     // ---- VERIFY ------------------------------------------------------------
     this.setState(taskId, 'VERIFY', 'verify');
-    const required: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> = [];
-    if (cfg.commands?.typecheck) required.push({ name: 'typecheck', cmd: cfg.commands.typecheck, cls: 'light' });
-    if (cfg.commands?.unitTest) required.push({ name: 'unit-test', cmd: cfg.commands.unitTest, cls: 'heavy' });
+    // Constraints stated in the task become data here, once, and every
+    // selection from now on is made against them.
+    const constraints: ConstraintSet = this.spans.sync('decision.constraints', 'DECISION',
+      () => parseConstraints(rec.description));
+    const declared = Object.entries(cfg.commands ?? {})
+      .filter(([, v]) => typeof v === 'string' && v)
+      .map(([name, command]) => ({
+        name: name === 'unitTest' ? 'unit-test' : name === 'integrationTest' ? 'integration-test' : name,
+        command: String(command),
+      }));
+    const classifications: Classification[] = this.spans.sync('decision.classify-suites', 'DECISION',
+      () => classifyAll(declared, this.opts.projectRoot));
+    this.record({ taskId, type: 'TASK_CONSTRAINTS', payload: {
+      constraints: constraints.constraints, unparsed: constraints.unparsed,
+      classifications: classifications.map((c) => ({ check: c.check, klass: c.klass, signals: c.signals })),
+    } });
+
+    // Constraints about the diff itself are reported now, before anything runs.
+    const dViolations = diffViolations(constraints, { files: changed });
+    if (dViolations.length) {
+      this.record({ taskId, type: 'CONSTRAINT_VIOLATION', payload: { scope: 'diff', violations: dViolations } });
+    }
+
+    const ledger: SelectionLedger = this.spans.sync('decision.select-checks', 'DECISION', () => selectChecks({
+      phase: 'VERIFY', tier: decision.tier,
+      commands: (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>,
+      classifications, constraints,
+      affectedSurfaces: decision.highRiskFiles,
+      cost: {
+        implementMs: Math.max(1, Date.now() - implementStartedAt),
+        filesChanged: changed.length, hunks: decision.perHunk.length,
+      },
+      costRatioThreshold: Number((cfg as any)?.validation?.hardening?.costRatioThreshold) || DEFAULT_COST_RATIO,
+    }));
+    this.approved = new Set(ledger.selected.map((c) => approvalKey(c.name, c.command)));
+    this.record({ taskId, type: 'VALIDATION_SELECTION', payload: {
+      phase: ledger.phase, tier: ledger.tier,
+      selected: ledger.selected.map((c) => ({ name: c.name, required: c.required, klass: c.klass, reason: c.reason })),
+      refused: ledger.refused,
+      cost: ledger.cost, conflict: ledger.conflict, reasons: ledger.reasons,
+    } });
+
+    // A required check the task forbade is not Zeus's decision to make.
+    if (ledger.conflict) {
+      return this.escalateToHuman(taskId, 'AWAITING_HUMAN', 'verify', {
+        reasonCode: 'POLICY_APPROVAL_REQUIRED',
+        blocked: ledger.conflict.detail,
+        tried: [
+          `classified the change as ${decision.tier}`,
+          `parsed ${constraints.constraints.length} constraint(s) from the task text`,
+          `classified ${classifications.length} configured check(s) by what they start`,
+        ],
+        evidence: [
+          { kind: 'event', id: 'TASK_CONSTRAINTS', detail: 'the parsed constraint set' },
+          { kind: 'event', id: 'VALIDATION_SELECTION', detail: 'the selection ledger and its refusals' },
+          { kind: 'check', id: ledger.conflict.check, detail: 'the required check in conflict' },
+        ],
+        needed: {
+          kind: 'decision',
+          description: `decide whether "${ledger.conflict.check}" should run despite the task forbidding it, or whether the constraint stands and the required check is waived for this task`,
+        },
+        resumeBehavior: 'the task resumes at verification with the decision recorded against it',
+      });
+    }
+
+    const required: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> =
+      ledger.selected.filter((c) => c.required).map((c) => ({ name: c.name, cmd: c.command, cls: c.cls }));
     // A project with nothing executable to run cannot be "verified". Claiming
     // COMPLETED here would be the worst kind of false acceptance: confident,
     // fast and based on nothing. Opt in explicitly if that is really intended.
     if (!required.length) {
       const allowed = (this.opts.config.policy as any)?.allowUnverifiedAcceptance === true;
-      this.events.append({ taskId, type: 'NO_VERIFICATION_CONFIGURED', payload: {
+      this.record({ taskId, type: 'NO_VERIFICATION_CONFIGURED', payload: {
         adapter: cfg.project?.adapter, commands: cfg.commands ?? {},
         allowUnverifiedAcceptance: allowed,
         detail: 'no typecheck or unit-test command is configured for this project',
@@ -514,16 +710,12 @@ export class Engine {
     }
     // The tier decides what runs ON TOP of the floor, never how much of the
     // floor runs. Every required check runs at every tier, including FAST.
-    const plan = planFor(decision.tier, (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>);
-    const optional: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> = [];
-    for (const name of plan.additional) {
-      const cmd = (cfg.commands as any)?.[name === 'unit-test' ? 'unitTest'
-        : name === 'integration-test' ? 'integrationTest' : name];
-      if (cmd) optional.push({ name, cmd, cls: name === 'integration-test' ? 'heavy' : 'light' });
-    }
-    this.events.append({ taskId, type: 'VALIDATION_SCOPE', payload: {
-      tier: plan.tier, floor: required.map((r) => r.name), additional: optional.map((o) => o.name),
-      note: 'the floor is authoritative and runs at every tier',
+    const optional: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> =
+      ledger.selected.filter((c) => !c.required).map((c) => ({ name: c.name, cmd: c.command, cls: c.cls }));
+    this.record({ taskId, type: 'VALIDATION_SCOPE', payload: {
+      tier: ledger.tier, floor: required.map((r) => r.name), additional: optional.map((o) => o.name),
+      refused: ledger.refused.map((r) => ({ name: r.name, code: r.code })),
+      note: 'the floor is authoritative and runs at every tier; everything here came from selectChecks()',
     } });
 
     const outcomes: CheckOutcome[] = [];
@@ -586,7 +778,19 @@ export class Engine {
     // ---- REVIEW ------------------------------------------------------------
     this.setState(taskId, 'REVIEW', 'review');
     const diff = this.diff(rec);
-    const headSha = this.worktreeHead(rec);
+    const headSha = this.spans.sync('review.head-sha', 'REVIEW', () => this.worktreeHead(rec));
+    // A reviewer that silently receives the first 20KB of a large change can
+    // report "no findings" having seen a fraction of it, and that verdict is
+    // recorded as a review of the whole thing. If it must be cut, say so.
+    const DIFF_LIMIT = 20000;
+    const diffTruncated = diff.length > DIFF_LIMIT;
+    const truncatedDiff = diffTruncated
+      ? `${diff.slice(0, DIFF_LIMIT)}\n\n*** DIFF TRUNCATED ***\n`
+        + `This section shows the first ${DIFF_LIMIT} of ${diff.length} bytes. `
+        + `${changed.length} file(s) changed in total; the remainder is NOT included above.\n`
+        + 'You have not seen the whole change. Say so in your evidence summary, and treat any\n'
+        + 'conclusion about the unseen portion as unsupported.\n'
+      : diff;
 
     // The reviewer's payload is assembled under policy and hashed, so what it
     // received is a matter of record rather than of trust. Anything carrying
@@ -594,7 +798,7 @@ export class Engine {
     const reviewInputs: ReviewInput[] = [
       { kind: 'task-requirement', label: 'TASK', content: rec.description },
       { kind: 'changed-files', label: 'CHANGED FILES', content: changed.join('\n') || '(none)' },
-      { kind: 'diff', label: 'DIFF (base..head)', content: diff.slice(0, 20000) },
+      { kind: 'diff', label: 'DIFF (base..head)', content: truncatedDiff },
       { kind: 'protected-paths', label: 'PROTECTED PATHS',
         content: (cfg.policy?.protectedPaths ?? []).join('\n') || '(none)' },
       { kind: 'test-evidence', label: 'CHECKS ALREADY RUN',
@@ -624,7 +828,7 @@ export class Engine {
         ].join('\n'),
       });
     }
-    const payload = buildReviewPayload({
+    const payload = this.spans.sync('review.assemble-payload', 'REVIEW', () => buildReviewPayload({
       taskId, projectId: this.projectId, baseSha: rec.baseSha, headSha,
       inputs: reviewInputs, policy: this.reviewPolicy,
       header: [
@@ -639,8 +843,9 @@ export class Engine {
         ' "usedContext":["task-requirement","diff"],',
         ' "expansionRequest":{"behavior":"session refresh may break for expired tokens","scope":["path"]}}',
       ].join('\n'),
-    });
-    this.events.append({ taskId, type: 'REVIEW_CONTEXT', payload: {
+    }));
+    this.record({ taskId, type: 'REVIEW_CONTEXT', payload: {
+      diffBytes: diff.length, diffTruncated, diffDelivered: truncatedDiff.length,
       reviewInvocationId: payload.reviewInvocationId,
       baseSha: payload.baseSha, headSha: payload.headSha,
       configuredContext: payload.configuredContext,
@@ -674,7 +879,7 @@ export class Engine {
     if (!reported.consistent) {
       // Self-report is never authoritative; a claim about unsupplied context
       // goes on the record rather than being believed.
-      this.events.append({ taskId, type: 'REVIEW_CLAIM_UNSUPPORTED', payload: {
+      this.record({ taskId, type: 'REVIEW_CLAIM_UNSUPPORTED', payload: {
         reviewInvocationId: payload.reviewInvocationId, unsupportedClaims: reported.unsupportedClaims,
       } });
     }
@@ -696,7 +901,7 @@ export class Engine {
       });
     }
     let findings = ((review.structured?.findings as any[]) ?? []);
-    this.events.append({ taskId, type: 'FINDINGS', payload: { findings, count: findings.length } });
+    this.record({ taskId, type: 'FINDINGS', payload: { findings, count: findings.length } });
     if (this.task(taskId)?.cancelRequested) return 'CANCELLED';
 
     // ---- REVIEWER EXPANSION (§7) -------------------------------------------
@@ -715,7 +920,7 @@ export class Engine {
         scope: Array.isArray((pending as any).scope) ? (pending as any).scope.map(String) : undefined,
       };
       const verdict = evaluateExpansion(req, expansionState);
-      this.events.append({ taskId, type: 'REVIEW_EXPANSION', payload: {
+      this.record({ taskId, type: 'REVIEW_EXPANSION', payload: {
         code: verdict.code, accepted: verdict.accepted, detail: verdict.detail,
         request: req, granted: expansionState.granted, budget: expansionState.budget,
       } });
@@ -723,20 +928,34 @@ export class Engine {
 
       expansionState.granted += 1;
       decision = applyExpansion(decision, req);
-      this.events.append({ taskId, type: 'VALIDATION_PLAN', payload: {
+      this.record({ taskId, type: 'VALIDATION_PLAN', payload: {
         tier: decision.tier, confidence: decision.confidence, fastEligible: decision.fastEligible,
         escalations: decision.escalations, reasons: decision.reasons,
         cause: 'reviewerExpansion', perHunk: decision.perHunk,
       } });
 
-      const expanded = planFor(decision.tier, (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>);
-      for (const name of expanded.additional) {
-        if (alreadyRun.has(name)) continue;
-        const cmd = (cfg.commands as any)?.[name === 'integration-test' ? 'integrationTest' : name];
-        if (!cmd) continue;
-        alreadyRun.add(name);
-        const { outcome } = await this.runCheck(rec, name, cmd, false, name === 'integration-test' ? 'heavy' : 'light');
-        additionalOutcomes.push({ name, outcome });
+      // The expansion goes through the SAME selection path as VERIFY. It used to
+      // reach into cfg.commands directly, which meant an escalated tier could
+      // acquire a heavy suite the task's own constraints forbade — the
+      // Zeus-native version of the defect this fix exists for.
+      const expandLedger = selectChecks({
+        phase: 'REVIEW_EXPANSION', tier: decision.tier,
+        commands: (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>,
+        classifications, constraints,
+        affectedSurfaces: [...decision.highRiskFiles, ...(req.scope ?? [])],
+        alreadyRun,
+      });
+      this.record({ taskId, type: 'VALIDATION_SELECTION', payload: {
+        phase: expandLedger.phase, tier: expandLedger.tier, cause: 'reviewerExpansion',
+        selected: expandLedger.selected.map((c) => ({ name: c.name, required: c.required, klass: c.klass, reason: c.reason })),
+        refused: expandLedger.refused, reasons: expandLedger.reasons,
+      } });
+      for (const c of expandLedger.selected) {
+        if (alreadyRun.has(c.name)) continue;
+        alreadyRun.add(c.name);
+        this.approved.add(approvalKey(c.name, c.command));
+        const { outcome } = await this.runCheck(rec, c.name, c.command, c.required, c.cls);
+        additionalOutcomes.push({ name: c.name, outcome });
       }
 
       const overBudget = this.budgetBreach(taskId);
@@ -747,7 +966,7 @@ export class Engine {
       const newFindings = ((again.structured?.findings as any[]) ?? []);
       findings = newFindings.length ? newFindings : findings;
       expansionState.findingsPerExpansion.push(Math.max(0, findings.length - before));
-      this.events.append({ taskId, type: 'FINDINGS', payload: {
+      this.record({ taskId, type: 'FINDINGS', payload: {
         findings, count: findings.length, afterExpansion: expansionState.granted,
       } });
       pending = again.structured?.expansionRequest as ExpansionRequest | undefined;
@@ -755,7 +974,7 @@ export class Engine {
     }
 
     const unproductive = unproductiveExpansion(expansionState);
-    if (unproductive) this.events.append({ taskId, type: 'REVIEW_EXPANSION_UNPRODUCTIVE', payload: { ...unproductive } });
+    if (unproductive) this.record({ taskId, type: 'REVIEW_EXPANSION_UNPRODUCTIVE', payload: { ...unproductive } });
 
     const blockers = findings.filter((f) => ['CRITICAL', 'IMPORTANT'].includes(String(f?.severity)));
 
@@ -787,7 +1006,7 @@ export class Engine {
         ...additionalOutcomes.map((a) => ({ name: a.name, outcome: String(a.outcome) }))],
       integrity.testFilesChanged,
     );
-    this.events.append({ taskId, type: 'ACCEPTED', payload: {
+    this.record({ taskId, type: 'ACCEPTED', payload: {
       filesChanged: changed, checks: outcomes,
       validationTier: decision.tier, confidence: decision.confidence,
       testAccounting: accounting,
@@ -808,18 +1027,53 @@ export class Engine {
     } catch { return rec.baseSha; }
   }
 
-  changedFiles(rec: TaskRecord): string[] {
+  /**
+   * Makes every shape of change visible to git.
+   *
+   * `git diff` alone reports tracked, unstaged modifications — which is a
+   * fraction of what an implementer actually does. A file it CREATES is
+   * untracked and invisible; work it COMMITS is invisible twice over. Both are
+   * ordinary agent behaviour, and both used to produce an empty diff, which
+   * meant zero hunks classified, no integrity inspection, and an empty payload
+   * handed to the reviewer.
+   *
+   * `--intent-to-add` records the existence of untracked paths without staging
+   * their content, so they appear as additions; diffing against the task's BASE
+   * commit rather than the worktree HEAD then also captures anything committed.
+   * The index of a per-task, disposable worktree is Zeus's own scratch space.
+   */
+  private markIntentToAdd(rec: TaskRecord): void {
     try {
-      const out = require('child_process')
-        .execFileSync('git', ['-C', rec.worktree, 'status', '--porcelain'], { encoding: 'utf8', timeout: 30_000 });
-      return out.split('\n').filter(Boolean).map((l: string) => l.slice(3).trim());
-    } catch { return []; }
+      require('child_process').execFileSync('git', ['-C', rec.worktree, 'add', '-A', '--intent-to-add', '--'],
+        { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch { /* a path git refuses to index still shows through status below */ }
+  }
+
+  changedFiles(rec: TaskRecord): string[] {
+    this.markIntentToAdd(rec);
+    const cp = require('child_process');
+    const names = new Set<string>();
+    try {
+      const out = cp.execFileSync('git', ['-C', rec.worktree, 'diff', '--name-only', rec.baseSha, '--'],
+        { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      for (const l of out.split('\n').filter(Boolean)) names.add(l.trim());
+    } catch { /* fall through to status */ }
+    // Belt and braces: anything git still will not diff (an unreadable path,
+    // a submodule) is at least reported as changed rather than lost.
+    try {
+      const st = cp.execFileSync('git', ['-C', rec.worktree, 'status', '--porcelain'],
+        { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] });
+      for (const l of st.split('\n').filter(Boolean)) names.add(l.slice(3).trim());
+    } catch { /* nothing more to add */ }
+    return [...names].filter(Boolean);
   }
 
   diff(rec: TaskRecord): string {
+    this.markIntentToAdd(rec);
     try {
       return require('child_process')
-        .execFileSync('git', ['-C', rec.worktree, 'diff', '--stat', '-p'], { encoding: 'utf8', timeout: 60_000, maxBuffer: 32 * 1024 * 1024 });
+        .execFileSync('git', ['-C', rec.worktree, 'diff', '--stat', '-p', rec.baseSha, '--'],
+          { encoding: 'utf8', timeout: 60_000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch { return '(diff unavailable)'; }
   }
 

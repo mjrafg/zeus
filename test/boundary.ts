@@ -119,13 +119,32 @@ export async function boundarySuite(): Promise<void> {
   check('PB5: no file hard-codes a machine-specific absolute path',
     absolutePaths.length === 0, absolutePaths.slice(0, 5).join(', '));
 
+  // Files that legitimately contain credential SHAPES: the detectors themselves
+  // and the fixtures that prove they fire. Each is listed rather than pattern-
+  // matched, so adding one is a decision somebody made on purpose.
+  const CREDENTIAL_FIXTURES = [
+    'scripts/package.sh',            // the artifact scanner's own patterns
+    'test/boundary.ts',              // this file
+    'src/engine/orchestrator.ts',    // redactSecrets(): the shapes it removes
+    'audits/harness/lane-c.ts',      // probes that plant synthetic secrets
+    'test/audit.ts',                 // regression fixtures for redaction
+  ];
   const credentialish = everything
-    .filter((f) => !/scripts\/package\.sh$|test\/boundary\.ts$/.test(f))
+    .filter((f) => !CREDENTIAL_FIXTURES.includes(path.relative(REPO, f)))
     .filter((f) => /BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}/
       .test(fs.readFileSync(f, 'utf8')))
     .map((f) => path.relative(REPO, f));
-  check('PB6: the working tree carries no credential-shaped content',
+  check('PB6: the working tree carries no credential-shaped content outside the detectors',
     credentialish.length === 0, credentialish.join(', '));
+  // The exceptions must earn their place: a listed file that no longer exists,
+  // or that stopped being about credentials, is a stale hole in the check.
+  const staleExceptions = CREDENTIAL_FIXTURES.filter((f) => {
+    const abs = path.join(REPO, f);
+    if (!fs.existsSync(abs)) return true;
+    return !/redact|credential|secret|PRIVATE KEY|sk-|ghp_|AKIA/i.test(fs.readFileSync(abs, 'utf8'));
+  });
+  check('PB6b: every credential-fixture exception is still needed',
+    staleExceptions.length === 0, staleExceptions.join(', '));
 
   // Identifier scan. Only runs when a maintainer supplies the private list.
   const r = rules();
@@ -133,9 +152,23 @@ export async function boundarySuite(): Promise<void> {
     check(`PB7: historical-identifier scan (set ${RULES_ENV} to a private rule file to enable)`,
       true, 'not configured — structural checks above still ran');
   } else {
+    // Audit documents necessarily discuss historical identifiers: a finding
+    // that rules one out has to name the thing it is ruling out. The scanner
+    // cannot tell mention from use and should not try, so audits/ is exempt by
+    // path and the exemption is recorded here rather than left for authors to
+    // discover by writing around the check.
+    //
+    // The exemption is narrow on purpose: it covers audits/ only. src/, bin/,
+    // docs/ and the release artifact are still scanned, and PB9 below still
+    // asserts the runtime carries zero historical coupling.
+    const AUDIT_EXEMPT = `audits${path.sep}`;
     const files = productFiles(r);
     check('PB7: product-facing files were actually scanned', files.length > 20, `${files.length} files`);
-    const hits = scan(files, r.identifiers);
+    const scanned = files.filter((f) => !path.relative(REPO, f).startsWith(AUDIT_EXEMPT));
+    const exempted = files.length - scanned.length;
+    check('PB7b: the audits/ exemption is bounded and visible',
+      exempted >= 0 && scanned.length > 0, `${exempted} audit file(s) exempt, ${scanned.length} still scanned`);
+    const hits = scan(scanned, r.identifiers);
     check('PB8: no product-facing file contains a historical identifier',
       hits.length === 0, hits.slice(0, 5).map((h) => `${h.file}:${h.line} (${h.id})`).join(' | '));
     const runtimeHits = hits.filter((h) => h.file.startsWith('src/') || h.file.startsWith('bin/'));

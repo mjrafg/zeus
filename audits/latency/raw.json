@@ -1,0 +1,2121 @@
+{
+ "zeusRepo": "<zeus-repo>",
+ "zeusSha": "b9c43e3ef64d280a74a6b8734798ec9aaa54bf23",
+ "subjectRepo": "<subject-repo>",
+ "subjectSha": "978456e8d7abed55d8e2970dbac8c6afff9173d9",
+ "mode": "codex",
+ "results": [
+  {
+   "taskId": "T1",
+   "runIndex": 1,
+   "spec": {
+    "id": "T1",
+    "expectedTier": "FAST",
+    "description": "In README.md, change the word \"small\" to \"compact\" in the first paragraph. Change nothing else in any file."
+   },
+   "finalState": "COMPLETED",
+   "latency": {
+    "totalMs": 48425.246029,
+    "buckets": [
+     {
+      "bucket": "SETUP",
+      "ms": 96.376646,
+      "pct": 0.19902148962192934,
+      "detail": [
+       {
+        "name": "setup.clone",
+        "ms": 60.759841,
+        "count": 1
+       },
+       {
+        "name": "setup.worktree-deps",
+        "ms": 30.208004,
+        "count": 1
+       },
+       {
+        "name": "setup.config",
+        "ms": 4.600725,
+        "count": 1
+       },
+       {
+        "name": "setup.link-toolchain",
+        "ms": 0.580434,
+        "count": 1
+       },
+       {
+        "name": "worktree.prepare",
+        "ms": 0.227642,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PROVIDER",
+      "ms": 24731.477752,
+      "pct": 51.07145503646853,
+      "detail": [
+       {
+        "name": "provider.generation.implementer",
+        "ms": 13753.585897,
+        "count": 1
+       },
+       {
+        "name": "provider.generation.planner",
+        "ms": 10511.572845,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.planner",
+        "ms": 257.187443,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.implementer",
+        "ms": 203.896834,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.planner",
+        "ms": 4.01676,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.implementer",
+        "ms": 1.217973,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "DECISION",
+      "ms": 72.06802,
+      "pct": 0.14882323975564576,
+      "detail": [
+       {
+        "name": "decision.changed-files",
+        "ms": 36.862218,
+        "count": 1
+       },
+       {
+        "name": "decision.diff",
+        "ms": 28.276716,
+        "count": 1
+       },
+       {
+        "name": "decision.resolve-tier",
+        "ms": 3.891078,
+        "count": 1
+       },
+       {
+        "name": "decision.parse-diff",
+        "ms": 1.615716,
+        "count": 1
+       },
+       {
+        "name": "decision.integrity",
+        "ms": 0.813718,
+        "count": 1
+       },
+       {
+        "name": "decision.plan",
+        "ms": 0.277962,
+        "count": 1
+       },
+       {
+        "name": "decision.design-contract",
+        "ms": 0.222852,
+        "count": 1
+       },
+       {
+        "name": "decision.evidence-coupling",
+        "ms": 0.10776,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "VALIDATION",
+      "ms": 2523.446636,
+      "pct": 5.211014590382888,
+      "detail": [
+       {
+        "name": "check.unit-test.execution",
+        "ms": 769.735591,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.execution",
+        "ms": 759.831244,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.runner-startup",
+        "ms": 498.069367,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.runner-startup",
+        "ms": 489.838986,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck",
+        "ms": 4.470384,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test",
+        "ms": 1.501064,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "REVIEW",
+      "ms": 20688.579775,
+      "pct": 42.722714847148964,
+      "detail": [
+       {
+        "name": "provider.generation.reviewer",
+        "ms": 20493.162433,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.reviewer",
+        "ms": 179.615639,
+        "count": 1
+       },
+       {
+        "name": "review.head-sha",
+        "ms": 11.413101,
+        "count": 1
+       },
+       {
+        "name": "review.assemble-payload",
+        "ms": 2.598167,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.reviewer",
+        "ms": 1.790435,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PERSISTENCE",
+      "ms": 87.672278,
+      "pct": 0.1810466341203439,
+      "detail": [
+       {
+        "name": "event.append",
+        "ms": 77.148304,
+        "count": 24
+       },
+       {
+        "name": "lease.acquire",
+        "ms": 5.788316,
+        "count": 1
+       },
+       {
+        "name": "state.read-log",
+        "ms": 3.080822,
+        "count": 12
+       },
+       {
+        "name": "state.budget-recompute",
+        "ms": 1.290723,
+        "count": 3
+       },
+       {
+        "name": "lease.release",
+        "ms": 0.364113,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "IDLE",
+      "ms": 225.624922,
+      "pct": 0.46592416250168767,
+      "detail": [
+       {
+        "name": "unattributed gap",
+        "ms": 166.370099,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.planner",
+        "ms": 17.488169,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.implementer",
+        "ms": 11.839124,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.queue+spawn",
+        "ms": 10.743384,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.reviewer",
+        "ms": 9.880665,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.queue+spawn",
+        "ms": 9.303481,
+        "count": 1
+       }
+      ]
+     }
+    ],
+    "idleGapMs": 166.370099,
+    "idleExplicitMs": 59.254823,
+    "reconciliationDeltaMs": 0,
+    "overheadMs": 1.580002,
+    "spanCount": 76
+   },
+   "tier": "FAST",
+   "confidence": "KNOWN",
+   "checksRun": [
+    "typecheck",
+    "unit-test"
+   ],
+   "checksAvailable": [
+    "install",
+    "build",
+    "unitTest",
+    "typecheck",
+    "lint"
+   ],
+   "providerInvocations": 3,
+   "filesChanged": 1,
+   "wallClockMs": 48425.246029,
+   "cloneReused": false
+  },
+  {
+   "taskId": "T1",
+   "runIndex": 2,
+   "spec": {
+    "id": "T1",
+    "expectedTier": "FAST",
+    "description": "In README.md, change the word \"small\" to \"compact\" in the first paragraph. Change nothing else in any file."
+   },
+   "finalState": "COMPLETED",
+   "latency": {
+    "totalMs": 50679.831835,
+    "buckets": [
+     {
+      "bucket": "SETUP",
+      "ms": 72.601677,
+      "pct": 0.14325556019280347,
+      "detail": [
+       {
+        "name": "setup.clone",
+        "ms": 46.650554,
+        "count": 1
+       },
+       {
+        "name": "setup.worktree-deps",
+        "ms": 22.290148,
+        "count": 1
+       },
+       {
+        "name": "setup.config",
+        "ms": 3.284531,
+        "count": 1
+       },
+       {
+        "name": "setup.link-toolchain",
+        "ms": 0.223682,
+        "count": 1
+       },
+       {
+        "name": "worktree.prepare",
+        "ms": 0.152762,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PROVIDER",
+      "ms": 26773.256212,
+      "pct": 52.828226224519796,
+      "detail": [
+       {
+        "name": "provider.generation.implementer",
+        "ms": 14370.945053,
+        "count": 1
+       },
+       {
+        "name": "provider.generation.planner",
+        "ms": 12015.469103,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.planner",
+        "ms": 192.796337,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.implementer",
+        "ms": 192.401652,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.planner",
+        "ms": 1.00931,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.implementer",
+        "ms": 0.634757,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "DECISION",
+      "ms": 62.918413,
+      "pct": 0.12414881960312252,
+      "detail": [
+       {
+        "name": "decision.changed-files",
+        "ms": 38.726846,
+        "count": 1
+       },
+       {
+        "name": "decision.diff",
+        "ms": 23.162706,
+        "count": 1
+       },
+       {
+        "name": "decision.parse-diff",
+        "ms": 0.799358,
+        "count": 1
+       },
+       {
+        "name": "decision.integrity",
+        "ms": 0.093011,
+        "count": 1
+       },
+       {
+        "name": "decision.resolve-tier",
+        "ms": 0.064151,
+        "count": 1
+       },
+       {
+        "name": "decision.design-contract",
+        "ms": 0.052592,
+        "count": 1
+       },
+       {
+        "name": "decision.evidence-coupling",
+        "ms": 0.01053,
+        "count": 1
+       },
+       {
+        "name": "decision.plan",
+        "ms": 0.009219,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "VALIDATION",
+      "ms": 2453.133387,
+      "pct": 4.8404528945296175,
+      "detail": [
+       {
+        "name": "check.unit-test.execution",
+        "ms": 840.276208,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.execution",
+        "ms": 688.061197,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.runner-startup",
+        "ms": 463.525201,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.runner-startup",
+        "ms": 459.475152,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test",
+        "ms": 0.982011,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck",
+        "ms": 0.813618,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "REVIEW",
+      "ms": 21093.289196,
+      "pct": 41.620677165374424,
+      "detail": [
+       {
+        "name": "provider.generation.reviewer",
+        "ms": 20847.660085,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.reviewer",
+        "ms": 233.148409,
+        "count": 1
+       },
+       {
+        "name": "review.head-sha",
+        "ms": 10.133549,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.reviewer",
+        "ms": 1.329543,
+        "count": 1
+       },
+       {
+        "name": "review.assemble-payload",
+        "ms": 1.01761,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PERSISTENCE",
+      "ms": 67.129582,
+      "pct": 0.13245817827209055,
+      "detail": [
+       {
+        "name": "event.append",
+        "ms": 61.363928,
+        "count": 24
+       },
+       {
+        "name": "state.read-log",
+        "ms": 2.762337,
+        "count": 12
+       },
+       {
+        "name": "lease.acquire",
+        "ms": 2.038349,
+        "count": 1
+       },
+       {
+        "name": "state.budget-recompute",
+        "ms": 0.651226,
+        "count": 3
+       },
+       {
+        "name": "lease.release",
+        "ms": 0.313742,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "IDLE",
+      "ms": 157.503368,
+      "pct": 0.3107811575081561,
+      "detail": [
+       {
+        "name": "unattributed gap",
+        "ms": 110.950928,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.reviewer",
+        "ms": 11.299989,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.queue+spawn",
+        "ms": 9.888255,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.planner",
+        "ms": 8.786106,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.queue+spawn",
+        "ms": 8.410331,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.implementer",
+        "ms": 8.167759,
+        "count": 1
+       }
+      ]
+     }
+    ],
+    "idleGapMs": 110.950928,
+    "idleExplicitMs": 46.55244,
+    "reconciliationDeltaMs": -7.275957614183426e-12,
+    "overheadMs": 1.018509,
+    "spanCount": 76
+   },
+   "tier": "FAST",
+   "confidence": "KNOWN",
+   "checksRun": [
+    "typecheck",
+    "unit-test"
+   ],
+   "checksAvailable": [
+    "install",
+    "build",
+    "unitTest",
+    "typecheck",
+    "lint"
+   ],
+   "providerInvocations": 3,
+   "filesChanged": 1,
+   "wallClockMs": 50679.831835,
+   "cloneReused": false
+  },
+  {
+   "taskId": "T1",
+   "runIndex": 3,
+   "spec": {
+    "id": "T1",
+    "expectedTier": "FAST",
+    "description": "In README.md, change the word \"small\" to \"compact\" in the first paragraph. Change nothing else in any file."
+   },
+   "finalState": "COMPLETED",
+   "latency": {
+    "totalMs": 43690.713436,
+    "buckets": [
+     {
+      "bucket": "SETUP",
+      "ms": 75.403125,
+      "pct": 0.17258387210923823,
+      "detail": [
+       {
+        "name": "setup.clone",
+        "ms": 47.110118,
+        "count": 1
+       },
+       {
+        "name": "setup.worktree-deps",
+        "ms": 26.028244,
+        "count": 1
+       },
+       {
+        "name": "setup.config",
+        "ms": 1.852019,
+        "count": 1
+       },
+       {
+        "name": "setup.link-toolchain",
+        "ms": 0.217992,
+        "count": 1
+       },
+       {
+        "name": "worktree.prepare",
+        "ms": 0.194752,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PROVIDER",
+      "ms": 25202.463393,
+      "pct": 57.68379916688162,
+      "detail": [
+       {
+        "name": "provider.generation.implementer",
+        "ms": 14773.997383,
+        "count": 1
+       },
+       {
+        "name": "provider.generation.planner",
+        "ms": 10014.104719,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.planner",
+        "ms": 220.587767,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.implementer",
+        "ms": 191.996358,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.planner",
+        "ms": 1.026709,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.implementer",
+        "ms": 0.750457,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "DECISION",
+      "ms": 72.097603,
+      "pct": 0.16501814076717153,
+      "detail": [
+       {
+        "name": "decision.changed-files",
+        "ms": 44.699026,
+        "count": 1
+       },
+       {
+        "name": "decision.diff",
+        "ms": 26.727311,
+        "count": 1
+       },
+       {
+        "name": "decision.parse-diff",
+        "ms": 0.483634,
+        "count": 1
+       },
+       {
+        "name": "decision.resolve-tier",
+        "ms": 0.060871,
+        "count": 1
+       },
+       {
+        "name": "decision.integrity",
+        "ms": 0.056911,
+        "count": 1
+       },
+       {
+        "name": "decision.design-contract",
+        "ms": 0.03613,
+        "count": 1
+       },
+       {
+        "name": "decision.plan",
+        "ms": 0.02259,
+        "count": 1
+       },
+       {
+        "name": "decision.evidence-coupling",
+        "ms": 0.01113,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "VALIDATION",
+      "ms": 2642.961526,
+      "pct": 6.049252388317077,
+      "detail": [
+       {
+        "name": "check.unit-test.execution",
+        "ms": 808.670721,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.execution",
+        "ms": 797.561743,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.runner-startup",
+        "ms": 529.572135,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.runner-startup",
+        "ms": 505.056737,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test",
+        "ms": 1.07635,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck",
+        "ms": 1.02384,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "REVIEW",
+      "ms": 15466.63872,
+      "pct": 35.40028876538303,
+      "detail": [
+       {
+        "name": "provider.generation.reviewer",
+        "ms": 15258.834908,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.reviewer",
+        "ms": 194.006548,
+        "count": 1
+       },
+       {
+        "name": "review.head-sha",
+        "ms": 11.529102,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.reviewer",
+        "ms": 1.664296,
+        "count": 1
+       },
+       {
+        "name": "review.assemble-payload",
+        "ms": 0.603866,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PERSISTENCE",
+      "ms": 72.147385,
+      "pct": 0.16513208260076717,
+      "detail": [
+       {
+        "name": "event.append",
+        "ms": 62.454449,
+        "count": 24
+       },
+       {
+        "name": "lease.acquire",
+        "ms": 3.832267,
+        "count": 1
+       },
+       {
+        "name": "state.read-log",
+        "ms": 3.682365,
+        "count": 12
+       },
+       {
+        "name": "state.budget-recompute",
+        "ms": 1.94361,
+        "count": 3
+       },
+       {
+        "name": "lease.release",
+        "ms": 0.234694,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "IDLE",
+      "ms": 159.001684,
+      "pct": 0.36392558394111,
+      "detail": [
+       {
+        "name": "unattributed gap",
+        "ms": 112.693813,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.queue+spawn",
+        "ms": 10.258669,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.planner",
+        "ms": 9.792515,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.queue+spawn",
+        "ms": 9.197679,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.reviewer",
+        "ms": 8.936638,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.implementer",
+        "ms": 8.12237,
+        "count": 1
+       }
+      ]
+     }
+    ],
+    "idleGapMs": 112.693813,
+    "idleExplicitMs": 46.307871,
+    "reconciliationDeltaMs": 0,
+    "overheadMs": 1.031048,
+    "spanCount": 76
+   },
+   "tier": "FAST",
+   "confidence": "KNOWN",
+   "checksRun": [
+    "typecheck",
+    "unit-test"
+   ],
+   "checksAvailable": [
+    "install",
+    "build",
+    "unitTest",
+    "typecheck",
+    "lint"
+   ],
+   "providerInvocations": 3,
+   "filesChanged": 1,
+   "wallClockMs": 43690.713436,
+   "cloneReused": false
+  },
+  {
+   "taskId": "T2",
+   "runIndex": 1,
+   "spec": {
+    "id": "T2",
+    "expectedTier": "FAST",
+    "description": "In src/components/styles.css, change the padding of .ledger-row from \"4px 8px\" to \"6px 10px\". Change nothing else in any file."
+   },
+   "finalState": "COMPLETED",
+   "latency": {
+    "totalMs": 43856.311433,
+    "buckets": [
+     {
+      "bucket": "SETUP",
+      "ms": 73.0074,
+      "pct": 0.16646954022007662,
+      "detail": [
+       {
+        "name": "setup.clone",
+        "ms": 48.872747,
+        "count": 1
+       },
+       {
+        "name": "setup.worktree-deps",
+        "ms": 22.180665,
+        "count": 1
+       },
+       {
+        "name": "setup.config",
+        "ms": 1.525134,
+        "count": 1
+       },
+       {
+        "name": "worktree.prepare",
+        "ms": 0.266332,
+        "count": 1
+       },
+       {
+        "name": "setup.link-toolchain",
+        "ms": 0.162522,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PROVIDER",
+      "ms": 27329.914424,
+      "pct": 62.31694716449729,
+      "detail": [
+       {
+        "name": "provider.generation.implementer",
+        "ms": 17179.686311,
+        "count": 1
+       },
+       {
+        "name": "provider.generation.planner",
+        "ms": 9746.13014,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.planner",
+        "ms": 212.828701,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.implementer",
+        "ms": 189.201652,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.implementer",
+        "ms": 1.0669,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.planner",
+        "ms": 1.00072,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "DECISION",
+      "ms": 79.798811,
+      "pct": 0.18195513574348343,
+      "detail": [
+       {
+        "name": "decision.changed-files",
+        "ms": 45.825334,
+        "count": 1
+       },
+       {
+        "name": "decision.diff",
+        "ms": 31.865156,
+        "count": 1
+       },
+       {
+        "name": "decision.parse-diff",
+        "ms": 1.250372,
+        "count": 1
+       },
+       {
+        "name": "decision.resolve-tier",
+        "ms": 0.692248,
+        "count": 1
+       },
+       {
+        "name": "decision.design-contract",
+        "ms": 0.073171,
+        "count": 1
+       },
+       {
+        "name": "decision.integrity",
+        "ms": 0.06271,
+        "count": 1
+       },
+       {
+        "name": "decision.plan",
+        "ms": 0.017511,
+        "count": 1
+       },
+       {
+        "name": "decision.evidence-coupling",
+        "ms": 0.012309,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "VALIDATION",
+      "ms": 2465.546274,
+      "pct": 5.621873325499922,
+      "detail": [
+       {
+        "name": "check.unit-test.execution",
+        "ms": 792.193909,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.execution",
+        "ms": 723.141575,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.runner-startup",
+        "ms": 490.634144,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.runner-startup",
+        "ms": 456.747529,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck",
+        "ms": 2.127212,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test",
+        "ms": 0.701905,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "REVIEW",
+      "ms": 13681.750815,
+      "pct": 31.196765911109125,
+      "detail": [
+       {
+        "name": "provider.generation.reviewer",
+        "ms": 13474.379036,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.reviewer",
+        "ms": 195.37424,
+        "count": 1
+       },
+       {
+        "name": "review.head-sha",
+        "ms": 10.250402,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.reviewer",
+        "ms": 1.177732,
+        "count": 1
+       },
+       {
+        "name": "review.assemble-payload",
+        "ms": 0.569405,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PERSISTENCE",
+      "ms": 71.290694,
+      "pct": 0.16255515265781517,
+      "detail": [
+       {
+        "name": "event.append",
+        "ms": 61.087495,
+        "count": 24
+       },
+       {
+        "name": "state.read-log",
+        "ms": 6.120199,
+        "count": 12
+       },
+       {
+        "name": "lease.acquire",
+        "ms": 3.12441,
+        "count": 1
+       },
+       {
+        "name": "state.budget-recompute",
+        "ms": 0.741778,
+        "count": 3
+       },
+       {
+        "name": "lease.release",
+        "ms": 0.216812,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "IDLE",
+      "ms": 155.003015,
+      "pct": 0.35343377027226885,
+      "detail": [
+       {
+        "name": "unattributed gap",
+        "ms": 107.911259,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.queue+spawn",
+        "ms": 11.243242,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.reviewer",
+        "ms": 10.05199,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.planner",
+        "ms": 9.416282,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.queue+spawn",
+        "ms": 8.194832,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.implementer",
+        "ms": 8.18541,
+        "count": 1
+       }
+      ]
+     }
+    ],
+    "idleGapMs": 107.911259,
+    "idleExplicitMs": 47.091756,
+    "reconciliationDeltaMs": 0,
+    "overheadMs": 1.01713,
+    "spanCount": 76
+   },
+   "tier": "FAST",
+   "confidence": "KNOWN",
+   "checksRun": [
+    "typecheck",
+    "unit-test"
+   ],
+   "checksAvailable": [
+    "install",
+    "build",
+    "unitTest",
+    "typecheck",
+    "lint"
+   ],
+   "providerInvocations": 3,
+   "filesChanged": 1,
+   "wallClockMs": 43856.311433,
+   "cloneReused": false
+  },
+  {
+   "taskId": "T3",
+   "runIndex": 1,
+   "spec": {
+    "id": "T3",
+    "expectedTier": "NORMAL",
+    "description": "In src/app/money.ts, add and export a function sumCents(values: number[]): number that returns the sum of the array. Do not change any existing function."
+   },
+   "finalState": "COMPLETED",
+   "latency": {
+    "totalMs": 59888.032137,
+    "buckets": [
+     {
+      "bucket": "SETUP",
+      "ms": 75.663971,
+      "pct": 0.12634238978985138,
+      "detail": [
+       {
+        "name": "setup.clone",
+        "ms": 48.810534,
+        "count": 1
+       },
+       {
+        "name": "setup.worktree-deps",
+        "ms": 24.762556,
+        "count": 1
+       },
+       {
+        "name": "setup.config",
+        "ms": 1.751957,
+        "count": 1
+       },
+       {
+        "name": "setup.link-toolchain",
+        "ms": 0.178922,
+        "count": 1
+       },
+       {
+        "name": "worktree.prepare",
+        "ms": 0.160002,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PROVIDER",
+      "ms": 29893.979508,
+      "pct": 49.9164498169091,
+      "detail": [
+       {
+        "name": "provider.generation.planner",
+        "ms": 15996.166349,
+        "count": 1
+       },
+       {
+        "name": "provider.generation.implementer",
+        "ms": 13521.12233,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.planner",
+        "ms": 195.542832,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.implementer",
+        "ms": 179.071596,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.implementer",
+        "ms": 1.107121,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.planner",
+        "ms": 0.96928,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "DECISION",
+      "ms": 69.721191,
+      "pct": 0.11641923855588651,
+      "detail": [
+       {
+        "name": "decision.changed-files",
+        "ms": 42.569182,
+        "count": 1
+       },
+       {
+        "name": "decision.diff",
+        "ms": 26.112659,
+        "count": 1
+       },
+       {
+        "name": "decision.resolve-tier",
+        "ms": 0.761938,
+        "count": 1
+       },
+       {
+        "name": "decision.parse-diff",
+        "ms": 0.147661,
+        "count": 1
+       },
+       {
+        "name": "decision.integrity",
+        "ms": 0.065562,
+        "count": 1
+       },
+       {
+        "name": "decision.design-contract",
+        "ms": 0.034309,
+        "count": 1
+       },
+       {
+        "name": "decision.evidence-coupling",
+        "ms": 0.01631,
+        "count": 1
+       },
+       {
+        "name": "decision.plan",
+        "ms": 0.01357,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "VALIDATION",
+      "ms": 4589.411344,
+      "pct": 7.663319665440421,
+      "detail": [
+       {
+        "name": "check.unit-test.execution",
+        "ms": 909.558504,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.execution",
+        "ms": 866.476667,
+        "count": 1
+       },
+       {
+        "name": "check.build.execution",
+        "ms": 731.727049,
+        "count": 1
+       },
+       {
+        "name": "check.build.runner-startup",
+        "ms": 516.059389,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.runner-startup",
+        "ms": 507.581105,
+        "count": 1
+       },
+       {
+        "name": "check.lint.runner-startup",
+        "ms": 495.439936,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.runner-startup",
+        "ms": 482.371746,
+        "count": 1
+       },
+       {
+        "name": "check.lint.execution",
+        "ms": 75.395018,
+        "count": 1
+       },
+       {
+        "name": "check.lint",
+        "ms": 1.368713,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck",
+        "ms": 1.333684,
+        "count": 1
+       },
+       {
+        "name": "check.build",
+        "ms": 1.221063,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test",
+        "ms": 0.87847,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "REVIEW",
+      "ms": 24955.728952,
+      "pct": 41.67064447018599,
+      "detail": [
+       {
+        "name": "provider.generation.reviewer",
+        "ms": 24740.580728,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.reviewer",
+        "ms": 201.346667,
+        "count": 1
+       },
+       {
+        "name": "review.head-sha",
+        "ms": 10.348222,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.reviewer",
+        "ms": 2.240313,
+        "count": 1
+       },
+       {
+        "name": "review.assemble-payload",
+        "ms": 1.213022,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PERSISTENCE",
+      "ms": 120.6525,
+      "pct": 0.20146345721294545,
+      "detail": [
+       {
+        "name": "event.append",
+        "ms": 106.941387,
+        "count": 26
+       },
+       {
+        "name": "state.read-log",
+        "ms": 9.28725,
+        "count": 14
+       },
+       {
+        "name": "lease.acquire",
+        "ms": 2.881518,
+        "count": 1
+       },
+       {
+        "name": "state.budget-recompute",
+        "ms": 1.258992,
+        "count": 3
+       },
+       {
+        "name": "lease.release",
+        "ms": 0.283353,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "IDLE",
+      "ms": 182.874671,
+      "pct": 0.30536096190580364,
+      "detail": [
+       {
+        "name": "unattributed gap",
+        "ms": 118.572492,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.reviewer",
+        "ms": 10.660796,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.implementer",
+        "ms": 10.252142,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.queue+spawn",
+        "ms": 10.213251,
+        "count": 1
+       },
+       {
+        "name": "check.lint.queue+spawn",
+        "ms": 9.747837,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.queue+spawn",
+        "ms": 8.190512,
+        "count": 1
+       },
+       {
+        "name": "check.build.queue+spawn",
+        "ms": 7.847248,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.planner",
+        "ms": 7.390393,
+        "count": 1
+       }
+      ]
+     }
+    ],
+    "idleGapMs": 118.572492,
+    "idleExplicitMs": 64.302179,
+    "reconciliationDeltaMs": 0,
+    "overheadMs": 1.250942,
+    "spanCount": 88
+   },
+   "tier": "NORMAL",
+   "confidence": "KNOWN",
+   "checksRun": [
+    "typecheck",
+    "unit-test",
+    "lint",
+    "build"
+   ],
+   "checksAvailable": [
+    "install",
+    "build",
+    "unitTest",
+    "typecheck",
+    "lint"
+   ],
+   "providerInvocations": 3,
+   "filesChanged": 1,
+   "wallClockMs": 59888.032137,
+   "cloneReused": false
+  },
+  {
+   "taskId": "T4",
+   "runIndex": 1,
+   "spec": {
+    "id": "T4",
+    "expectedTier": "DEEP",
+    "description": "In src/lib/session.ts, add and export a function willExpireWithin(s: Session, nowMs: number, withinSeconds: number): boolean that reports whether the session expires within the given window. Do not change any existing function."
+   },
+   "finalState": "COMPLETED",
+   "latency": {
+    "totalMs": 76161.344065,
+    "buckets": [
+     {
+      "bucket": "SETUP",
+      "ms": 139.615784,
+      "pct": 0.1833158089763289,
+      "detail": [
+       {
+        "name": "setup.clone",
+        "ms": 108.793269,
+        "count": 1
+       },
+       {
+        "name": "setup.worktree-deps",
+        "ms": 28.030858,
+        "count": 1
+       },
+       {
+        "name": "setup.config",
+        "ms": 2.461605,
+        "count": 1
+       },
+       {
+        "name": "setup.link-toolchain",
+        "ms": 0.189512,
+        "count": 1
+       },
+       {
+        "name": "worktree.prepare",
+        "ms": 0.14054,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PROVIDER",
+      "ms": 44180.147015,
+      "pct": 58.00862308482161,
+      "detail": [
+       {
+        "name": "provider.generation.implementer",
+        "ms": 22354.529345,
+        "count": 1
+       },
+       {
+        "name": "provider.generation.planner",
+        "ms": 21313.456824,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.planner",
+        "ms": 306.976452,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.implementer",
+        "ms": 203.085922,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.planner",
+        "ms": 1.480315,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.implementer",
+        "ms": 0.618157,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "DECISION",
+      "ms": 66.180928,
+      "pct": 0.08689569336318145,
+      "detail": [
+       {
+        "name": "decision.changed-files",
+        "ms": 40.335119,
+        "count": 1
+       },
+       {
+        "name": "decision.diff",
+        "ms": 25.541163,
+        "count": 1
+       },
+       {
+        "name": "decision.parse-diff",
+        "ms": 0.123811,
+        "count": 1
+       },
+       {
+        "name": "decision.resolve-tier",
+        "ms": 0.085691,
+        "count": 1
+       },
+       {
+        "name": "decision.integrity",
+        "ms": 0.038661,
+        "count": 1
+       },
+       {
+        "name": "decision.design-contract",
+        "ms": 0.029662,
+        "count": 1
+       },
+       {
+        "name": "decision.plan",
+        "ms": 0.015881,
+        "count": 1
+       },
+       {
+        "name": "decision.evidence-coupling",
+        "ms": 0.01094,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "VALIDATION",
+      "ms": 4819.340654,
+      "pct": 6.327804102153091,
+      "detail": [
+       {
+        "name": "check.typecheck.execution",
+        "ms": 894.485257,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.execution",
+        "ms": 881.79004,
+        "count": 1
+       },
+       {
+        "name": "check.build.execution",
+        "ms": 849.604422,
+        "count": 1
+       },
+       {
+        "name": "check.build.runner-startup",
+        "ms": 575.875061,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.runner-startup",
+        "ms": 520.06842,
+        "count": 1
+       },
+       {
+        "name": "check.lint.runner-startup",
+        "ms": 504.283152,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.runner-startup",
+        "ms": 501.566966,
+        "count": 1
+       },
+       {
+        "name": "check.lint.execution",
+        "ms": 86.188564,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck",
+        "ms": 2.585185,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test",
+        "ms": 1.321472,
+        "count": 1
+       },
+       {
+        "name": "check.lint",
+        "ms": 0.925889,
+        "count": 1
+       },
+       {
+        "name": "check.build",
+        "ms": 0.646226,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "REVIEW",
+      "ms": 26638.555539,
+      "pct": 34.97647772111964,
+      "detail": [
+       {
+        "name": "provider.generation.reviewer",
+        "ms": 26349.74307,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.reviewer",
+        "ms": 274.384786,
+        "count": 1
+       },
+       {
+        "name": "review.head-sha",
+        "ms": 12.412764,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.reviewer",
+        "ms": 1.229832,
+        "count": 1
+       },
+       {
+        "name": "review.assemble-payload",
+        "ms": 0.785087,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PERSISTENCE",
+      "ms": 86.771623,
+      "pct": 0.11393131786900275,
+      "detail": [
+       {
+        "name": "event.append",
+        "ms": 75.759835,
+        "count": 26
+       },
+       {
+        "name": "lease.acquire",
+        "ms": 6.546186,
+        "count": 1
+       },
+       {
+        "name": "state.read-log",
+        "ms": 3.646835,
+        "count": 14
+       },
+       {
+        "name": "state.budget-recompute",
+        "ms": 0.502054,
+        "count": 3
+       },
+       {
+        "name": "lease.release",
+        "ms": 0.316713,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "IDLE",
+      "ms": 230.732522,
+      "pct": 0.30295227169715,
+      "detail": [
+       {
+        "name": "unattributed gap",
+        "ms": 147.148214,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.reviewer",
+        "ms": 14.19583,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.planner",
+        "ms": 13.141891,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.queue+spawn",
+        "ms": 12.964479,
+        "count": 1
+       },
+       {
+        "name": "check.lint.queue+spawn",
+        "ms": 12.870477,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.queue+spawn",
+        "ms": 10.853377,
+        "count": 1
+       },
+       {
+        "name": "check.build.queue+spawn",
+        "ms": 10.405033,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.implementer",
+        "ms": 9.153221,
+        "count": 1
+       }
+      ]
+     }
+    ],
+    "idleGapMs": 147.148214,
+    "idleExplicitMs": 83.584308,
+    "reconciliationDeltaMs": 0,
+    "overheadMs": 1.154823,
+    "spanCount": 88
+   },
+   "tier": "DEEP",
+   "confidence": "KNOWN",
+   "checksRun": [
+    "typecheck",
+    "unit-test",
+    "lint",
+    "build"
+   ],
+   "checksAvailable": [
+    "install",
+    "build",
+    "unitTest",
+    "typecheck",
+    "lint"
+   ],
+   "providerInvocations": 3,
+   "filesChanged": 1,
+   "wallClockMs": 76161.344065,
+   "cloneReused": false
+  },
+  {
+   "taskId": "T5",
+   "runIndex": 1,
+   "spec": {
+    "id": "T5",
+    "expectedTier": "FAST",
+    "reuseCloneOf": "T1",
+    "description": "In README.md, change the word \"sample\" to \"example\" in the first paragraph. Change nothing else in any file."
+   },
+   "finalState": "COMPLETED",
+   "latency": {
+    "totalMs": 44701.551292,
+    "buckets": [
+     {
+      "bucket": "SETUP",
+      "ms": 27.862526,
+      "pct": 0.06233010979416817,
+      "detail": [
+       {
+        "name": "setup.worktree-deps",
+        "ms": 25.481732,
+        "count": 1
+       },
+       {
+        "name": "setup.config",
+        "ms": 2.239362,
+        "count": 1
+       },
+       {
+        "name": "worktree.prepare",
+        "ms": 0.141432,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PROVIDER",
+      "ms": 21439.490586,
+      "pct": 47.961401710541786,
+      "detail": [
+       {
+        "name": "provider.generation.implementer",
+        "ms": 12679.314784,
+        "count": 1
+       },
+       {
+        "name": "provider.generation.planner",
+        "ms": 8325.01651,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.implementer",
+        "ms": 250.558188,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.planner",
+        "ms": 182.897999,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.planner",
+        "ms": 0.928438,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.implementer",
+        "ms": 0.774667,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "DECISION",
+      "ms": 66.140894,
+      "pct": 0.14796107089875624,
+      "detail": [
+       {
+        "name": "decision.changed-files",
+        "ms": 41.743612,
+        "count": 1
+       },
+       {
+        "name": "decision.diff",
+        "ms": 24.087528,
+        "count": 1
+       },
+       {
+        "name": "decision.parse-diff",
+        "ms": 0.123602,
+        "count": 1
+       },
+       {
+        "name": "decision.resolve-tier",
+        "ms": 0.08633,
+        "count": 1
+       },
+       {
+        "name": "decision.integrity",
+        "ms": 0.055392,
+        "count": 1
+       },
+       {
+        "name": "decision.design-contract",
+        "ms": 0.02588,
+        "count": 1
+       },
+       {
+        "name": "decision.plan",
+        "ms": 0.01096,
+        "count": 1
+       },
+       {
+        "name": "decision.evidence-coupling",
+        "ms": 0.00759,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "VALIDATION",
+      "ms": 2553.843745,
+      "pct": 5.713098698337675,
+      "detail": [
+       {
+        "name": "check.unit-test.execution",
+        "ms": 847.998735,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.execution",
+        "ms": 722.464724,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.runner-startup",
+        "ms": 519.606468,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.runner-startup",
+        "ms": 462.21257,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck",
+        "ms": 0.93028,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test",
+        "ms": 0.630968,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "REVIEW",
+      "ms": 20349.021523,
+      "pct": 45.52195826510781,
+      "detail": [
+       {
+        "name": "provider.generation.reviewer",
+        "ms": 20141.672855,
+        "count": 1
+       },
+       {
+        "name": "provider.startup.reviewer",
+        "ms": 194.479783,
+        "count": 1
+       },
+       {
+        "name": "review.head-sha",
+        "ms": 9.853496,
+        "count": 1
+       },
+       {
+        "name": "review.assemble-payload",
+        "ms": 2.077141,
+        "count": 1
+       },
+       {
+        "name": "provider.invoke.reviewer",
+        "ms": 0.938248,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "PERSISTENCE",
+      "ms": 86.954583,
+      "pct": 0.19452251764596323,
+      "detail": [
+       {
+        "name": "event.append",
+        "ms": 78.286521,
+        "count": 24
+       },
+       {
+        "name": "lease.acquire",
+        "ms": 4.870919,
+        "count": 1
+       },
+       {
+        "name": "state.read-log",
+        "ms": 2.881275,
+        "count": 12
+       },
+       {
+        "name": "state.budget-recompute",
+        "ms": 0.700597,
+        "count": 3
+       },
+       {
+        "name": "lease.release",
+        "ms": 0.215271,
+        "count": 1
+       }
+      ]
+     },
+     {
+      "bucket": "IDLE",
+      "ms": 178.237435,
+      "pct": 0.3987276276738482,
+      "detail": [
+       {
+        "name": "unattributed gap",
+        "ms": 121.270389,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.implementer",
+        "ms": 12.823988,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.reviewer",
+        "ms": 12.396093,
+        "count": 1
+       },
+       {
+        "name": "provider.queue+spawn.planner",
+        "ms": 11.450954,
+        "count": 1
+       },
+       {
+        "name": "check.unit-test.queue+spawn",
+        "ms": 10.541294,
+        "count": 1
+       },
+       {
+        "name": "check.typecheck.queue+spawn",
+        "ms": 9.754717,
+        "count": 1
+       }
+      ]
+     }
+    ],
+    "idleGapMs": 121.270389,
+    "idleExplicitMs": 56.967046,
+    "reconciliationDeltaMs": -7.275957614183426e-12,
+    "overheadMs": 1.028773,
+    "spanCount": 74
+   },
+   "tier": "FAST",
+   "confidence": "KNOWN",
+   "checksRun": [
+    "typecheck",
+    "unit-test"
+   ],
+   "checksAvailable": [
+    "install",
+    "build",
+    "unitTest",
+    "typecheck",
+    "lint"
+   ],
+   "providerInvocations": 3,
+   "filesChanged": 1,
+   "wallClockMs": 44701.551292,
+   "cloneReused": true
+  }
+ ]
+}

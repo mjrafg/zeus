@@ -40,6 +40,12 @@ export interface AgentResponse {
   infrastructureFailure: string | null;
   /** The provider's own error fields, so a failure is diagnosable from the log. */
   diagnostics?: Record<string, unknown>;
+  /**
+   * Monotonic instants around the provider's child process, passed straight
+   * through from the supervisor. Without this the caller can time the wrapper
+   * but not the process, so model startup cost stays invisible.
+   */
+  timing?: { requestedNs: string; spawnedNs: string; firstOutputNs: string | null; exitedNs: string };
 }
 
 export interface Provider {
@@ -112,6 +118,7 @@ async function runCli(id: string, bin: string, argv: (req: AgentRequest) => stri
     raw: res.stdout, exitCode: res.exitCode, durationMs: res.durationMs,
     outcome: res.outcome, infrastructureFailure: infra,
     diagnostics: providerDiagnostics(structured),
+    timing: res.timing,
   };
 }
 

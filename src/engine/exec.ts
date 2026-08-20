@@ -69,6 +69,22 @@ export interface ExecutionResult {
   /** True only when the outcome says something about the code under test. */
   productSignal: boolean;
   budgets: { memoryMaxMb: number; cpuQuotaPercent: number; maxProcesses: number; testWorkers: number };
+  /**
+   * Monotonic instants around the child process, for latency measurement.
+   *
+   * Passive: these are read from the clock at moments the supervisor already
+   * passes through, and nothing branches on them. `firstOutputNs` is the
+   * closest observable proxy for "the program finished starting up and began
+   * doing work" — for a test runner that is compilation and collection, for a
+   * model CLI it is connection and first token. Absent when the process
+   * produced no output at all.
+   */
+  timing?: {
+    requestedNs: string;
+    spawnedNs: string;
+    firstOutputNs: string | null;
+    exitedNs: string;
+  };
 }
 
 interface LiveJob { pgid: number; unit: string | null; projectId: string; taskId?: string; cancelled: boolean }
@@ -343,11 +359,15 @@ export class ProcessSupervisor {
     const timeoutMs = 1000 * (req.timeoutSeconds
       ?? (req.cls === 'light' ? budgets.lightTimeoutSeconds : budgets.heavyTimeoutSeconds));
 
+    const requestedNs = process.hrtime.bigint();
     return await new Promise<ExecutionResult>((resolve) => {
       let settled = false;
+      let spawnedNs = requestedNs;
+      let firstOutputNs: bigint | null = null;
       let child;
       try {
         child = spawn(wrapped.command, wrapped.args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        spawnedNs = process.hrtime.bigint();
       } catch (e: any) {
         this.release(req.cls);
         return resolve({ ...base, outcome: 'INFRASTRUCTURE_FAILURE', exitCode: null, signal: null,
@@ -370,6 +390,7 @@ export class ProcessSupervisor {
 
       let out = '';
       const cap = (d: Buffer) => {
+        if (firstOutputNs === null) firstOutputNs = process.hrtime.bigint();
         const s = d.toString('utf8');
         if (out.length < 8 * 1024 * 1024) out += s;
         req.onOutput?.(s);
@@ -394,6 +415,12 @@ export class ProcessSupervisor {
           backend: wrapped.backend, isolationFallback: wrapped.fallback, enforced: wrapped.enforced,
           violations: [],
           productSignal: outcome === 'COMPLETED' || outcome === 'FAILED',
+          timing: {
+            requestedNs: requestedNs.toString(),
+            spawnedNs: spawnedNs.toString(),
+            firstOutputNs: firstOutputNs === null ? null : (firstOutputNs as bigint).toString(),
+            exitedNs: process.hrtime.bigint().toString(),
+          },
         });
       };
 

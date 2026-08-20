@@ -18,6 +18,8 @@ import {
   Achievement, MissionCheckpoint, MissionRecord, PlanGraph, SpawnedTask,
   TerminationReason, makeMissionId, requireScope,
 } from './types';
+import { AcceptanceMode, CriterionOutcome, Evaluator, Oracle } from './oracle';
+import { achievementFrom } from './evaluate';
 
 /** A mission's log, read once. */
 function eventsOf(store: EventStore, missionId: string): StoredEvent[] {
@@ -57,6 +59,15 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
     achievement: 'UNEVALUATED',
     terminationReason: null,
     events: evs.length,
+    oracle: null,
+    oracleVersion: null,
+    acceptanceMode: null,
+    oracleAccepted: false,
+    acceptedBy: null,
+    criterionOutcomes: {},
+    evaluations: 0,
+    evaluatorRevisions: 0,
+    derivedAchievement: 'UNEVALUATED',
   };
 
   const spawnedById = new Map<string, SpawnedTask>();
@@ -109,6 +120,58 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
         rec.ratchetSha = sha;
         break;
       }
+      case 'ORACLE_COMPILED': {
+        const oracle = p.oracle as Oracle | undefined;
+        if (oracle && Array.isArray((oracle as Oracle).criteria)) {
+          rec.oracle = oracle;
+          rec.oracleVersion = (oracle as Oracle).version ?? rec.oracleVersion;
+          // A newly compiled oracle is not an accepted one.
+          rec.oracleAccepted = false;
+          rec.acceptedBy = null;
+        }
+        break;
+      }
+      case 'ORACLE_ACCEPTED': {
+        const mode = str(p.acceptanceMode);
+        if (mode) rec.acceptanceMode = mode;
+        rec.oracleAccepted = true;
+        const by = str(p.acceptedBy);
+        rec.acceptedBy = (['auto', 'user-confirmed', 'consent-flag'].includes(by)
+          ? by : 'auto') as MissionRecord['acceptedBy'];
+        if (rec.oracle) {
+          rec.oracle = { ...(rec.oracle as Oracle),
+            acceptanceMode: (rec.acceptanceMode ?? (rec.oracle as Oracle).acceptanceMode) as AcceptanceMode,
+            acceptedAt: e.ts };
+        }
+        break;
+      }
+      case 'ORACLE_EVALUATED': {
+        rec.evaluations += 1;
+        const results = Array.isArray(p.results) ? p.results : [];
+        for (const r of results as Array<Record<string, unknown>>) {
+          const id = str(r.criterionId);
+          const outcome = str(r.outcome);
+          if (id && ['PROVEN', 'FAILED', 'UNEVALUATED'].includes(outcome)) {
+            rec.criterionOutcomes[id] = outcome as CriterionOutcome;
+          }
+        }
+        break;
+      }
+      case 'EVALUATOR_REVISED': {
+        rec.evaluatorRevisions += 1;
+        const id = str(p.criterionId);
+        const next = p.newEvaluator as Evaluator | undefined;
+        if (id && rec.oracle) {
+          const o = rec.oracle as Oracle;
+          rec.oracle = { ...o, criteria: o.criteria.map(
+            (c) => (c.criterionId === id && next ? { ...c, evaluator: next } : c)) };
+        }
+        // Evidence produced by an evaluator that turned out to be wrong is not
+        // evidence. Every prior outcome for this criterion goes back to
+        // UNEVALUATED — not FAILED, because nothing was disproven either.
+        if (id) rec.criterionOutcomes[id] = 'UNEVALUATED';
+        break;
+      }
       case 'MISSION_ESCALATED':
         rec.escalations += 1;
         break;
@@ -131,6 +194,10 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
       default:
         break;
     }
+  }
+  if (rec.oracle) {
+    rec.derivedAchievement = achievementFrom(
+      new Map(Object.entries(rec.criterionOutcomes)), rec.oracle as Oracle);
   }
   return rec;
 }
@@ -218,6 +285,104 @@ export class MissionRegistry {
    */
   checkpoint(missionId: string, sha: string, invariants: string[]): void {
     this.append(missionId, 'MISSION_CHECKPOINT', { sha, invariants });
+  }
+
+  /* ---- stage 2: the Oracle ---------------------------------------------- */
+
+  /** Records a compiled contract. Compiling is not accepting. */
+  recordOracle(missionId: string, oracle: Oracle, structuredHash: string,
+    validation: unknown): void {
+    this.append(missionId, 'ORACLE_COMPILED', {
+      oracle, version: oracle.version, structuredHash,
+      compilerProviderId: oracle.compilerProviderId,
+      criterionCount: oracle.criteria.length, validation,
+    });
+  }
+
+  recordCritique(missionId: string, critique: {
+    valid: boolean; findings: unknown[]; modeOpinion: string | null;
+    promptHash: string; hashes: Record<string, string>; violations: unknown[];
+    criticProviderId: string; reconciliation: unknown;
+  }): void {
+    this.append(missionId, 'ORACLE_CRITIQUED', { ...critique });
+  }
+
+  /**
+   * Accepts the contract, recording HOW consent was given.
+   *
+   * The mode and every input the mode function used are on the record, so the
+   * decision can be re-derived later rather than taken on trust.
+   */
+  acceptOracle(missionId: string, spec: {
+    acceptanceMode: AcceptanceMode;
+    acceptedBy: 'auto' | 'user-confirmed' | 'consent-flag';
+    modeInputs: unknown; modeReasons: string[]; escalatedByCritic: boolean;
+  }): boolean {
+    const rec = this.mission(missionId);
+    if (!rec || !rec.oracle || rec.terminated) return false;
+    this.append(missionId, 'ORACLE_ACCEPTED', { ...spec });
+    return true;
+  }
+
+  recordEvaluation(missionId: string, run: {
+    oracleVersion: number; scope: string;
+    results: Array<{ criterionId: string; outcome: string; evidence: string[]; detail: string }>;
+    provenRequired: number; totalRequired: number;
+  }): void {
+    this.append(missionId, 'ORACLE_EVALUATED', { ...run, incremental: run.scope === 'incremental' });
+  }
+
+  /**
+   * Refuses a change to what success MEANS.
+   *
+   * After acceptance a criterion's statement is immutable. Changing it is not
+   * a repair, it is a different mission — or an exercise of authority Zeus
+   * does not have. The attempt is recorded either way: a refused attempt to
+   * move the goalposts is exactly the thing a later reader wants to see.
+   */
+  refuseSemanticsChange(missionId: string, criterionId: string, attempted: {
+    field: string; from: string; to: string; reason?: string;
+  }): { refused: true; code: 'ORACLE_SEMANTICS_IMMUTABLE' } {
+    this.append(missionId, 'ORACLE_SEMANTICS_REFUSED', {
+      code: 'ORACLE_SEMANTICS_IMMUTABLE', criterionId, ...attempted,
+    });
+    return { refused: true, code: 'ORACLE_SEMANTICS_IMMUTABLE' };
+  }
+
+  /**
+   * Revises HOW a criterion is proven, never WHAT it claims.
+   *
+   * A rubric is treated as semantics-adjacent: it is what "passing" means for
+   * an AI_JUDGED criterion, so loosening one is goalpost movement wearing an
+   * evaluator-repair costume. Revising a rubric therefore needs explicit
+   * consent, not merely a critique that approves of it.
+   */
+  reviseEvaluator(missionId: string, spec: {
+    criterionId: string; oldEvaluator: Evaluator; newEvaluator: Evaluator;
+    reason: string; criticVerdict: unknown; consent?: 'user-confirmed' | null;
+  }): { ok: boolean; code?: 'RUBRIC_REVISION_REQUIRES_CONSENT'; invalidated: string[] } {
+    const rec = this.mission(missionId);
+    if (!rec || !rec.oracle) return { ok: false, invalidated: [] };
+    const isRubric = spec.oldEvaluator?.kind === 'rubric' || spec.newEvaluator?.kind === 'rubric';
+    if (isRubric && spec.consent !== 'user-confirmed') {
+      this.append(missionId, 'ORACLE_SEMANTICS_REFUSED', {
+        code: 'RUBRIC_REVISION_REQUIRES_CONSENT', criterionId: spec.criterionId,
+        field: 'evaluator.rubric', reason: spec.reason,
+        detail: 'a rubric is what passing means for this criterion; revising it needs consent',
+      });
+      return { ok: false, code: 'RUBRIC_REVISION_REQUIRES_CONSENT', invalidated: [] };
+    }
+    // Everything this evaluator previously "proved" is withdrawn: evidence
+    // produced by a broken evaluator is not evidence.
+    const invalidated = rec.criterionOutcomes[spec.criterionId] === 'PROVEN'
+      ? [`outcome:${spec.criterionId}:PROVEN`] : [];
+    this.append(missionId, 'EVALUATOR_REVISED', {
+      criterionId: spec.criterionId, oldEvaluator: spec.oldEvaluator,
+      newEvaluator: spec.newEvaluator, reason: spec.reason,
+      criticVerdict: spec.criticVerdict, invalidatedEvidence: invalidated,
+      consent: spec.consent ?? null,
+    });
+    return { ok: true, invalidated };
   }
 
   escalate(missionId: string, payload: Record<string, unknown>): void {

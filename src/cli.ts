@@ -20,10 +20,16 @@ import { probe, summarize, Capability } from './doctor';
 import { describeDependencyState, cleanDependencyCache, depsCacheRoot } from './engine/dependencies';
 import { Engine, TERMINAL } from './engine/orchestrator';
 import { ProcessSupervisor } from './engine/exec';
+import { defaultPolicy } from './engine/policy';
 import { readOnlyGit } from './engine/gitro';
 import { MissionRegistry } from './mission/registry';
 import { ScopeMismatchError, localLabel as missionLabel } from './mission/types';
 import { reconstructRatchet, ratchetRef, readRatchet } from './mission/ratchet';
+import { compileOracle, critiqueOracle, proposeAcceptance } from './mission/compile';
+import { evaluateCriteria, acceptedCommands } from './mission/evaluate';
+import {
+  Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
+} from './mission/oracle';
 import { deriveBudgets } from './engine/budget';
 import { report as isolationReport } from './engine/isolation';
 import { claudeProvider, codexProvider, mockProvider, Provider } from './engine/providers';
@@ -82,6 +88,11 @@ ${C.b}Usage${C.x}
   zeus mission status <id> [--json]           reconstructed mission state
   zeus mission list                           missions in this project
   zeus mission cancel <id> [--reason "..."]   cancel a mission and its live tasks
+  zeus mission compile <id> [--mock]          compile the goal into criteria, critique, compute mode
+        [--review-oracle] [--json]
+  zeus mission confirm <id>                   human consent for an oracle that needs it
+  zeus mission evaluate <id> [--full]         prove the criteria; --criteria a,b for a subset
+        [--criteria a,b] [--mock] [--json]
   zeus version
   zeus help
 
@@ -673,6 +684,27 @@ async function cmdSelfAudit(argv: string[]): Promise<number> {
  * correct. Removal is therefore something a person asks for, and this is where
  * they ask.
  */
+/**
+ * The evidence a compiler is allowed to derive criteria from.
+ *
+ * Declared commands are the resolvable universe for an EXECUTABLE evaluator;
+ * failing checks and recorded findings are the observed facts. A criterion
+ * derived from nothing here is a target nobody has seen, which is what keeps
+ * a mission out of AUTO.
+ */
+function projectContextFor(root: string, cfg: ProjectConfig): ProjectContext {
+  const commands: Record<string, string> = {};
+  for (const [k, v] of Object.entries((cfg.commands ?? {}) as unknown as Record<string, unknown>)) {
+    if (typeof v === 'string' && v.trim()) commands[k] = v;
+  }
+  return { commands, failingChecks: [], findings: [] };
+}
+
+/** `C-0002` → `proj/M-0001/C-0002`, so an operator can type the short form. */
+function resolveCriterion(missionId: string): (raw: string) => string {
+  return (rawId: string) => (rawId.includes('/') ? rawId : `${missionId}/${rawId}`);
+}
+
 /** The adapter this project is configured to use, or the detected one. */
 function adapterFor(root: string, cfg: ProjectConfig | null) {
   const { adapterById, detectProject } = require('./adapters');
@@ -785,10 +817,186 @@ async function cmdMission(argv: string[]): Promise<number> {
         out(`  ${C.y}!${C.x} the ref does not match the log (${ratchet ?? 'absent'}); `
           + 'it can be rebuilt from the events');
       }
+      const o = rec.oracle as Oracle | null;
+      out(`  oracle          ${o ? `v${o.version} (${o.criteria.length} criteria)` : `${C.dim}not compiled${C.x}`}`);
+      if (o) {
+        out(`  acceptance      ${rec.acceptanceMode ?? '—'}`
+          + `  ${rec.oracleAccepted ? `${C.g}accepted${C.x} (${rec.acceptedBy})` : `${C.y}not accepted${C.x}`}`);
+        const required = o.criteria.filter((c) => c.required).length;
+        const proven = o.criteria.filter((c) => c.required
+          && rec.criterionOutcomes[c.criterionId] === 'PROVEN').length;
+        out(`  criteria proven ${proven}/${required} required${rec.evaluations ? '' : `  ${C.dim}(never evaluated)${C.x}`}`);
+        for (const c of o.criteria) {
+          const outcome = rec.criterionOutcomes[c.criterionId] ?? 'UNEVALUATED';
+          const colour = outcome === 'PROVEN' ? C.g : outcome === 'FAILED' ? C.r : C.y;
+          out(`    ${missionLabel(c.criterionId).padEnd(8)} ${colour}${outcome.padEnd(12)}${C.x} ${C.dim}${c.statement.slice(0, 54)}${C.x}`);
+        }
+        if (rec.evaluatorRevisions) out(`  evaluator revisions ${rec.evaluatorRevisions}`);
+        out(`  derived         ${rec.derivedAchievement}  ${C.dim}from the criteria${C.x}`);
+      }
       out(`  achievement     ${rec.achievement}`);
       out(`  termination     ${rec.terminationReason ?? `${C.dim}—${C.x}`}`);
       if (rec.escalations) out(`  escalations     ${rec.escalations}`);
       return 0;
+    }
+
+    case 'compile': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission compile <id> [--mock]'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      if (rec.terminated) { err(`${id} is terminated`); return 1; }
+
+      const mock = rest.includes('--mock');
+      const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
+      const context = projectContextFor(ctx.root, ctx.cfg);
+      const policy = defaultPolicy(ctx.root, ctx.root);
+
+      const compiled = await compileOracle({
+        missionId: id, projectId: eng.projectId, goal: rec.goal, context,
+        provider: eng.opts.providers.planner, supervisor: eng.opts.supervisor,
+        policy, baseSha: rec.baseSha,
+      });
+      if (!compiled.ok) {
+        // A provider that could not answer is infrastructure. The mission has
+        // not moved and the command can simply be run again.
+        err(`${C.r}✗${C.x} compiler unavailable: ${compiled.infrastructureFailure}`);
+        err(`  ${C.dim}the mission is unchanged; retry when the provider is back${C.x}`);
+        return 3;
+      }
+      if (!compiled.validation.valid) {
+        out(`${C.r}✗${C.x} the compiled criteria are not a contract:`);
+        for (const f of compiled.validation.findings) {
+          out(`  ${C.r}${f.code}${C.x} ${f.criterionId ?? ''} ${C.dim}${f.detail}${C.x}`);
+        }
+        return 1;
+      }
+
+      const critique = await critiqueOracle({
+        missionId: id, projectId: eng.projectId, goal: rec.goal, criteria: compiled.criteria,
+        context, provider: eng.opts.providers.reviewer, supervisor: eng.opts.supervisor,
+        policy, baseSha: rec.baseSha,
+      });
+      const proposal = proposeAcceptance(compiled.criteria, context,
+        critique.valid ? critique.modeOpinion : null);
+
+      const oracle: Oracle = {
+        missionId: id, version: (rec.oracleVersion ?? 0) + 1, criteria: compiled.criteria,
+        acceptanceMode: proposal.mode, compiledAt: new Date().toISOString(),
+        compilerProviderId: compiled.compilerProviderId, criticProviderId: critique.criticProviderId,
+      };
+      missions.recordOracle(id, oracle, compiled.structuredHash, compiled.validation);
+      missions.recordCritique(id, {
+        valid: critique.valid, findings: critique.findings, modeOpinion: critique.modeOpinion,
+        promptHash: critique.payload.promptHash, hashes: critique.payload.hashes,
+        violations: critique.payload.violations, criticProviderId: critique.criticProviderId,
+        reconciliation: critique.reconciliation,
+      });
+
+      // Consent, per mode. AUTO proceeds; OPTIONAL_CONFIRMATION proceeds
+      // unless the operator asked to look; REQUIRED_CONSENT never proceeds
+      // without a human saying so in a separate command.
+      const wantsReview = rest.includes('--review-oracle');
+      let accepted: 'auto' | 'consent-flag' | null = null;
+      if (proposal.mode === 'AUTO') accepted = 'auto';
+      else if (proposal.mode === 'OPTIONAL_CONFIRMATION' && !wantsReview) accepted = 'consent-flag';
+      if (accepted) {
+        missions.acceptOracle(id, {
+          acceptanceMode: proposal.mode, acceptedBy: accepted,
+          modeInputs: proposal.computed.inputs, modeReasons: proposal.computed.reasons,
+          escalatedByCritic: proposal.escalatedByCritic,
+        });
+      }
+
+      if (json) {
+        out(JSON.stringify({ oracle, validation: compiled.validation,
+          critique: { valid: critique.valid, findings: critique.findings,
+            modeOpinion: critique.modeOpinion, violations: critique.payload.violations },
+          mode: proposal, accepted }, null, 1));
+        return 0;
+      }
+      out(`${C.b}${id}${C.x} oracle v${oracle.version} ${C.dim}(${oracle.criteria.length} criteria)${C.x}`);
+      for (const c of oracle.criteria) {
+        const ev = c.evaluator as any;
+        out(`  ${missionLabel(c.criterionId).padEnd(8)} ${c.type.padEnd(14)} ${c.required ? 'required' : 'informs '} ${c.statement.slice(0, 58)}`);
+        out(`           ${C.dim}${ev.kind === 'rubric' ? `rubric: ${String(ev.rubric).slice(0, 60)}` : ev.command}${C.x}`);
+      }
+      out(`  ${C.b}critic${C.x}          ${critique.valid ? `${critique.findings.length} finding(s)` : `${C.r}payload refused — critique invalid${C.x}`}`);
+      for (const f of critique.findings) out(`    ${C.y}${f.code}${C.x} ${C.dim}${f.detail.slice(0, 70)}${C.x}`);
+      out(`  ${C.b}acceptance mode${C.x} ${proposal.mode}${proposal.escalatedByCritic ? ` ${C.y}(escalated by the critic)${C.x}` : ''}`);
+      for (const r of proposal.computed.reasons) out(`    ${C.dim}${r}${C.x}`);
+      if (accepted) out(`  ${C.g}✓${C.x} accepted (${accepted}) — run ${C.b}zeus mission evaluate ${missionLabel(id)}${C.x}`);
+      else if (proposal.mode === 'REQUIRED_CONSENT') {
+        out(`  ${C.y}!${C.x} this oracle needs a human: ${C.b}zeus mission confirm ${missionLabel(id)}${C.x}`);
+      } else out(`  ${C.y}!${C.x} review requested — confirm with ${C.b}zeus mission confirm ${missionLabel(id)}${C.x}`);
+      return 0;
+    }
+
+    case 'confirm': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission confirm <id>'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      if (!rec.oracle) { err(`${id} has no compiled oracle to confirm`); return 1; }
+      if (rec.oracleAccepted) { err(`${C.y}!${C.x} ${id} is already accepted`); return 1; }
+      const o = rec.oracle as Oracle;
+      missions.acceptOracle(id, {
+        acceptanceMode: o.acceptanceMode, acceptedBy: 'user-confirmed',
+        modeInputs: { confirmedFromCli: true }, modeReasons: ['a human confirmed this oracle'],
+        escalatedByCritic: false,
+      });
+      if (json) { out(JSON.stringify({ missionId: id, acceptedBy: 'user-confirmed', mode: o.acceptanceMode }, null, 1)); return 0; }
+      out(`${C.g}✓${C.x} ${id} oracle accepted by you (${o.acceptanceMode})`);
+      return 0;
+    }
+
+    case 'evaluate': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission evaluate <id> [--full | --criteria a,b]'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      if (!rec.oracle || !rec.oracleAccepted) {
+        err(`${C.r}✗${C.x} ${id} has no ACCEPTED oracle; nothing authorises an evaluation`);
+        return 1;
+      }
+      const mock = rest.includes('--mock');
+      const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
+      const idx = rest.indexOf('--criteria');
+      const subset = idx >= 0 ? (rest[idx + 1] ?? '').split(',').filter(Boolean).map(resolveCriterion(id)) : [];
+      const run = await evaluateCriteria({
+        oracle: rec.oracle as Oracle, projectId: eng.projectId,
+        // The ledger comes from what the LOG says was accepted, not from the
+        // object being evaluated.
+        ledger: acceptedCommands(rec.oracle as Oracle),
+        // M2 evaluates against the project itself: a mission has no worktree
+        // until the execution loop creates one, which is stage 3.
+        worktree: ctx.root, supervisor: eng.opts.supervisor,
+        policy: defaultPolicy(ctx.root, ctx.root),
+        judge: eng.opts.providers.reviewer,
+        scope: subset.length ? 'incremental' : 'full',
+        criterionIds: subset, baseSha: rec.baseSha,
+      });
+      missions.recordEvaluation(id, {
+        oracleVersion: run.oracleVersion, scope: run.scope,
+        results: run.results.map((r) => ({ criterionId: r.criterionId, outcome: r.outcome,
+          evidence: r.evidence, detail: r.detail })),
+        provenRequired: run.provenRequired, totalRequired: run.totalRequired,
+      });
+      if (json) { out(JSON.stringify(run, null, 1)); return 0; }
+      out(`${C.b}${id}${C.x} evaluation (${run.scope}) ${C.dim}oracle v${run.oracleVersion}${C.x}`);
+      for (const r of run.results) {
+        const colour = r.outcome === 'PROVEN' ? C.g : r.outcome === 'FAILED' ? C.r : C.y;
+        out(`  ${missionLabel(r.criterionId).padEnd(8)} ${colour}${r.outcome.padEnd(12)}${C.x} ${C.dim}${r.detail.slice(0, 70)}${C.x}`);
+        if (r.refusal) out(`           ${C.y}${r.refusal}${C.x}`);
+      }
+      out(`  ${C.b}required proven${C.x} ${run.provenRequired}/${run.totalRequired}`);
+      return run.results.some((r) => r.outcome === 'FAILED') ? 1 : 0;
     }
 
     case 'reconstruct-ratchet': {

@@ -238,7 +238,45 @@ export function mockProvider(scripts: Partial<Record<Role, unknown>> = {}): Prov
   };
 }
 
+/**
+ * A deterministic reply shaped like the prompt that asked for it.
+ *
+ * The fake provider has to answer mission prompts as well as task prompts, and
+ * it decides which from the PROMPT rather than from a flag: a caller that had
+ * to remember to say "this is an oracle prompt" would be a caller that can
+ * forget. Nothing here is model behaviour — it exists so the machinery around
+ * a model can be exercised without one.
+ */
 function defaultMockReply(req: AgentRequest): unknown {
+  const p = req.prompt ?? '';
+  if (/Compile this mission goal into a CONTRACT/.test(p)) {
+    // Derive one EXECUTABLE criterion per declared command, each tied to a
+    // command the project really has, so the compiled contract is resolvable.
+    const commands = (() => {
+      const m = /--- declared commands ---\n([\s\S]*?)\n--- /.exec(p);
+      try { return m ? JSON.parse(m[1]) as Record<string, string> : {}; } catch { return {}; }
+    })();
+    const failing = (() => {
+      const m = /--- currently failing checks ---\n([\s\S]*?)\n--- /.exec(p);
+      return m ? m[1].split('\n').map((x) => x.trim()).filter((x) => x && x !== '(none)') : [];
+    })();
+    const names = Object.keys(commands).filter((k) => commands[k]);
+    return { criteria: names.slice(0, 3).map((name, i) => ({
+      criterionId: `${req.taskId}/C-${String(i + 1).padStart(4, '0')}`,
+      type: 'EXECUTABLE',
+      statement: `the ${name} check passes`,
+      evaluator: { kind: 'command', command: commands[name], expect: 'PASSED' },
+      affectedBy: ['src/**'], required: true, requiresAuthority: [],
+      derivedFrom: failing.includes(name) ? [name] : [],
+    })) };
+  }
+  if (/reviewing a compiled mission contract/.test(p)) {
+    return { findings: [], modeOpinion: null, usedContext: ['mission-goal', 'compiled-criteria'] };
+  }
+  if (/Decide whether the artifacts below satisfy the rubric/.test(p)) {
+    return { satisfied: true, findings: [], evidenceSummary: 'mock judgment',
+      usedContext: ['criterion-rubric', 'judged-artifact'] };
+  }
   if (req.role === 'planner') {
     return { plan: 'mock plan', scopeAllowlist: [], requiredTests: [], predictions: [], acceptance: [] };
   }

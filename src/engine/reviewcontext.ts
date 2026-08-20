@@ -19,7 +19,13 @@ export type ReviewInputKind =
   | 'task-requirement' | 'changed-files' | 'diff' | 'current-source'
   | 'test-evidence' | 'test-surface' | 'protected-paths' | 'structural-map' | 'area-context'
   | 'planner-reasoning' | 'planner-plan' | 'implementer-transcript'
-  | 'implementer-rationale' | 'previous-review' | 'adjudication' | 'acceptance-verdict';
+  | 'implementer-rationale' | 'previous-review' | 'adjudication' | 'acceptance-verdict'
+  // Mission Mode: the Oracle's own review surfaces. Same machinery, different
+  // policies — a second payload mechanism would be a second place for a leak
+  // to be possible.
+  | 'mission-goal' | 'compiled-criteria' | 'project-commands' | 'evidence-summary'
+  | 'criterion-rubric' | 'judged-artifact'
+  | 'compiler-transcript' | 'compiler-reasoning' | 'critic-verdict' | 'judge-verdict';
 
 /** What a reviewer may see, and what it must never see. */
 export interface ReviewContextPolicy {
@@ -28,6 +34,46 @@ export interface ReviewContextPolicy {
   /** Cross-task semantic memory is off unless a policy explicitly enables it. */
   allowAreaContext: boolean;
 }
+
+/**
+ * What the ORACLE CRITIC may see.
+ *
+ * The critic's job is to read the goal and the compiled criteria and say
+ * whether the second is a faithful contract for the first. It must form that
+ * opinion from the goal itself — so it gets the goal, the criteria, what the
+ * project can actually run, and the evidence that exists. It must NOT get the
+ * compiler's reasoning: a critic shown the argument for a set of criteria
+ * tends to review the argument instead of the goal, which turns a second
+ * opinion into a proofread.
+ */
+export const ORACLE_CRITIQUE_POLICY: ReviewContextPolicy = {
+  allowed: ['mission-goal', 'compiled-criteria', 'project-commands', 'evidence-summary'],
+  forbidden: [
+    'compiler-transcript', 'compiler-reasoning', 'critic-verdict',
+    'planner-reasoning', 'planner-plan', 'implementer-transcript', 'implementer-rationale',
+    'previous-review', 'adjudication', 'acceptance-verdict', 'area-context',
+  ],
+  allowAreaContext: false,
+};
+
+/**
+ * What the AI JUDGE may see.
+ *
+ * Only the rubric and the artifacts it selects. Not the implementer's output
+ * about how hard the work was, not the compiler's or critic's reasoning, and
+ * not what a previous judge concluded — a judge that can see "previously
+ * judged satisfied" is being told the answer.
+ */
+export const ORACLE_JUDGE_POLICY: ReviewContextPolicy = {
+  allowed: ['criterion-rubric', 'judged-artifact'],
+  forbidden: [
+    'implementer-transcript', 'implementer-rationale', 'compiler-transcript',
+    'compiler-reasoning', 'critic-verdict', 'judge-verdict',
+    'planner-reasoning', 'planner-plan', 'previous-review', 'adjudication',
+    'acceptance-verdict', 'area-context',
+  ],
+  allowAreaContext: false,
+};
 
 export const DEFAULT_REVIEW_POLICY: ReviewContextPolicy = {
   allowed: [
@@ -95,6 +141,13 @@ const LEAK_PATTERNS: Array<{ kind: ReviewInputKind; re: RegExp; what: string }> 
   { kind: 'adjudication', re: /ADJUDICATION|adjudicated (required )?change/i, what: 'adjudication conclusion' },
   { kind: 'acceptance-verdict', re: /ACCEPTANCE VERDICT|previously accepted as/i, what: 'a prior acceptance verdict' },
   { kind: 'area-context', re: /^AREA CONTEXT\b/mi, what: 'cross-task area memory' },
+  // The Oracle's equivalents. A critic that can see how the compiler argued
+  // for its criteria is not an independent reading of the goal, and a judge
+  // that can see a previous verdict is not judging the artifact.
+  { kind: 'compiler-transcript', re: /COMPILER TRANSCRIPT|"role"\s*:\s*"compiler"/i, what: 'the compiler transcript' },
+  { kind: 'compiler-reasoning', re: /COMPILER REASONING|I chose these criteria|why I compiled/i, what: 'the compiler reasoning' },
+  { kind: 'critic-verdict', re: /CRITIC VERDICT|the critic (found|said)|"modeOpinion"\s*:/i, what: 'a critic verdict' },
+  { kind: 'judge-verdict', re: /JUDGE VERDICT|previously judged (as )?satisfied|"satisfied"\s*:/i, what: 'a prior judge verdict' },
 ];
 
 /**

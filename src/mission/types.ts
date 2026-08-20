@@ -16,10 +16,11 @@
  */
 
 /** Which kind of thing an id names. Ids are strings; this is what separates them. */
-export type Scope = 'MISSION' | 'TASK';
+export type Scope = 'MISSION' | 'TASK' | 'CRITERION';
 
 const MISSION_ID = /\/M-(\d+)$/;
 const TASK_ID = /\/T-(\d+)$/;
+const CRITERION_ID = /\/C-(\d+)$/;
 
 export function makeMissionId(projectId: string, seq: number): string {
   return `${projectId}/M-${String(seq).padStart(4, '0')}`;
@@ -27,9 +28,27 @@ export function makeMissionId(projectId: string, seq: number): string {
 
 export function isMissionId(id: string): boolean { return MISSION_ID.test(id); }
 export function isTaskId(id: string): boolean { return TASK_ID.test(id); }
+export function isCriterionId(id: string): boolean { return CRITERION_ID.test(id); }
 
-/** What an id names, or null when it is neither. Never guesses. */
+/** `proj/M-0001` + 3 → `proj/M-0001/C-0003`. A criterion belongs to a mission. */
+export function makeCriterionId(missionId: string, seq: number): string {
+  return `${missionId}/C-${String(seq).padStart(4, '0')}`;
+}
+
+/** The mission a criterion belongs to. `proj/M-0001/C-0003` → `proj/M-0001`. */
+export function missionOfCriterion(criterionId: string): string {
+  return criterionId.slice(0, criterionId.lastIndexOf('/'));
+}
+
+/**
+ * What an id names, or null when it is none of them. Never guesses.
+ *
+ * A criterion id is checked first because it is the longest form: it ENDS in
+ * `/C-NNNN` while containing `/M-NNNN`, so a looser order would have to be
+ * argued about rather than read.
+ */
 export function scopeOf(id: string): Scope | null {
+  if (isCriterionId(id)) return 'CRITERION';
   if (isMissionId(id)) return 'MISSION';
   if (isTaskId(id)) return 'TASK';
   return null;
@@ -94,6 +113,15 @@ export const MISSION_EVENT_TYPES = [
   'MISSION_CHECKPOINT',
   'MISSION_ESCALATED',
   'MISSION_TERMINATED',
+  // Stage 2 — the Oracle. Moved here from the reserved list when they became
+  // events something actually emits; the event-type inventory reads this
+  // array, so the redaction probe picked them up without anyone remembering.
+  'ORACLE_COMPILED',
+  'ORACLE_CRITIQUED',
+  'ORACLE_ACCEPTED',
+  'ORACLE_EVALUATED',
+  'EVALUATOR_REVISED',
+  'ORACLE_SEMANTICS_REFUSED',
 ] as const;
 
 export type MissionEventType = typeof MISSION_EVENT_TYPES[number];
@@ -106,9 +134,12 @@ export type MissionEventType = typeof MISSION_EVENT_TYPES[number];
  * `_EVENT_TYPES` would silently enrol these in the redaction probe.
  */
 export const RESERVED_MISSION_EVENT_NAMES = [
+  // Stage 2 named the oracle events it actually emits; these two were reserved
+  // alongside them and stay reserved, so the names cannot be reused for
+  // something unrelated while the design still wants them.
   'ORACLE_CONSULTED', 'ORACLE_VERDICT',
   'EFFECT_MISMATCH', 'OSCILLATION_DETECTED',
-  'DEPENDENCY_MODEL_VIOLATION', 'MISSION_REPLAN', 'EVALUATOR_REVISED',
+  'DEPENDENCY_MODEL_VIOLATION', 'MISSION_REPLAN',
 ] as const;
 
 /* ------------------------------------------------------------------------ *
@@ -233,4 +264,23 @@ export interface MissionRecord {
   achievement: Achievement;
   terminationReason: TerminationReason | null;
   events: number;
+
+  /* ---- stage 2: the Oracle ---------------------------------------------- */
+  /** The compiled contract, as the log last recorded it. */
+  oracle: unknown | null;
+  oracleVersion: number | null;
+  acceptanceMode: string | null;
+  oracleAccepted: boolean;
+  /** How consent was given, when it was. */
+  acceptedBy: 'auto' | 'user-confirmed' | 'consent-flag' | null;
+  /** Latest outcome per criterion, by id. */
+  criterionOutcomes: Record<string, 'PROVEN' | 'FAILED' | 'UNEVALUATED'>;
+  evaluations: number;
+  evaluatorRevisions: number;
+  /**
+   * Achievement DERIVED from the criteria, as distinct from the achievement a
+   * terminating caller declared. Both are kept: one is what the contract says,
+   * the other is what somebody wrote down.
+   */
+  derivedAchievement: Achievement;
 }

@@ -17,8 +17,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-/** The shape every producer uses to name an event: a `type` key, upper-case. */
+/**
+ * The shape a producer uses to name an event at a call site.
+ *
+ * `type:` on its own is not enough, and that was found the way these things
+ * usually are: a deterministic fake provider gained a reply containing
+ * `type: 'EXECUTABLE'` — a criterion type, not an event — and the inventory
+ * counted it. An event append is `{ taskId, type: 'X', payload: … }`, so the
+ * presence of a payload beside it is what distinguishes an event from every
+ * other upper-case `type` field in the codebase.
+ */
 const TYPE_LITERAL = /\btype:\s*'([A-Z][A-Z0-9_]*)'/g;
+
+/** How far after the literal to look for the payload that makes it an event. */
+const PAYLOAD_WINDOW = 200;
 
 /**
  * The second shape: a central registry of event names.
@@ -76,6 +88,8 @@ export function discoverEventTypes(repoRoot: string,
     for (const file of tsFilesUnder(path.join(repoRoot, r))) {
       const text = fs.readFileSync(file, 'utf8').replace(BLOCK_COMMENT, '');
       for (const m of text.matchAll(TYPE_LITERAL)) {
+        const after = text.slice(m.index ?? 0, (m.index ?? 0) + PAYLOAD_WINDOW);
+        if (!/\bpayload\b/.test(after)) continue;      // a type field, not an event
         if (!found.has(m[1])) found.set(m[1], path.relative(repoRoot, file));
       }
       for (const reg of text.matchAll(TYPE_REGISTRY)) {

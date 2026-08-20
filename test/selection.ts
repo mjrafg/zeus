@@ -314,6 +314,69 @@ export async function selectionSuite(): Promise<void> {
   }
 
   // -----------------------------------------------------------------------
+  section('test 9 (merge): a merge commit failing a check is refused too');
+  {
+    const hooksDir = path.resolve(__dirname, '../.githooks');
+    const hook = path.join(hooksDir, 'pre-merge-commit');
+    check('S10: the merge gate exists and is executable',
+      fs.existsSync(hook) && (fs.statSync(hook).mode & 0o111) !== 0);
+    const hookText = fs.existsSync(hook) ? fs.readFileSync(hook, 'utf8') : '';
+    check('S10b: it runs the same gate as pre-commit',
+      /self-check/.test(hookText) && /boundary checks \+ non-service suite/.test(hookText));
+    check('S10c: it refuses rather than merging when the gate cannot run',
+      /refusing rather than merging unverified/.test(hookText));
+
+    // End to end against real git: a merge whose hook fails must not produce a
+    // merge commit. `git merge` never fires pre-commit, which is exactly how a
+    // merge commit reached main without passing the gate.
+    const repo = path.join(TMP, 'merge-gate');
+    const hooks = path.join(repo, 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    const git = (...args: string[]) => require('child_process').spawnSync('git',
+      ['-C', repo, '-c', 'user.email=t@e', '-c', 'user.name=t', ...args],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+    git('init', '-q', '-b', 'main');
+    git('config', 'core.hooksPath', 'hooks');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
+    git('add', '-A'); git('commit', '-qm', 'base');
+    git('checkout', '-q', '-b', 'feature');
+    fs.writeFileSync(path.join(repo, 'b.txt'), 'feature\n');
+    git('add', '-A'); git('commit', '-qm', 'feature work');
+    git('checkout', '-q', 'main');
+    fs.writeFileSync(path.join(repo, 'c.txt'), 'main moves\n');
+    git('add', '-A'); git('commit', '-qm', 'main work');
+    const before = git('rev-parse', 'HEAD').stdout.trim();
+
+    // A gate that reports a failing boundary check, in the shape ours does.
+    fs.writeFileSync(path.join(hooks, 'pre-merge-commit'),
+      '#!/bin/sh\necho "commit refused: 1 check(s) failing." >&2\n'
+      + 'echo "  x PB5: no file hard-codes a machine-specific absolute path" >&2\nexit 1\n');
+    fs.chmodSync(path.join(hooks, 'pre-merge-commit'), 0o755);
+
+    const refused = git('merge', '--no-ff', '--no-edit', 'feature');
+    const afterRefused = git('rev-parse', 'HEAD').stdout.trim();
+    check('S10d: a merge whose gate fails is refused',
+      refused.status !== 0, `git merge exited ${refused.status}`);
+    check('S10e: no merge commit is created',
+      afterRefused === before, `HEAD ${before.slice(0, 8)} -> ${afterRefused.slice(0, 8)}`);
+    check('S10f: the refusal reaches the operator, naming the check',
+      /PB5/.test(`${refused.stdout}${refused.stderr}`));
+
+    // And a passing gate lets the same merge through, so the hook is a gate
+    // rather than a wall.
+    git('merge', '--abort');
+    fs.writeFileSync(path.join(hooks, 'pre-merge-commit'), '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(path.join(hooks, 'pre-merge-commit'), 0o755);
+    const allowed = git('merge', '--no-ff', '--no-edit', 'feature');
+    const afterAllowed = git('rev-parse', 'HEAD').stdout.trim();
+    check('S10g: a green gate allows the merge',
+      allowed.status === 0 && afterAllowed !== before);
+    check('S10h: and it really is a merge commit',
+      git('rev-list', '--merges', '--count', 'HEAD').stdout.trim() === '1');
+  }
+
+  // -----------------------------------------------------------------------
   section('the ledger is what the supervisor enforces against');
   {
     const ledger = selectChecks({

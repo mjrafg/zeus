@@ -1,0 +1,31 @@
+#!/bin/sh
+# Zeus gates its own merge commits.
+#
+# `pre-commit` covers commits and nothing else: `git merge` does not fire it, so
+# merging integration/consolidate-2026-08-20 into main produced a merge commit
+# that never passed through the gate. The content had been verified, but only
+# because it was checked by hand afterwards — which is the habit the gate exists
+# to replace.
+#
+# Same gate as pre-commit: the boundary checks and the non-service suite, with
+# refusal by name. `runSelfCheck` strips GIT_* before running the suite, which
+# matters as much here as it does for a commit — merge hooks inherit the same
+# GIT_DIR and GIT_INDEX_FILE, and without stripping them every throwaway-repo
+# git call inside the suite retargets this repository.
+#
+# Not covered: a fast-forward merge creates no commit, so no hook fires. Nothing
+# is lost by that — a fast-forward introduces no new tree, and the commits it
+# moves onto the branch were gated when they were made.
+#
+# Bypassing with `git merge --no-verify` is outside any hook's control.
+set -e
+root=$(git rev-parse --show-toplevel)
+
+if [ ! -x "$root/node_modules/.bin/ts-node" ]; then
+  echo "pre-merge-commit: ts-node is missing; run npm install so the merge gate can run" >&2
+  echo "pre-merge-commit: refusing rather than merging unverified" >&2
+  exit 1
+fi
+
+echo "pre-merge-commit: running the self-check gate (boundary checks + non-service suite)..." >&2
+"$root/node_modules/.bin/ts-node" --transpile-only "$root/src/cli.ts" self-check >&2

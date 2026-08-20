@@ -797,7 +797,10 @@ async function recompileOracle(ctx: { root: string; cfg: ProjectConfig }, missio
     out(`  ${missionLabel(c.criterionId).padEnd(8)} ${c.type.padEnd(14)} ${c.statement.slice(0, 60)}`);
     out(`           ${C.dim}${ev.kind === 'rubric' ? `rubric: ${String(ev.rubric).slice(0, 55)}` : ev.command}${ev.repeat ? ` ×${ev.repeat}` : ''}${C.x}`);
   }
-  out(`  ${C.b}round ${rec.recompiles + 1}${C.x} critique:`);
+  // The FRESH critique's round number. `rec` was read before the recompile was
+  // recorded, so rec.recompiles is the count BEFORE this attempt: the critique
+  // that follows attempt N is round N+1.
+  out(`  ${C.b}round ${rec.recompiles + 2}${C.x} critique (a fresh one — it has not seen round ${rec.recompiles + 1}):`);
   renderFindings(nextFindings);
   out(`  ${C.b}acceptance mode${C.x} ${proposal.mode}`);
   out(nextFindings.length

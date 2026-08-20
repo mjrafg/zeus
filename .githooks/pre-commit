@@ -1,0 +1,22 @@
+#!/bin/sh
+# Zeus gates its own commits.
+#
+# Commit e93cbbd landed carrying two boundary-check violations because the suite
+# was not re-run before committing. "Run the tests first" was a habit; this makes
+# it a boundary. Documentation and audit commits are gated too — the commit that
+# made this gate necessary was a documentation commit, and those are exactly the
+# ones that feel too harmless to verify.
+#
+# Bypassing with `git commit --no-verify` is outside any hook's control. That is
+# a stated limitation of hook-based enforcement, not a supported route.
+set -e
+root=$(git rev-parse --show-toplevel)
+
+if [ ! -x "$root/node_modules/.bin/ts-node" ]; then
+  echo "pre-commit: ts-node is missing; run npm install so the commit gate can run" >&2
+  echo "pre-commit: refusing rather than committing unverified" >&2
+  exit 1
+fi
+
+echo "pre-commit: running the self-check gate (boundary checks + non-service suite)..." >&2
+"$root/node_modules/.bin/ts-node" --transpile-only "$root/src/cli.ts" self-check >&2

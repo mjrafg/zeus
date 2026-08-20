@@ -142,6 +142,29 @@ export function listRunRecords(dir: string): RunRecord[] {
   } catch { return []; }
 }
 
+/**
+ * How runtimes say they ran out of memory.
+ *
+ * Deliberately specific. Matching a bare "out of memory" would reclassify any
+ * test that merely asserts on that string, and calling a real failure a
+ * resource breach misleads in the opposite direction — both are wrong, so each
+ * pattern names a runtime's actual fatal message.
+ */
+const OUT_OF_MEMORY = new RegExp([
+  'JavaScript heap out of memory',
+  'Fatal process OOM',
+  'FATAL ERROR:[^\\n]*(heap out of memory|Reached heap limit)',
+  'Failed to reserve virtual memory',
+  'std::bad_alloc',
+  'Cannot allocate memory',
+  'OutOfMemoryError',
+  'MemoryError:',
+  'fork: retry',
+  'Resource temporarily unavailable',
+  'Killed process',
+  'Out of memory: Killed',
+].join('|'), 'i');
+
 /** Is this recorded group still alive? Used to prune after a crash. */
 function groupAlive(pgid: number): boolean {
   try { process.kill(-pgid, 0); return true; } catch { return false; }
@@ -432,7 +455,13 @@ export class ProcessSupervisor {
         // A cgroup kill, an OOM exit or the classic heap message are the
         // machine running out of room — never a verdict about the code.
         if (signal === 'SIGKILL' || code === 137 || code === 139) return finish('RESOURCE_LIMIT_EXCEEDED', code, signal ?? null);
-        if (/JavaScript heap out of memory|Cannot allocate memory|fork: retry|Resource temporarily unavailable|Killed process/i.test(out)) {
+        // Runtimes announce exhaustion in their own words and then die by a
+        // signal that on its own means nothing. A probe against the rlimit
+        // ceiling exited on SIGTRAP saying "Fatal process OOM in Failed to
+        // reserve virtual memory" and was classified FAILED — Zeus blaming the
+        // change for the machine running out of room. These are the specific
+        // phrasings; the signal alone is never enough to conclude exhaustion.
+        if (OUT_OF_MEMORY.test(out)) {
           return finish('RESOURCE_LIMIT_EXCEEDED', code, signal ?? null);
         }
         // The sandbox could not start the inner command: infrastructure, not code.

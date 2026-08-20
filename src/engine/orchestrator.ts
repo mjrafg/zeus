@@ -23,7 +23,7 @@ import { TaskBudgets, mergeBudgets, usageFrom, checkBudgets } from './taskbudget
 import { buildReviewPayload, DEFAULT_REVIEW_POLICY, ReviewContextPolicy, ReviewInput, reconcileReviewerReport } from './reviewcontext';
 import { parseDiff } from '../validation/diff';
 import {
-  resolveTier, planFor, impactConfidence, TierDecision, HardeningSettings, DEFAULT_HARDENING, Tier,
+  resolveTier, impactConfidence, TierDecision, HardeningSettings, DEFAULT_HARDENING, Tier,
 } from '../validation/tier';
 import {
   designContract, inspectIntegrity, evidenceCoupledFiles, accountForTests, IntegrityReport,
@@ -33,6 +33,9 @@ import {
 } from '../validation/expansion';
 import { escalation, EscalationReason, EvidenceRef, NeededInput, renderEscalation } from '../validation/escalation';
 import { SpanRecorder, NO_SPANS } from '../telemetry/spans';
+import { classifyAll, Classification } from '../validation/testclass';
+import { parseConstraints, ConstraintSet, diffViolations } from '../validation/constraints';
+import { selectChecks, SelectionLedger, approvalKey, SelectedCheck, DEFAULT_COST_RATIO } from '../validation/selection';
 
 export type TaskState =
   | 'NEW' | 'DESIGN' | 'IMPLEMENT' | 'VERIFY' | 'REVIEW' | 'FINAL_ACCEPTANCE'
@@ -211,6 +214,15 @@ export class Engine {
   readonly taskBudgets: TaskBudgets;
   readonly reviewPolicy: ReviewContextPolicy;
   readonly spans: SpanRecorder;
+
+  /**
+   * Checks approved by the selection path, keyed by name+command.
+   *
+   * `runCheck` refuses anything absent from this set. That is what makes "one
+   * selection path" structural: a future phase that reaches for a command
+   * directly does not get to run it, it gets a recorded refusal.
+   */
+  private approved = new Set<string>();
 
   /**
    * The hardening profile in force.
@@ -399,6 +411,22 @@ export class Engine {
   /** Runs one project command through the supervisor and classifies it. */
   async runCheck(rec: TaskRecord, name: string, commandLine: string, required: boolean,
     cls: 'light' | 'heavy' = 'light'): Promise<{ outcome: CheckOutcome; res: ExecutionResult }> {
+    // Off-ledger execution is refused here rather than trusted not to happen.
+    if (!this.approved.has(approvalKey(name, commandLine))) {
+      this.record({ taskId: rec.taskId, type: 'CHECK_REFUSED', payload: {
+        name, command: commandLine, required,
+        code: 'NOT_IN_SELECTION',
+        detail: 'this check was not approved by the validation selection path; '
+          + 'every phase selects through selectChecks() and nothing runs off-plan',
+      } });
+      return { outcome: 'REQUIRED_TEST_NOT_RUN' as CheckOutcome, res: {
+        id: name, outcome: 'POLICY_DENIED', exitCode: null, signal: null, stdout: '',
+        queueWaitMs: 0, durationMs: 0, pid: null, pgid: null,
+        backend: 'process-group', isolationFallback: false, enforced: [], violations: [],
+        productSignal: false,
+        budgets: { memoryMaxMb: 0, cpuQuotaPercent: 0, maxProcesses: 0, testWorkers: 0 },
+      } as unknown as ExecutionResult };
+    }
     const [cmd, ...args] = commandLine.split(/\s+/);
     const checkId = this.spans.start('check.' + name, 'VALIDATION', { command: commandLine, required });
     const res = await this.opts.supervisor.run({
@@ -501,6 +529,7 @@ export class Engine {
     if (afterDesign) return afterDesign;
 
     // ---- IMPLEMENT ---------------------------------------------------------
+    const implementStartedAt = Date.now();
     this.setState(taskId, 'IMPLEMENT', 'implement');
     const impl = await this.agent('implementer', rec, [
       'Implement the following change in the current worktree.',
@@ -579,9 +608,73 @@ export class Engine {
 
     // ---- VERIFY ------------------------------------------------------------
     this.setState(taskId, 'VERIFY', 'verify');
-    const required: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> = [];
-    if (cfg.commands?.typecheck) required.push({ name: 'typecheck', cmd: cfg.commands.typecheck, cls: 'light' });
-    if (cfg.commands?.unitTest) required.push({ name: 'unit-test', cmd: cfg.commands.unitTest, cls: 'heavy' });
+    // Constraints stated in the task become data here, once, and every
+    // selection from now on is made against them.
+    const constraints: ConstraintSet = this.spans.sync('decision.constraints', 'DECISION',
+      () => parseConstraints(rec.description));
+    const declared = Object.entries(cfg.commands ?? {})
+      .filter(([, v]) => typeof v === 'string' && v)
+      .map(([name, command]) => ({
+        name: name === 'unitTest' ? 'unit-test' : name === 'integrationTest' ? 'integration-test' : name,
+        command: String(command),
+      }));
+    const classifications: Classification[] = this.spans.sync('decision.classify-suites', 'DECISION',
+      () => classifyAll(declared, this.opts.projectRoot));
+    this.record({ taskId, type: 'TASK_CONSTRAINTS', payload: {
+      constraints: constraints.constraints, unparsed: constraints.unparsed,
+      classifications: classifications.map((c) => ({ check: c.check, klass: c.klass, signals: c.signals })),
+    } });
+
+    // Constraints about the diff itself are reported now, before anything runs.
+    const dViolations = diffViolations(constraints, { files: changed });
+    if (dViolations.length) {
+      this.record({ taskId, type: 'CONSTRAINT_VIOLATION', payload: { scope: 'diff', violations: dViolations } });
+    }
+
+    const ledger: SelectionLedger = this.spans.sync('decision.select-checks', 'DECISION', () => selectChecks({
+      phase: 'VERIFY', tier: decision.tier,
+      commands: (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>,
+      classifications, constraints,
+      affectedSurfaces: decision.highRiskFiles,
+      cost: {
+        implementMs: Math.max(1, Date.now() - implementStartedAt),
+        filesChanged: changed.length, hunks: decision.perHunk.length,
+      },
+      costRatioThreshold: Number((cfg as any)?.validation?.hardening?.costRatioThreshold) || DEFAULT_COST_RATIO,
+    }));
+    this.approved = new Set(ledger.selected.map((c) => approvalKey(c.name, c.command)));
+    this.record({ taskId, type: 'VALIDATION_SELECTION', payload: {
+      phase: ledger.phase, tier: ledger.tier,
+      selected: ledger.selected.map((c) => ({ name: c.name, required: c.required, klass: c.klass, reason: c.reason })),
+      refused: ledger.refused,
+      cost: ledger.cost, conflict: ledger.conflict, reasons: ledger.reasons,
+    } });
+
+    // A required check the task forbade is not Zeus's decision to make.
+    if (ledger.conflict) {
+      return this.escalateToHuman(taskId, 'AWAITING_HUMAN', 'verify', {
+        reasonCode: 'POLICY_APPROVAL_REQUIRED',
+        blocked: ledger.conflict.detail,
+        tried: [
+          `classified the change as ${decision.tier}`,
+          `parsed ${constraints.constraints.length} constraint(s) from the task text`,
+          `classified ${classifications.length} configured check(s) by what they start`,
+        ],
+        evidence: [
+          { kind: 'event', id: 'TASK_CONSTRAINTS', detail: 'the parsed constraint set' },
+          { kind: 'event', id: 'VALIDATION_SELECTION', detail: 'the selection ledger and its refusals' },
+          { kind: 'check', id: ledger.conflict.check, detail: 'the required check in conflict' },
+        ],
+        needed: {
+          kind: 'decision',
+          description: `decide whether "${ledger.conflict.check}" should run despite the task forbidding it, or whether the constraint stands and the required check is waived for this task`,
+        },
+        resumeBehavior: 'the task resumes at verification with the decision recorded against it',
+      });
+    }
+
+    const required: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> =
+      ledger.selected.filter((c) => c.required).map((c) => ({ name: c.name, cmd: c.command, cls: c.cls }));
     // A project with nothing executable to run cannot be "verified". Claiming
     // COMPLETED here would be the worst kind of false acceptance: confident,
     // fast and based on nothing. Opt in explicitly if that is really intended.
@@ -617,17 +710,12 @@ export class Engine {
     }
     // The tier decides what runs ON TOP of the floor, never how much of the
     // floor runs. Every required check runs at every tier, including FAST.
-    const plan = this.spans.sync('decision.plan', 'DECISION',
-      () => planFor(decision.tier, (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>));
-    const optional: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> = [];
-    for (const name of plan.additional) {
-      const cmd = (cfg.commands as any)?.[name === 'unit-test' ? 'unitTest'
-        : name === 'integration-test' ? 'integrationTest' : name];
-      if (cmd) optional.push({ name, cmd, cls: name === 'integration-test' ? 'heavy' : 'light' });
-    }
+    const optional: Array<{ name: string; cmd: string; cls: 'light' | 'heavy' }> =
+      ledger.selected.filter((c) => !c.required).map((c) => ({ name: c.name, cmd: c.command, cls: c.cls }));
     this.record({ taskId, type: 'VALIDATION_SCOPE', payload: {
-      tier: plan.tier, floor: required.map((r) => r.name), additional: optional.map((o) => o.name),
-      note: 'the floor is authoritative and runs at every tier',
+      tier: ledger.tier, floor: required.map((r) => r.name), additional: optional.map((o) => o.name),
+      refused: ledger.refused.map((r) => ({ name: r.name, code: r.code })),
+      note: 'the floor is authoritative and runs at every tier; everything here came from selectChecks()',
     } });
 
     const outcomes: CheckOutcome[] = [];
@@ -846,14 +934,28 @@ export class Engine {
         cause: 'reviewerExpansion', perHunk: decision.perHunk,
       } });
 
-      const expanded = planFor(decision.tier, (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>);
-      for (const name of expanded.additional) {
-        if (alreadyRun.has(name)) continue;
-        const cmd = (cfg.commands as any)?.[name === 'integration-test' ? 'integrationTest' : name];
-        if (!cmd) continue;
-        alreadyRun.add(name);
-        const { outcome } = await this.runCheck(rec, name, cmd, false, name === 'integration-test' ? 'heavy' : 'light');
-        additionalOutcomes.push({ name, outcome });
+      // The expansion goes through the SAME selection path as VERIFY. It used to
+      // reach into cfg.commands directly, which meant an escalated tier could
+      // acquire a heavy suite the task's own constraints forbade — the
+      // Zeus-native version of the defect this fix exists for.
+      const expandLedger = selectChecks({
+        phase: 'REVIEW_EXPANSION', tier: decision.tier,
+        commands: (cfg.commands ?? {}) as unknown as Record<string, string | null | undefined>,
+        classifications, constraints,
+        affectedSurfaces: [...decision.highRiskFiles, ...(req.scope ?? [])],
+        alreadyRun,
+      });
+      this.record({ taskId, type: 'VALIDATION_SELECTION', payload: {
+        phase: expandLedger.phase, tier: expandLedger.tier, cause: 'reviewerExpansion',
+        selected: expandLedger.selected.map((c) => ({ name: c.name, required: c.required, klass: c.klass, reason: c.reason })),
+        refused: expandLedger.refused, reasons: expandLedger.reasons,
+      } });
+      for (const c of expandLedger.selected) {
+        if (alreadyRun.has(c.name)) continue;
+        alreadyRun.add(c.name);
+        this.approved.add(approvalKey(c.name, c.command));
+        const { outcome } = await this.runCheck(rec, c.name, c.command, c.required, c.cls);
+        additionalOutcomes.push({ name: c.name, outcome });
       }
 
       const overBudget = this.budgetBreach(taskId);

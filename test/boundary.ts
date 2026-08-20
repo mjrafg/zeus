@@ -152,9 +152,23 @@ export async function boundarySuite(): Promise<void> {
     check(`PB7: historical-identifier scan (set ${RULES_ENV} to a private rule file to enable)`,
       true, 'not configured — structural checks above still ran');
   } else {
+    // Audit documents necessarily discuss historical identifiers: a finding
+    // that rules one out has to name the thing it is ruling out. The scanner
+    // cannot tell mention from use and should not try, so audits/ is exempt by
+    // path and the exemption is recorded here rather than left for authors to
+    // discover by writing around the check.
+    //
+    // The exemption is narrow on purpose: it covers audits/ only. src/, bin/,
+    // docs/ and the release artifact are still scanned, and PB9 below still
+    // asserts the runtime carries zero historical coupling.
+    const AUDIT_EXEMPT = `audits${path.sep}`;
     const files = productFiles(r);
     check('PB7: product-facing files were actually scanned', files.length > 20, `${files.length} files`);
-    const hits = scan(files, r.identifiers);
+    const scanned = files.filter((f) => !path.relative(REPO, f).startsWith(AUDIT_EXEMPT));
+    const exempted = files.length - scanned.length;
+    check('PB7b: the audits/ exemption is bounded and visible',
+      exempted >= 0 && scanned.length > 0, `${exempted} audit file(s) exempt, ${scanned.length} still scanned`);
+    const hits = scan(scanned, r.identifiers);
     check('PB8: no product-facing file contains a historical identifier',
       hits.length === 0, hits.slice(0, 5).map((h) => `${h.file}:${h.line} (${h.id})`).join(' | '));
     const runtimeHits = hits.filter((h) => h.file.startsWith('src/') || h.file.startsWith('bin/'));

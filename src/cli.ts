@@ -36,6 +36,7 @@ import { renderEscalation, EscalationPayload } from './validation/escalation';
 import { runtimeState, createAuditCheckout } from './selfaudit/checkout';
 import { runLane, consolidate } from './selfaudit/runner';
 import { renderMarkdown, renderTerminal } from './selfaudit/report';
+import { runSelfCheck, renderRefusal } from './selfaudit/commitgate';
 
 /** Single source of truth: the packaged manifest, not a second literal. */
 export const VERSION: string = (() => {
@@ -70,6 +71,7 @@ ${C.b}Usage${C.x}
   zeus config [get <key> | set <key> <value>]  read or edit this project's configuration
   zeus revalidate <taskId> [--into <ref>]     recheck a verified task against a moved integration target
   zeus self-audit [--lane A-F] [--cycle-id <id>]  audit this checkout adversarially, on a disposable copy
+  zeus self-check                             gate for Zeus's own commits: boundary checks + the non-service suite
   zeus version
   zeus help
 
@@ -405,7 +407,11 @@ function cmdDoctor(args: string[]): number {
   out(`\n${C.b}Execution isolation${C.x}`);
   for (const b of iso.backends) out(`  ${mark(b.available ? 'ok' : 'warn')} ${b.id.padEnd(16)} ${b.detail}`);
   out(`  ${C.b}selected backend:${C.x} ${iso.selected}`);
-  out(`  ${C.b}fallback mode:${C.x} ${iso.fallbackMode}${iso.fallbackMode ? `  ${C.y}(resource limits are NOT enforced by the kernel)${C.x}` : ''}`);
+  out(`  ${C.b}fallback mode:${C.x} ${iso.fallbackMode}`);
+  // What is enforced here, not what the configuration asks for.
+  const kernelBacked = iso.resourceEnforcement === 'cgroup';
+  out(`  ${C.b}resource ceilings:${C.x} ${kernelBacked ? `${C.g}cgroup${C.x}` : `${C.y}rlimit only${C.x}`}`);
+  out(`  ${C.dim}${iso.resourceDetail}${C.x}`);
   out(`  ${C.dim}enforces: ${iso.enforces.join(', ')}${C.x}`);
   out(`\n${C.b}Derived budgets${C.x} ${C.dim}(from ${budgets.derivedFrom.cpus} cpus / ${budgets.derivedFrom.totalMemMb} MB)${C.x}`);
   out(`  reserved for control plane : ${budgets.reservedCpus} cpu, ${budgets.reservedMemMb} MB`);
@@ -618,6 +624,27 @@ async function cmdSelfAudit(argv: string[]): Promise<number> {
   }
 }
 
+
+/**
+ * `zeus self-check` — the gate on Zeus's own commits.
+ *
+ * Used by `.githooks/pre-commit`. Exits non-zero and names the failing checks,
+ * so a refusal says what is wrong rather than that something is.
+ */
+function cmdSelfCheck(argv: string[]): number {
+  const root = findProjectRoot() ?? process.cwd();
+  const json = argv.includes('--json');
+  if (!json) out(`${C.b}zeus self-check${C.x} ${C.dim}${root}${C.x}`);
+  const g = runSelfCheck(root);
+  if (json) { out(JSON.stringify(g, null, 1)); return g.ok ? 0 : 1; }
+  if (g.ok) {
+    out(`  ${C.g}✓${C.x} ${g.passed} passed, 0 failed in ${Math.round(g.durationMs / 1000)}s`);
+    return 0;
+  }
+  err(renderRefusal(g));
+  return 1;
+}
+
 function cmdRevalidate(argv: string[]): number {
   const ctx = requireProject();
   if (!ctx) return 2;
@@ -754,6 +781,7 @@ export async function main(argv: string[]): Promise<number> {
     case 'config': return cmdConfig(rest);
     case 'revalidate': return cmdRevalidate(rest);
     case 'self-audit': return cmdSelfAudit(rest);
+    case 'self-check': return cmdSelfCheck(rest);
     default: err(`unknown command "${cmd}"`); usage(); return 2;
   }
 }

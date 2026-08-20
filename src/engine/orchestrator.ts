@@ -406,6 +406,11 @@ export class Engine {
       structuredKeys: res.structured ? Object.keys(res.structured) : [],
       // Values, not just key names: a list of field names is not a diagnosis.
       diagnostics: res.diagnostics ?? {},
+      // Provider-REPORTED cost and tokens. Recorded because mission budgeting
+      // will consume them, and because a number Zeus computed itself would be
+      // a guess that later got spent against.
+      ...(res.providerUsage ? { providerUsage: res.providerUsage } : {}),
+      ...(res.rateLimit ? { rateLimit: res.rateLimit } : {}),
     } });
     return res;
   }

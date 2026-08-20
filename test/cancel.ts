@@ -26,6 +26,18 @@ import { defaultPolicy } from '../src/engine/policy';
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-cancel-'));
 const REPO = path.resolve(__dirname, '..');
 
+/**
+ * Job ids are unique per RUN, not per test.
+ *
+ * The isolation backend derives a transient systemd unit name from the job id,
+ * so a fixed id means a fixed unit name — and a scope orphaned by an earlier
+ * run makes the next `systemd-run` exit 1 instantly, before anything is
+ * registered. That produced an intermittent FAILED here that looked like the
+ * cancellation fix misbehaving and was actually two runs colliding.
+ */
+const RUN = `${process.pid}-${Date.now().toString(36)}`;
+const jobId = (name: string): string => `xc-${name}-${RUN}`;
+
 /** An owner process: starts one long execution and prints how it ended. */
 function ownerScript(stateRoot: string, taskId: string, jobId: string, sleeper: string): string {
   const file = path.join(TMP, `owner-${jobId}.js`);
@@ -62,17 +74,24 @@ async function startOwner(stateRoot: string, taskId: string, jobId: string, slee
   child.stdout.on('data', (d: Buffer) => { text += d.toString(); });
   child.stderr.on('data', () => { /* the owner's own diagnostics */ });
 
-  let live = listRunRecords(registryDirFor(stateRoot)).filter((r) => r.jobId === jobId);
-  for (let i = 0; i < 150 && !live.length; i += 1) {
-    await new Promise((r) => setTimeout(r, 100));
-    live = listRunRecords(registryDirFor(stateRoot)).filter((r) => r.jobId === jobId);
-  }
+  // The close listener is attached BEFORE the registry poll, and that ordering
+  // is the point. Attaching it afterwards loses the event when the owner exits
+  // during the poll — the promise then never settles, the event loop empties,
+  // and node exits 0 in the middle of the suite with no error and no summary.
+  // A silent exit-zero is the worst failure a test harness can have.
+  let live: ReturnType<typeof listRunRecords> = [];
   const done = new Promise<OwnerRun>((resolve) => {
     child.on('close', () => {
       const m = /RESULT (\{.*\})/.exec(text);
       resolve({ result: m ? JSON.parse(m[1]) : null, pgid: live[0]?.pgid ?? 0 });
     });
   });
+
+  live = listRunRecords(registryDirFor(stateRoot)).filter((r) => r.jobId === jobId);
+  for (let i = 0; i < 150 && !live.length; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    live = listRunRecords(registryDirFor(stateRoot)).filter((r) => r.jobId === jobId);
+  }
   return { child, done, pgid: live[0]?.pgid ?? 0 };
 }
 
@@ -86,7 +105,7 @@ export async function crossProcessCancelSuite(): Promise<void> {
   section('cross-process cancel: intent survives the process boundary');
   {
     const stateRoot = path.join(TMP, 'state-1');
-    const owner = await startOwner(stateRoot, 'p/T-0001', 'xc-cancel', sleeper);
+    const owner = await startOwner(stateRoot, 'p/T-0001', jobId('cancel'), sleeper);
     check('XC1: the owner registered its execution where another process can find it',
       owner.pgid > 0, `pgid=${owner.pgid}`);
 
@@ -100,7 +119,7 @@ export async function crossProcessCancelSuite(): Promise<void> {
     check('XC4: productSignal stays false — a cancelled execution is not a verdict',
       ended.result?.productSignal === false);
     check('XC5: the tombstone does not outlive the execution it describes',
-      !fs.existsSync(path.join(registryDirFor(stateRoot), 'xc-cancel.cancel')),
+      !fs.existsSync(path.join(registryDirFor(stateRoot), `${jobId('cancel')}.cancel`)),
       fs.existsSync(registryDirFor(stateRoot))
         ? fs.readdirSync(registryDirFor(stateRoot)).join(',') : '(no registry dir)');
   }
@@ -112,7 +131,7 @@ export async function crossProcessCancelSuite(): Promise<void> {
     // scope stop or an external SIGTERM looks like, and it must NOT become a
     // cancellation just because the fix exists.
     const stateRoot = path.join(TMP, 'state-2');
-    const owner = await startOwner(stateRoot, 'p/T-0002', 'xc-nointent', sleeper);
+    const owner = await startOwner(stateRoot, 'p/T-0002', jobId('nointent'), sleeper);
     check('XC6: the execution is live', owner.pgid > 0);
     try { process.kill(-owner.pgid, 'SIGTERM'); } catch { /* raced */ }
     const ended = await owner.done;
@@ -130,15 +149,19 @@ export async function crossProcessCancelSuite(): Promise<void> {
     // close handler could run first and classify from an empty directory.
     // Repeated, because a race that fires one time in five is still a race.
     const outcomes: string[] = [];
+    const detail: string[] = [];
     for (let i = 0; i < 5; i += 1) {
       const stateRoot = path.join(TMP, `state-race-${i}`);
-      const owner = await startOwner(stateRoot, `p/T-100${i}`, `xc-race-${i}`, sleeper);
-      killRecorded(stateRoot, { taskId: `p/T-100${i}` }, 'race probe');
+      const owner = await startOwner(stateRoot, `p/T-100${i}`, jobId(`race-${i}`), sleeper);
+      const killed = killRecorded(stateRoot, { taskId: `p/T-100${i}` }, 'race probe');
+      const markerSeen = fs.existsSync(path.join(registryDirFor(stateRoot), `${jobId(`race-${i}`)}.cancel`));
       const ended = await owner.done;
       outcomes.push(String(ended.result?.outcome));
+      detail.push(`${i}:${ended.result?.outcome}/code=${ended.result?.exitCode}/sig=${ended.result?.signal}`
+        + `/killed=${killed.killed}/markerAtKill=${markerSeen}`);
     }
     check('XC9: every one of 5 immediate-death cancellations classified CANCELLED',
-      outcomes.every((o) => o === 'CANCELLED'), outcomes.join(', '));
+      outcomes.every((o) => o === 'CANCELLED'), detail.join(' | '));
 
     // And the ordering itself, so a later edit cannot quietly invert it.
     const src = fs.readFileSync(path.join(REPO, 'src/engine/exec.ts'), 'utf8');

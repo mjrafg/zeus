@@ -11,7 +11,9 @@
  */
 
 import { ProcessSupervisor, ExecutionRequest } from './exec';
+import { unwrapProviderStream, ProviderUsage, RateLimitNote } from './unwrap';
 import { ExecutionPolicy } from './policy';
+import { redactSecrets } from './redact';
 
 export type Role = 'planner' | 'implementer' | 'reviewer';
 
@@ -40,6 +42,16 @@ export interface AgentResponse {
   infrastructureFailure: string | null;
   /** The provider's own error fields, so a failure is diagnosable from the log. */
   diagnostics?: Record<string, unknown>;
+  /**
+   * Cost and token counts AS THE PROVIDER REPORTED THEM.
+   *
+   * Never computed, never estimated: Zeus does not know model pricing and any
+   * number it invented would be a fiction that later got budgeted against.
+   * Absent fields stay absent rather than becoming zero.
+   */
+  providerUsage?: ProviderUsage;
+  /** Quota state, when the CLI volunteered it. */
+  rateLimit?: RateLimitNote;
   /**
    * Monotonic instants around the provider's child process, passed straight
    * through from the supervisor. Without this the caller can time the wrapper
@@ -95,7 +107,10 @@ async function runCli(id: string, bin: string, argv: (req: AgentRequest) => stri
     timeoutSeconds: req.timeoutSeconds ?? 1200,
   } as ExecutionRequest);
 
-  const structured = parseStructured(res.stdout);
+  // The model's text lives inside stream events; unwrap before parsing. See
+  // src/engine/unwrap.ts for the captured shapes this is derived from.
+  const stream = unwrapProviderStream(id, res.stdout);
+  const structured = parseStructured(stream.text);
 
   // The vendor CLIs report their own failures in structured fields, not only in
   // prose. Reading just the text meant an API error arrived as a plain non-zero
@@ -103,7 +118,11 @@ async function runCli(id: string, bin: string, argv: (req: AgentRequest) => stri
   // the truth was that Zeus could not run the planner at all. That is precisely
   // the confusion the outcome vocabulary exists to prevent, so the provider's
   // own signal is now believed before any pattern matching.
-  const providerError = providerReportedError(structured);
+  // Read the CLI's OWN terminal event for this, not the model's payload: the
+  // payload knows nothing about is_error, subtype or permission_denials, and
+  // reading it here would quietly undo the fix that made a provider outage
+  // stop looking like a failed design.
+  const providerError = providerReportedError(stream.controlEvent ?? structured);
 
   const infra = ['TIMEOUT', 'RESOURCE_LIMIT_EXCEEDED', 'INFRASTRUCTURE_FAILURE', 'POLICY_DENIED'].includes(res.outcome)
     ? `${res.outcome}: ${res.stdout.slice(-300)}`
@@ -112,12 +131,45 @@ async function runCli(id: string, bin: string, argv: (req: AgentRequest) => stri
       : /\b(429|529|overloaded|rate.?limit|ECONNRESET|socket hang up)\b/i.test(res.stdout)
         ? `PROVIDER_UNAVAILABLE: ${res.stdout.slice(-200)}` : null;
 
+  // Diagnostics worth the name. "It didn't parse" cost a supervised session a
+  // manual reproduction; the next failure explains itself.
+  const diagnostics: Record<string, unknown> = {
+    ...providerDiagnostics(stream.controlEvent ?? structured),
+    exitCode: res.exitCode,
+    outputBytes: Buffer.byteLength(res.stdout),
+    streamEvents: stream.events,
+    nonJsonLines: stream.nonJsonLines,
+    unwrapSource: stream.source,
+    parsedStructured: !!structured,
+  };
+  if (!structured) {
+    // The tail of the UNWRAPPED text, which is what failed to parse — the raw
+    // stream's tail is a wrapper event and tells the reader nothing.
+    diagnostics.unwrappedTail = redactSecrets(stream.text.slice(-400)).text;
+  }
+  if (stream.rateLimit) {
+    diagnostics.rateLimit = stream.rateLimit;
+    if (stream.rateLimit.constrained) {
+      // "Quota exhausted until <time>" is a different human action from "the
+      // provider is broken", and they used to be the same sentence.
+      diagnostics.quotaNote = `${stream.rateLimit.status}`
+        + (stream.rateLimit.overageStatus ? `, overage ${stream.rateLimit.overageStatus}` : '')
+        + (stream.rateLimit.overageDisabledReason ? ` (${stream.rateLimit.overageDisabledReason})` : '')
+        + (stream.rateLimit.resetsAtIso ? `, resets at ${stream.rateLimit.resetsAtIso}` : '');
+    }
+  }
+
   return {
     ok: res.outcome === 'COMPLETED' && !infra,
-    role: req.role, structured, text: res.stdout.slice(-4000),
+    role: req.role, structured,
+    // The UNWRAPPED text: what the model actually said.
+    text: stream.text.slice(-4000),
+    // The raw stream survives for diagnostics.
     raw: res.stdout, exitCode: res.exitCode, durationMs: res.durationMs,
     outcome: res.outcome, infrastructureFailure: infra,
-    diagnostics: providerDiagnostics(structured),
+    diagnostics,
+    ...(stream.usage ? { providerUsage: stream.usage } : {}),
+    ...(stream.rateLimit ? { rateLimit: stream.rateLimit } : {}),
     timing: res.timing,
   };
 }

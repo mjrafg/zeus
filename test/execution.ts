@@ -1,0 +1,710 @@
+/**
+ * Mission Mode, stage 3: the execution loop.
+ *
+ * NO REAL PROVIDER IS CALLED HERE. Every model call is the built-in
+ * deterministic fake, and every host interface — git, integration, evaluation,
+ * observation — is a fake whose answers the test dictates. That is not a
+ * limitation of the tests; it is what makes them able to assert about the
+ * loop's REFUSALS, which are the part that matters and the part a real
+ * provider would make unreproducible.
+ */
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { execFileSync } from 'child_process';
+import { check, section } from './harness';
+import { main } from '../src/cli';
+import { EventStore, StoredEvent } from '../src/engine/events';
+import { MissionRegistry } from '../src/mission/registry';
+import { PlanGraph, TaskNode } from '../src/mission/types';
+import { Criterion, Oracle } from '../src/mission/oracle';
+import { requireAcceptedOracle, makeNodeId, normaliseNodes, planAcceptance } from '../src/mission/planner';
+import { validatePlanForOracle, coverageFindings } from '../src/mission/plan';
+import {
+  topoOrder, nextNode, dependentsOf, checkPreconditions, unreachableNow, PreconditionProbe,
+} from '../src/mission/schedule';
+import {
+  missionUsage, checkMissionBudgets, mergeMissionBudgets, verifyEffects, progressFrom,
+  genuineFlips, detectFlips, clampAchievement, mismatchesForVersion, plannedExhausted,
+  EFFECT_MODEL_WRONG_THRESHOLD,
+} from '../src/mission/progress';
+import { runMissionLoop, LoopHost, NodeExecution } from '../src/mission/loop';
+import { selftestLive, SELFTEST_COST_CAP_USD } from '../src/mission/selftest';
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-m3-'));
+let storeSeq = 0;
+const freshRegistry = (): MissionRegistry => new MissionRegistry({
+  events: new EventStore(path.join(TMP, `s${storeSeq += 1}`)), projectId: 'p',
+});
+
+/* -- fixtures -------------------------------------------------------------- */
+
+const criterion = (id: string, over: Partial<Criterion> = {}): Criterion => ({
+  criterionId: id, type: 'EXECUTABLE', statement: `statement for ${id}`,
+  evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' } as any,
+  affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'],
+  ...over,
+});
+
+const oracleOf = (criteria: Criterion[]): Oracle => ({
+  missionId: 'p/M-0001', version: 1, criteria, acceptanceMode: 'AUTO',
+  compiledAt: '2026-01-01T00:00:00.000Z', compilerProviderId: 'mock', criticProviderId: 'mock',
+});
+
+const node = (id: string, over: Partial<TaskNode> = {}): TaskNode => ({
+  nodeId: id, description: `do ${id}`, dependsOn: [], preconditions: [],
+  reads: [], writes: [], affectedCriteria: [], predictedEffects: [],
+  estimatedTier: 'NORMAL', estimatedCost: 1, risk: 'LOW', ...over,
+});
+
+const graphOf = (nodes: TaskNode[], version = 1): PlanGraph => ({ version, nodes });
+
+/** A mission with an accepted oracle and an accepted plan, all through the log. */
+function armed(missions: MissionRegistry, criteria: Criterion[], plan: PlanGraph) {
+  const rec = missions.create('goal', 'base0');
+  const oracle = { ...oracleOf(criteria), missionId: rec.missionId };
+  missions.recordOracle(rec.missionId, oracle, 'hash', { ok: true });
+  missions.acceptOracle(rec.missionId, {
+    acceptanceMode: 'AUTO', acceptedBy: 'auto', modeInputs: {}, modeReasons: [],
+    escalatedByCritic: false,
+  } as any);
+  missions.recordPlan(rec.missionId, plan);
+  missions.acceptPlan(rec.missionId, plan, { acceptedBy: 'auto' });
+  return { missionId: rec.missionId, oracle };
+}
+
+const noProbe: PreconditionProbe = {
+  fileExists: () => true, checkOutcome: () => 'PASSED', criterionState: () => 'PROVEN',
+};
+
+/** A host whose every answer the test dictates. */
+function fakeHost(over: Partial<LoopHost> = {}): LoopHost {
+  let n = 0;
+  return {
+    createTask: () => `p/T-${String(n += 1).padStart(4, '0')}`,
+    runNode: async (taskId): Promise<NodeExecution> =>
+      ({ taskId, state: 'COMPLETED', evidence: [], detail: 'ok' }),
+    integrate: async () => ({ integrated: true, sha: `sha${n}`, touched: ['src/a.ts'], detail: 'clean' }),
+    evaluate: async () => ({ results: [] }),
+    observe: async () => ({ checks: {}, artifacts: {}, facts: {} }),
+    probe: () => noProbe,
+    advanceRatchet: () => {},
+    replan: async () => null,
+    now: () => 1_700_000_000_000,
+    ...over,
+  };
+}
+
+const evs = (missions: MissionRegistry, id: string): StoredEvent[] => missions.events.read(id);
+const typesOf = (missions: MissionRegistry, id: string): string[] => evs(missions, id).map((e) => e.type);
+
+export async function executionSuite(): Promise<void> {
+  section('mission stage 3: planning is gated on an accepted contract');
+  {
+    const missions = freshRegistry();
+    const rec = missions.create('goal', 'base0');
+    const bare = requireAcceptedOracle(missions, rec.missionId);
+
+    const oracle = { ...oracleOf([criterion('p/M-0001/C-0001')]), missionId: rec.missionId };
+    missions.recordOracle(rec.missionId, oracle, 'hash', { ok: true });
+    const compiled = requireAcceptedOracle(missions, rec.missionId);
+
+    missions.acceptOracle(rec.missionId, {
+      acceptanceMode: 'AUTO', acceptedBy: 'auto', modeInputs: {}, modeReasons: [],
+      escalatedByCritic: false,
+    } as any);
+    const accepted = requireAcceptedOracle(missions, rec.missionId);
+
+    check('M3-1: planning is refused before an oracle is compiled',
+      !bare.ok && bare.code === 'ORACLE_NOT_COMPILED', JSON.stringify(bare));
+    check('M3-1b: a COMPILED oracle is still not a licence to plan',
+      !compiled.ok && compiled.code === 'ORACLE_NOT_ACCEPTED', JSON.stringify(compiled));
+    check('M3-1c: an accepted oracle is read back FROM THE LOG',
+      accepted.ok && accepted.required.length === 1
+      && accepted.required[0] === 'p/M-0001/C-0001');
+  }
+
+  section('mission stage 3: the planner names nothing that becomes identity');
+  {
+    // What a model actually returns: its own names, everywhere.
+    const raw = [
+      { nodeId: 'add-parser', description: 'write the parser', dependsOn: [],
+        affectedCriteria: ['parser-works'], writes: ['src/p.ts'] },
+      { nodeId: 'wire-it-up', description: 'call it', dependsOn: ['add-parser'],
+        affectedCriteria: ['parser-works'], writes: ['src/main.ts'] },
+    ];
+    const criteria = [criterion('p/M-0001/C-0001', { slug: 'parser-works' }),
+      criterion('p/M-0001/C-0002', { slug: 'docs-updated' })];
+    const nodes = normaliseNodes('p/M-0001', raw, criteria);
+
+    check('M3-2: node ids are ours, assigned in order',
+      nodes[0].nodeId === makeNodeId('p/M-0001', 1)
+      && nodes[1].nodeId === makeNodeId('p/M-0001', 2), nodes.map((x) => x.nodeId).join(','));
+    check('M3-2b: the model’s name survives as a slug, not as identity',
+      nodes[0].slug === 'add-parser' && nodes[1].slug === 'wire-it-up');
+    check('M3-2c: dependsOn is rewritten to canonical ids',
+      nodes[1].dependsOn.length === 1 && nodes[1].dependsOn[0] === nodes[0].nodeId,
+      nodes[1].dependsOn.join(','));
+    check('M3-2d: affectedCriteria resolve through the criterion slug',
+      nodes[0].affectedCriteria[0] === 'p/M-0001/C-0001', nodes[0].affectedCriteria.join(','));
+
+    const required = criteria.map((c) => c.criterionId);
+    const gaps = coverageFindings(graphOf(nodes), required);
+    const validation = validatePlanForOracle(graphOf(nodes), required);
+    check('M3-2e: a required criterion no node touches is CRITERION_UNCOVERED',
+      gaps.length === 1 && gaps[0].code === 'CRITERION_UNCOVERED'
+      && gaps[0].detail.includes('C-0002'), JSON.stringify(gaps));
+    check('M3-2f: deterministic validation refuses the plan before anyone is asked for an opinion',
+      !validation.ok && validation.findings.some((f) => f.code === 'CRITERION_UNCOVERED'));
+  }
+
+  section('mission stage 3: principle A at the plan layer');
+  {
+    const missions = freshRegistry();
+    const accepted = graphOf([node('p/M-0001/N-0001')]);
+    const { missionId } = armed(missions, [criterion('p/M-0001/C-0001')], accepted);
+
+    // The caller holds a graph object that has one MORE node than the log
+    // ever accepted. This is the tautology the ledger fix was about, moved up
+    // a layer: if the check read this object it could never refuse.
+    const inMemory = graphOf([...accepted.nodes, node('p/M-0001/N-0099')]);
+    const smuggled = inMemory.nodes[1].nodeId;
+
+    const good = missions.spawnNode(missionId, 'p/T-0001', 'p/M-0001/N-0001');
+    const bad = missions.spawnNode(missionId, 'p/T-0002', smuggled);
+
+    check('M3-3: a node the log accepted spawns',
+      good.ok && good.planVersion === 1, JSON.stringify(good));
+    check('M3-3b: a node only the caller’s object contains is refused',
+      !bad.ok && bad.code === 'PLAN_NODE_NOT_ACCEPTED', JSON.stringify(bad));
+    check('M3-3c: the refusal names what IS accepted, so it is actionable',
+      !bad.ok && bad.message.includes('p/M-0001/N-0001'));
+    check('M3-3d: the refused spawn wrote no TASK_SPAWNED',
+      typesOf(missions, missionId).filter((t) => t === 'TASK_SPAWNED').length === 1);
+
+    // And an invalidated plan authorises nothing at all, even a node it named.
+    missions.invalidatePlan(missionId, 'PRECONDITION_DIVERGENCE', null);
+    const after = missions.spawnNode(missionId, 'p/T-0003', 'p/M-0001/N-0001');
+    check('M3-3e: an invalidated plan is not a licence for the nodes it named',
+      !after.ok && after.code === 'PLAN_NOT_ACCEPTED', JSON.stringify(after));
+  }
+
+  section('mission stage 3: the plan critic, and what a critique means');
+  {
+    const contaminated = planAcceptance({
+      ok: false, valid: false, payload: {} as any, findings: [],
+      reconciliation: { consistent: false, unsupportedClaims: [] },
+      criticProviderId: 'mock', infrastructureFailure: null,
+    });
+    const blocking = planAcceptance({
+      ok: true, valid: true, payload: {} as any,
+      findings: [{ code: 'ORDER_IMPOSSIBLE', severity: 'BLOCKING', detail: 'N-2 needs N-3' }],
+      reconciliation: { consistent: true, unsupportedClaims: [] },
+      criticProviderId: 'mock', infrastructureFailure: null,
+    });
+    const advisory = planAcceptance({
+      ok: true, valid: true, payload: {} as any,
+      findings: [{ code: 'RISK_UNDERSTATED', severity: 'ADVISORY', detail: 'N-1 touches the schema' }],
+      reconciliation: { consistent: true, unsupportedClaims: [] },
+      criticProviderId: 'mock', infrastructureFailure: null,
+    });
+    const clean = planAcceptance({
+      ok: true, valid: true, payload: {} as any, findings: [],
+      reconciliation: { consistent: true, unsupportedClaims: [] },
+      criticProviderId: 'mock', infrastructureFailure: null,
+    });
+
+    check('M3-4: a contaminated critique is not a second opinion, so the plan is rejected',
+      contaminated.decision === 'REJECT'
+      && contaminated.reasons[0].includes('contaminated'), JSON.stringify(contaminated));
+    check('M3-4b: a BLOCKING finding rejects the plan outright',
+      blocking.decision === 'REJECT' && blocking.blocking.length === 1);
+    check('M3-4c: a non-blocking finding STOPS rather than flowing',
+      advisory.decision === 'STOP' && advisory.advisory.length === 1);
+    check('M3-4d: only a findings-free critique flows',
+      clean.decision === 'FLOW');
+  }
+
+  section('mission stage 3: serial order, and it is the same order twice');
+  {
+    const g = graphOf([
+      node('p/M-0001/N-0003', { dependsOn: ['p/M-0001/N-0001', 'p/M-0001/N-0002'] }),
+      node('p/M-0001/N-0002', { dependsOn: ['p/M-0001/N-0001'] }),
+      node('p/M-0001/N-0001'),
+      node('p/M-0001/N-0004', { dependsOn: ['p/M-0001/N-0001'] }),
+    ]);
+    const a = topoOrder(g).order;
+    const b = topoOrder({ ...g, nodes: [...g.nodes].reverse() }).order;
+
+    check('M3-5: dependencies come before dependants',
+      a.indexOf('p/M-0001/N-0001') < a.indexOf('p/M-0001/N-0002')
+      && a.indexOf('p/M-0001/N-0002') < a.indexOf('p/M-0001/N-0003'), a.join(','));
+    check('M3-5b: the order does not depend on how the nodes were listed',
+      a.join(',') === b.join(','), `${a.join(',')} vs ${b.join(',')}`);
+    check('M3-5c: ties break on the id, so two runs schedule identically',
+      a.join(',') === ['p/M-0001/N-0001', 'p/M-0001/N-0002',
+        'p/M-0001/N-0003', 'p/M-0001/N-0004'].join(','), a.join(','));
+
+    const state = { done: new Set<string>(), abandoned: new Set<string>() };
+    check('M3-5d: exactly one node is offered at a time',
+      nextNode(g, state)!.nodeId === 'p/M-0001/N-0001');
+    state.abandoned.add('p/M-0001/N-0001');
+    check('M3-5e: nothing behind an abandoned node is offered',
+      nextNode(g, state) === null);
+    check('M3-5f: and the stranded nodes are named rather than left looking alive',
+      unreachableNow(g, state).length === 3, unreachableNow(g, state).join(','));
+
+    const cyclic = graphOf([
+      node('a', { dependsOn: ['b'] }), node('b', { dependsOn: ['a'] }), node('c'),
+    ]);
+    check('M3-5g: a cycle is reported as unordered rather than silently dropped',
+      topoOrder(cyclic).order.join(',') === 'c'
+      && topoOrder(cyclic).unordered.join(',') === 'a,b');
+  }
+
+  section('mission stage 3: preconditions are re-checked against the world');
+  {
+    const n = node('p/M-0001/N-0001', { preconditions: [
+      { kind: 'fileExists', target: 'src/a.ts' },
+      { kind: 'checkFailing', target: 'unitTest' },
+      { kind: 'criterionState', target: 'p/M-0001/C-0001', value: 'PROVEN' },
+    ] });
+
+    const holds = checkPreconditions(n, {
+      fileExists: () => true, checkOutcome: () => 'TEST_FAILED', criterionState: () => 'PROVEN',
+    });
+    const moved = checkPreconditions(n, {
+      fileExists: () => false, checkOutcome: () => 'PASSED', criterionState: () => 'FAILED',
+    });
+    const unknown = checkPreconditions(n, {
+      fileExists: () => true, checkOutcome: () => null, criterionState: () => 'PROVEN',
+    });
+
+    check('M3-6: satisfied preconditions pass', holds.ok, JSON.stringify(holds.failures));
+    check('M3-6b: each divergence is reported separately, not as one blur',
+      !moved.ok && moved.failures.length === 3, JSON.stringify(moved.failures));
+    check('M3-6c: a check nobody ran cannot be said to be failing',
+      !unknown.ok && unknown.failures[0].observed === 'NOT_RUN',
+      JSON.stringify(unknown.failures));
+  }
+
+  section('mission stage 3: divergence invalidates the plan and forces a replan');
+  {
+    const missions = freshRegistry();
+    const plan = graphOf([node('p/M-0001/N-0001', {
+      preconditions: [{ kind: 'fileExists', target: 'src/gone.ts' }],
+      affectedCriteria: ['p/M-0001/C-0001'],
+    })]);
+    const { missionId, oracle } = armed(missions, [criterion('p/M-0001/C-0001')], plan);
+
+    let replanned: string[] = [];
+    const result = await (runMissionLoop(missions, fakeHost({
+      probe: () => ({ fileExists: () => false, checkOutcome: () => 'PASSED', criterionState: () => 'PROVEN' }),
+      replan: async (reason) => { replanned.push(reason); return null; },
+    }), { missionId, oracle }));
+
+    check('M3-7: the plan is invalidated rather than executed against a moved world',
+      typesOf(missions, missionId).includes('PLAN_INVALIDATED'));
+    check('M3-7b: the invalidation names the divergence',
+      evs(missions, missionId).some((e) => e.type === 'PLAN_INVALIDATED'
+        && (e.payload as any).reason === 'PRECONDITION_DIVERGENCE'));
+    check('M3-7c: a replan is attempted, with the reason carried into it',
+      replanned.join(',') === 'PRECONDITION_DIVERGENCE', replanned.join(','));
+    check('M3-7d: nothing was spawned against the stale plan',
+      !typesOf(missions, missionId).includes('TASK_SPAWNED'));
+    check('M3-7e: a mission that cannot replan stops BLOCKED rather than proceeding',
+      result.terminationReason === 'BLOCKED', String(result.terminationReason));
+  }
+
+  section('mission stage 3: the ratchet is paid for with evidence');
+  {
+    const missions = freshRegistry();
+    const plan = graphOf([node('p/M-0001/N-0001', { affectedCriteria: ['p/M-0001/C-0001'] })]);
+    const { missionId, oracle } = armed(missions, [criterion('p/M-0001/C-0001')], plan);
+    const advanced: string[] = [];
+
+    const result = await (runMissionLoop(missions, fakeHost({
+      integrate: async () => ({ integrated: true, sha: 'green1', touched: ['src/a.ts'], detail: 'clean' }),
+      evaluate: async () => ({ results: [{ criterionId: 'p/M-0001/C-0001', outcome: 'PROVEN',
+        evidence: ['check:unitTest'], detail: 'passed' }] }),
+      advanceRatchet: (sha) => advanced.push(sha),
+    }), { missionId, oracle }));
+
+    check('M3-8: a green integration checkpoints',
+      typesOf(missions, missionId).includes('MISSION_CHECKPOINT'));
+    check('M3-8b: and only then does the ratchet move',
+      advanced.join(',') === 'green1', advanced.join(','));
+    check('M3-8c: the ratchet event records the invariants it is guarding',
+      evs(missions, missionId).some((e) => e.type === 'MISSION_CHECKPOINT'
+        && (e.payload as any).invariants.includes('p/M-0001/C-0001')));
+    check('M3-8d: the mission terminates ACHIEVED on proven required criteria',
+      result.achievement === 'ACHIEVED' && result.terminationReason === 'COMPLETED',
+      `${result.achievement}/${result.terminationReason}`);
+  }
+
+  section('mission stage 3: a broken invariant does not ratchet, and is not retried forever');
+  {
+    const missions = freshRegistry();
+    const plan = graphOf([
+      node('p/M-0001/N-0001', { affectedCriteria: ['p/M-0001/C-0001'] }),
+      node('p/M-0001/N-0002', { affectedCriteria: ['p/M-0001/C-0002'], dependsOn: ['p/M-0001/N-0001'] }),
+    ]);
+    const { missionId, oracle } = armed(missions,
+      [criterion('p/M-0001/C-0001'), criterion('p/M-0001/C-0002')], plan);
+
+    const advanced: string[] = [];
+    let cycle = 0;
+    const result = await (runMissionLoop(missions, fakeHost({
+      integrate: async () => ({ integrated: true, sha: `sha${cycle}`, touched: ['src/a.ts'], detail: 'clean' }),
+      evaluate: async () => {
+        cycle += 1;
+        // Cycle 1 proves C-0001. Every later cycle breaks it again.
+        if (cycle === 1) {
+          return { results: [{ criterionId: 'p/M-0001/C-0001', outcome: 'PROVEN' as const,
+            evidence: ['e'], detail: 'passed' }] };
+        }
+        return { results: [{ criterionId: 'p/M-0001/C-0001', outcome: 'FAILED' as const,
+          evidence: ['e'], detail: 'regressed' }] };
+      },
+      advanceRatchet: (sha) => advanced.push(sha),
+    }), { missionId, oracle, maxCycles: 12 }));
+
+    const integrations = evs(missions, missionId)
+      .filter((e) => e.type === 'INTEGRATION_RESULT').map((e) => e.payload as any);
+    const brokenOnes = integrations.filter((p) => p.invariantsBroken.length > 0);
+
+    check('M3-9: an integration that broke a proven criterion is recorded as such',
+      brokenOnes.length >= 1 && brokenOnes[0].invariantsBroken[0] === 'p/M-0001/C-0001',
+      JSON.stringify(brokenOnes.map((p) => p.invariantsBroken)));
+    check('M3-9b: it does not ratchet',
+      advanced.length === 1, advanced.join(','));
+    check('M3-9c: exactly one repair is attempted',
+      brokenOnes.length === 2, `${brokenOnes.length} broken integration(s)`);
+    check('M3-9d: the second failure escalates rather than retrying again',
+      result.refusals.some((r) => r.code === 'INVARIANT_BROKEN_TWICE'),
+      JSON.stringify(result.refusals));
+    check('M3-9e: the escalation is on the log, not only in the return value',
+      evs(missions, missionId).some((e) => e.type === 'MISSION_ESCALATED'
+        && (e.payload as any).kind === 'INVARIANT_BROKEN_TWICE'));
+  }
+
+  section('mission stage 3: predicted effects are checked against observation');
+  {
+    const n = node('p/M-0001/N-0001', { predictedEffects: [
+      { kind: 'expectedCheckTransition', check: 'unitTest', from: 'TEST_FAILED', to: 'PASSED' },
+      { kind: 'expectedArtifact', path: 'src/parser.ts', exists: true },
+      { kind: 'expectedStateFact', fact: 'schemaVersion', value: '3' },
+    ] });
+
+    const asPredicted = verifyEffects(n, {
+      checks: { unitTest: 'PASSED' }, artifacts: { 'src/parser.ts': true }, facts: { schemaVersion: '3' },
+    });
+    const wrong = verifyEffects(n, {
+      checks: { unitTest: 'TEST_FAILED' }, artifacts: { 'src/parser.ts': false }, facts: { schemaVersion: '2' },
+    });
+    const unlooked = verifyEffects(n, { checks: {}, artifacts: {}, facts: {} });
+
+    check('M3-10: effects that happened raise nothing', asPredicted.length === 0);
+    check('M3-10b: every effect that did not happen is reported',
+      wrong.length === 3, JSON.stringify(wrong.map((m) => m.observed)));
+    check('M3-10c: an effect nobody looked for is a mismatch, not a pass',
+      unlooked.length === 3
+      && unlooked[0].evidence[0] === 'check:unitTest:absent'
+      && unlooked[1].observed === 'not looked for'
+      && unlooked[2].observed === 'not probed',
+      JSON.stringify(unlooked.map((m) => m.observed)));
+  }
+
+  section('mission stage 3: a plan whose predictions keep missing is the wrong plan');
+  {
+    const missions = freshRegistry();
+    const plan = graphOf([1, 2, 3, 4].map((i) => node(makeNodeId('p/M-0001', i), {
+      affectedCriteria: ['p/M-0001/C-0001'],
+      predictedEffects: [{ kind: 'expectedArtifact', path: `src/${i}.ts`, exists: true }],
+    })));
+    const { missionId, oracle } = armed(missions, [criterion('p/M-0001/C-0001')], plan);
+    const reasons: string[] = [];
+
+    await (runMissionLoop(missions, fakeHost({
+      // Everything integrates green, and every prediction is wrong.
+      observe: async () => ({ checks: {}, artifacts: {}, facts: {} }),
+      replan: async (reason) => { reasons.push(reason); return null; },
+    }), { missionId, oracle, maxCycles: 10 }));
+
+    check('M3-11: each mismatch is recorded against the plan version',
+      mismatchesForVersion(evs(missions, missionId), 1) === EFFECT_MODEL_WRONG_THRESHOLD,
+      String(mismatchesForVersion(evs(missions, missionId), 1)));
+    check('M3-11b: the third one invalidates the PLAN rather than blaming the node',
+      evs(missions, missionId).some((e) => e.type === 'PLAN_INVALIDATED'
+        && (e.payload as any).reason === 'EFFECT_MODEL_WRONG'));
+    check('M3-11c: and a replan is asked for with that reason',
+      reasons.includes('EFFECT_MODEL_WRONG'), reasons.join(','));
+  }
+
+  section('mission stage 3: progress is earned in two currencies');
+  {
+    const at = (n: number) => new Date(1_700_000_000_000 + n * 1000).toISOString();
+    const ev = (type: string, payload: any, seq: number): StoredEvent =>
+      ({ id: `e${seq}`, taskId: 'p/M-0001', seq, ts: at(seq), type, prev: '', payload });
+
+    // N-1 proves nothing but its dependant IS spawned afterwards: enabling.
+    const enabling = progressFrom([
+      ev('TASK_SPAWNED', { nodeId: 'N-1' }, 1),
+      ev('INTEGRATION_RESULT', { nodeId: 'N-1', provedCriteria: [], dependents: ['N-2'] }, 2),
+      ev('TASK_SPAWNED', { nodeId: 'N-2' }, 3),
+    ]);
+    // Same shape, but the dependant is never spawned: no credit.
+    const claimed = progressFrom([
+      ev('TASK_SPAWNED', { nodeId: 'N-1' }, 1),
+      ev('INTEGRATION_RESULT', { nodeId: 'N-1', provedCriteria: [], dependents: ['N-2'] }, 2),
+    ]);
+    // Three in a row that prove nothing: the cap bites on the third.
+    const capped = progressFrom([
+      ev('TASK_SPAWNED', { nodeId: 'N-1' }, 1), ev('TASK_SPAWNED', { nodeId: 'N-2' }, 2),
+      ev('TASK_SPAWNED', { nodeId: 'N-3' }, 3), ev('TASK_SPAWNED', { nodeId: 'N-4' }, 4),
+      ev('INTEGRATION_RESULT', { nodeId: 'N-1', provedCriteria: [], dependents: ['N-2'] }, 5),
+      ev('INTEGRATION_RESULT', { nodeId: 'N-2', provedCriteria: [], dependents: ['N-3'] }, 6),
+      ev('INTEGRATION_RESULT', { nodeId: 'N-3', provedCriteria: [], dependents: ['N-4'] }, 7),
+    ]);
+
+    check('M3-12: a node that proves nothing earns credit only once a dependant actually runs',
+      enabling.enablingCredits.join(',') === 'N-1', JSON.stringify(enabling.enablingCredits));
+    check('M3-12b: an unblocking CLAIM with no dependent spawn earns nothing',
+      claimed.enablingCredits.length === 0 && claimed.consecutiveNoProgress === 1,
+      JSON.stringify(claimed));
+    check('M3-12c: enabling credit is capped at two in a row',
+      capped.enablingCredits.length === 2 && capped.consecutiveNoProgress === 1,
+      JSON.stringify(capped.history.map((h) => h.currency)));
+  }
+
+  section('mission stage 3: a mission that is going nowhere stops saying so');
+  {
+    const missions = freshRegistry();
+    const plan = graphOf([1, 2, 3, 4, 5].map((i) => node(makeNodeId('p/M-0001', i), {
+      affectedCriteria: ['p/M-0001/C-0001'],
+    })));
+    const { missionId, oracle } = armed(missions, [criterion('p/M-0001/C-0001')], plan);
+    const reasons: string[] = [];
+
+    const result = await (runMissionLoop(missions, fakeHost({
+      evaluate: async () => ({ results: [] }),      // nothing is ever proven
+      replan: async (reason) => { reasons.push(reason); return null; },
+    }), { missionId, oracle, budgets: { maxNoProgressCycles: 3 }, maxCycles: 12 }));
+
+    const progress = evs(missions, missionId).filter((e) => e.type === 'MISSION_PROGRESS');
+    check('M3-13: every cycle records what currency it earned',
+      progress.length >= 3 && (progress[0].payload as any).currency === 'none',
+      String(progress.length));
+    check('M3-13b: three cycles of nothing forces the question rather than a fourth node',
+      reasons.includes('NO_PROGRESS'), reasons.join(','));
+    check('M3-13c: with no replan available the mission stops, and says PARTIAL not ACHIEVED',
+      result.terminated && result.achievement !== 'ACHIEVED',
+      `${result.achievement}/${result.terminationReason}`);
+    check('M3-13d: an unevaluated contract is reported UNEVALUATED, never NONE',
+      result.achievement === 'UNEVALUATED', result.achievement);
+  }
+
+  section('mission stage 3: oscillation is observed, and a flake is not a regression');
+  {
+    const at = (n: number) => new Date(1_700_000_000_000 + n * 1000).toISOString();
+    const ev = (type: string, payload: any, seq: number): StoredEvent =>
+      ({ id: `e${seq}`, taskId: 'p/M-0001', seq, ts: at(seq), type, prev: '', payload });
+
+    const log = [
+      ev('ORACLE_EVALUATED', { results: [{ criterionId: 'C-1', outcome: 'PROVEN' }] }, 1),
+      ev('ORACLE_EVALUATED', { results: [{ criterionId: 'C-1', outcome: 'FAILED' }] }, 2),
+    ];
+    const flips = detectFlips(log);
+    const withFlake = [...log, ev('OSCILLATION_DETECTED',
+      { criterionId: 'C-1', at: at(2), attribution: 'SUSPECTED_FLAKE' }, 3)];
+    const withMiss = [...log, ev('OSCILLATION_DETECTED',
+      { criterionId: 'C-1', at: at(2), attribution: 'VALIDATION_MISS' }, 3)];
+    const inconclusive = [...log, ev('OSCILLATION_DETECTED',
+      { criterionId: 'C-1', at: at(2), attribution: 'INCONCLUSIVE' }, 3)];
+
+    check('M3-14: PROVEN then FAILED is observed as a flip',
+      flips.length === 1 && flips[0].criterionId === 'C-1', JSON.stringify(flips));
+    check('M3-14b: a flip the attribution machinery called a flake is not a genuine flip',
+      genuineFlips(withFlake).length === 0);
+    check('M3-14c: a validation miss stays a genuine flip',
+      genuineFlips(withMiss).length === 1);
+    check('M3-14d: an INCONCLUSIVE attribution stays a genuine flip — the safe direction',
+      genuineFlips(inconclusive).length === 1);
+
+    // And the loop records the observation without diagnosing it.
+    const missions = freshRegistry();
+    // Two nodes: the first proves the criterion, the second regresses it.
+    // That is the only shape in which a flip can reach the loop at all.
+    const plan = graphOf([
+      node('p/M-0001/N-0001', { affectedCriteria: ['p/M-0001/C-0001'] }),
+      node('p/M-0001/N-0002', { affectedCriteria: ['p/M-0001/C-0002'] }),
+    ]);
+    // Two required criteria, so proving the first does not end the mission
+    // before the second node ever runs.
+    const { missionId, oracle } = armed(missions,
+      [criterion('p/M-0001/C-0001'), criterion('p/M-0001/C-0002')], plan);
+    let n = 0;
+    await (runMissionLoop(missions, fakeHost({
+      evaluate: async () => {
+        n += 1;
+        return { results: [{ criterionId: 'p/M-0001/C-0001',
+          outcome: (n === 1 ? 'PROVEN' : 'FAILED') as any, evidence: ['e'], detail: 'd' }] };
+      },
+      replan: async () => null,
+    }), { missionId, oracle, maxCycles: 8 }));
+    const recorded = evs(missions, missionId).filter((e) => e.type === 'OSCILLATION_DETECTED');
+    check('M3-14e: the loop records the flip with an INCONCLUSIVE attribution, not a diagnosis',
+      recorded.length === 1 && (recorded[0].payload as any).attribution === 'INCONCLUSIVE',
+      JSON.stringify(recorded.map((r) => (r.payload as any).attribution)));
+    check('M3-14f: and records it once, not once per cycle it is re-read',
+      recorded.length === 1, String(recorded.length));
+  }
+
+  section('mission stage 3: budgets come from the log, and cost comes from the provider');
+  {
+    const at = (n: number) => new Date(1_700_000_000_000 + n * 1000).toISOString();
+    const ev = (type: string, payload: any, seq: number): StoredEvent =>
+      ({ id: `e${seq}`, taskId: 'p/M-0001', seq, ts: at(seq), type, prev: '', payload });
+
+    const log = [
+      ev('MISSION_CREATED', {}, 1),
+      ev('TASK_SPAWNED', { nodeId: 'N-1', providerUsage: { totalCostUsd: 0.4 } }, 2),
+      ev('TASK_SPAWNED', { nodeId: 'N-2', repair: true, reason: 'failed integration' }, 3),
+      ev('MISSION_REPLAN', { reason: 'PRECONDITION_DIVERGENCE' }, 4),
+      ev('ORACLE_EVALUATED', { providerUsage: { inputTokens: 10 } }, 5),
+    ];
+    const u = missionUsage(log, 1_700_000_010_000);
+
+    check('M3-15: usage is recounted from the log, never from a counter',
+      u.tasksSpawned === 2 && u.repairs === 1 && u.plannedTasks === 1 && u.replans === 1,
+      JSON.stringify(u));
+    check('M3-15b: cost is only what a provider reported',
+      u.costUsd === 0.4, String(u.costUsd));
+    check('M3-15c: a call that reported no cost is unmetered, not free',
+      u.unmeteredCalls === 1, String(u.unmeteredCalls));
+    check('M3-15d: every reserve draw records why it was taken',
+      u.reserveDraws.length === 2
+      && u.reserveDraws.some((d) => d.kind === 'repair' && d.reason === 'failed integration'),
+      JSON.stringify(u.reserveDraws));
+
+    const b = mergeMissionBudgets({ costCeilingUsd: 0.3, maxTasks: 20 });
+    const breach = checkMissionBudgets(b, u);
+    check('M3-15e: the USD ceiling is enforced against provider-reported spend',
+      breach !== null && breach.limit === 'costCeilingUsd', JSON.stringify(breach));
+    check('M3-15f: the breach detail names the unmetered calls rather than hiding them',
+      breach !== null && breach.detail.includes('reported no cost'), breach?.detail ?? '');
+
+    const split = mergeMissionBudgets({ maxTasks: 10, reserveFraction: 0.4 });
+    check('M3-15g: planned work may use 60% of the task budget and no more',
+      !plannedExhausted(split, { ...u, plannedTasks: 5 })
+      && plannedExhausted(split, { ...u, plannedTasks: 6 }));
+
+    const clampDown = clampAchievement('ACHIEVED', 'PARTIAL');
+    const clampUnknown = clampAchievement('PARTIAL', 'UNEVALUATED');
+    const clampHonest = clampAchievement('NONE', 'PARTIAL');
+    check('M3-15h: a caller cannot claim more than the criteria derive',
+      clampDown.achievement === 'PARTIAL' && clampDown.downgraded);
+    check('M3-15i: an unevaluated contract cannot be talked into a verdict',
+      clampUnknown.achievement === 'UNEVALUATED' && clampUnknown.downgraded);
+    check('M3-15j: claiming LESS than the evidence shows is allowed',
+      clampHonest.achievement === 'NONE' && !clampHonest.downgraded);
+  }
+
+  section('mission stage 3: the live preflight refuses, or asks');
+  {
+    const iso = { backends: [], selected: 'systemd-scope', fallbackMode: false,
+      resourceEnforcement: 'cgroup', resourceDetail: 'cgroup v2', enforces: [] } as any;
+    const fallback = { ...iso, fallbackMode: true, selected: 'process-group',
+      resourceEnforcement: 'rlimit', resourceDetail: 'rlimit only' };
+
+    const provider = (over: any) => ({
+      id: 'fake', available: async () => ({ ok: true, detail: 'ok' }),
+      invoke: async () => ({
+        ok: true, role: 'reviewer', structured: { zeus_selftest: 'ok' }, text: '', raw: '',
+        exitCode: 0, durationMs: 1, outcome: 'COMPLETED', infrastructureFailure: null,
+        providerUsage: { totalCostUsd: 0.001 }, ...over,
+      }),
+    }) as any;
+
+    const base = { supervisor: {} as any, policy: {} as any, projectId: 'p', isolation: iso };
+
+    const good = await (selftestLive({ ...base, providers: [provider({})],
+      recordedVersions: { fake: '1.2.3' }, versionOf: () => '1.2.3' }));
+    const unparsed = await (selftestLive({ ...base, providers: [provider({ structured: null })],
+      recordedVersions: { fake: '1.2.3' }, versionOf: () => '1.2.3' }));
+    const drifted = await (selftestLive({ ...base, providers: [provider({})],
+      recordedVersions: { fake: '1.2.3' }, versionOf: () => '1.3.0' }));
+    const unavailable = await (selftestLive({ ...base, providers: [{
+      id: 'fake', available: async () => ({ ok: false, detail: 'not logged in' }), invoke: async () => ({}),
+    } as any] }));
+    const degraded = await (selftestLive({ ...base, isolation: fallback, providers: [provider({})] }));
+
+    check('M3-16: a clean preflight neither refuses nor asks',
+      !good.refused && !good.needsConfirmation, good.detail);
+    check('M3-16b: output the transport cannot unwrap FAILS the run',
+      unparsed.refused && unparsed.lanes.some((l) => l.lane === 'provider-contract'
+        && l.status === 'FAIL'), unparsed.detail);
+    check('M3-16c: a provider CLI that changed under Zeus asks rather than refuses',
+      !drifted.refused && drifted.needsConfirmation
+      && drifted.lanes.some((l) => l.lane === 'cli-version-drift' && l.status === 'DRIFT'),
+      drifted.detail);
+    check('M3-16d: an unavailable provider refuses the run and sends it nothing',
+      unavailable.refused
+      && unavailable.lanes.some((l) => l.lane === 'provider-contract' && l.status === 'SKIPPED'),
+      unavailable.detail);
+    check('M3-16e: quota silence is SKIPPED, not PASS',
+      good.lanes.some((l) => l.lane === 'quota' && l.status === 'SKIPPED'));
+    check('M3-16f: fallback isolation asks before a mission runs unattended',
+      degraded.needsConfirmation
+      && degraded.lanes.some((l) => l.lane === 'isolation-live' && l.status === 'DRIFT'));
+    check('M3-16g: the preflight cost is provider-reported and inside its cap',
+      good.costUsd !== null && good.costUsd <= SELFTEST_COST_CAP_USD, String(good.costUsd));
+  }
+  section('mission stage 3: the CLI refuses in the right order');
+  {
+    const root = path.join(TMP, 'cli-demo');
+    fs.mkdirSync(root, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    fs.writeFileSync(path.join(root, 'package.json'),
+      '{"name":"clidemo","scripts":{"test":"node -e 0"}}\n');
+    fs.writeFileSync(path.join(root, 'README.md'), '# demo\n');
+    execFileSync('git', ['-C', root, 'add', '-A']);
+    execFileSync('git', ['-C', root, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']);
+
+    const cwd = process.cwd();
+    process.chdir(root);
+    let planBeforeOracle = 0, runBeforePlan = 0, planned = 0, reported = 0, selftestNoLive = 0;
+    let accepted: string[] = [];
+    try {
+      await main(['init']);
+      await main(['mission', 'create', 'make the unit tests pass']);
+      // Planning before there is a contract, and running before there is a
+      // plan: both refused, and refused for the right reason.
+      planBeforeOracle = await main(['mission', 'plan', 'M-0001', '--mock']);
+      await main(['mission', 'compile', 'M-0001', '--mock']);
+      runBeforePlan = await main(['mission', 'run', 'M-0001', '--mock']);
+      planned = await main(['mission', 'plan', 'M-0001', '--mock']);
+      reported = await main(['mission', 'report', 'M-0001', '--json']);
+      selftestNoLive = await main(['mission', 'selftest']);
+
+      // The project id comes from the directory, not from package.json, so
+      // the mission is found rather than assumed.
+      const store = new EventStore(path.join(root, '.zeus', 'state'));
+      const found = store.listTasks().find((t) => /\/M-\d+$/.test(t));
+      accepted = found ? store.read(found).map((e) => e.type) : ['(no mission log found)'];
+    } finally { process.chdir(cwd); }
+
+    check('M3-17: zeus mission plan is refused before an oracle exists',
+      planBeforeOracle === 1, String(planBeforeOracle));
+    check('M3-17b: zeus mission run is refused before a plan is ACCEPTED',
+      runBeforePlan === 1, String(runBeforePlan));
+    check('M3-17c: planning an accepted contract succeeds and records PLAN_ACCEPTED',
+      planned === 0 && accepted.includes('PLAN_ACCEPTED'), `${planned} / ${accepted.join(',')}`);
+    check('M3-17d: the critique is recorded whether or not it found anything',
+      accepted.includes('PLAN_CRITIQUED'));
+    check('M3-17e: zeus mission report reads back from the log',
+      reported === 0, String(reported));
+    check('M3-17f: zeus mission selftest without --live is a usage error, not a silent no-op',
+      selftestNoLive === 2, String(selftestNoLive));
+  }
+}

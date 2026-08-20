@@ -23,10 +23,17 @@ import { ProcessSupervisor } from './engine/exec';
 import { defaultPolicy } from './engine/policy';
 import { readOnlyGit } from './engine/gitro';
 import { MissionRegistry } from './mission/registry';
-import { ScopeMismatchError, localLabel as missionLabel } from './mission/types';
+import { PlanGraph, ScopeMismatchError, localLabel as missionLabel } from './mission/types';
 import { reconstructRatchet, ratchetRef, readRatchet } from './mission/ratchet';
 import { compileOracle, critiqueOracle, proposeAcceptance } from './mission/compile';
 import { evaluateCriteria, acceptedCommands } from './mission/evaluate';
+import {
+  requireAcceptedOracle, planMission, critiquePlan, planAcceptance,
+} from './mission/planner';
+import { runMissionLoop } from './mission/loop';
+import { missionHost, ledgerFrom } from './mission/host';
+import { missionUsage, progressFrom } from './mission/progress';
+import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
   CriticFindingRef, findingFamily,
@@ -94,6 +101,10 @@ ${C.b}Usage${C.x}
   zeus mission confirm <id>                   accept an oracle, with any findings on the record
   zeus mission recompile <id> [--mock]        send the critique back to the compiler and retry
   zeus mission evaluate <id> [--full]         prove the criteria; --criteria a,b for a subset
+  zeus mission plan <id> [--mock] [--yes]     plan the accepted contract, critique it, accept it
+  zeus mission selftest --live                real provider contact before anything is spent
+  zeus mission run <id> [--mock] [--yes]      execute the accepted plan, one node at a time
+  zeus mission report <id> [--json]           the full account, derived from the log
         [--criteria a,b] [--mock] [--json]
   zeus version
   zeus help
@@ -1240,10 +1251,330 @@ async function cmdMission(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'plan': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission plan <id> [--mock] [--yes]'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      if (rec.terminated) { err(`${id} is terminated`); return 1; }
+
+      // The contract has to be ACCEPTED, and the gate reads the log.
+      const gate = requireAcceptedOracle(missions, id);
+      if (!gate.ok) { err(`${C.r}✗${C.x} ${gate.message}`); return 1; }
+
+      const mock = rest.includes('--mock');
+      const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
+      const context = projectContextFor(ctx.root, ctx.cfg);
+      const policy = defaultPolicy(ctx.root, ctx.root);
+      const version = (rec.planVersion ?? 0) + 1;
+
+      const planned = await planMission({
+        missionId: id, projectId: eng.projectId, goal: rec.goal, criteria: gate.criteria,
+        context, provider: eng.opts.providers.planner, supervisor: eng.opts.supervisor,
+        policy, baseSha: rec.ratchetSha ?? rec.baseSha,
+      });
+      if (planned.infrastructureFailure) {
+        err(`${C.r}✗${C.x} planner unavailable: ${planned.infrastructureFailure}`);
+        return 1;
+      }
+      const graph: PlanGraph = { version, nodes: planned.graph.nodes };
+      if (!planned.validation.valid) {
+        missions.recordPlanRejected(id, {
+          version, findings: planned.validation.findings, retryable: true,
+          note: 'the deterministic validator refused the plan; the mission is unchanged',
+        });
+        err(`${C.r}✗${C.x} the plan did not validate — nothing was accepted`);
+        for (const f of planned.validation.findings) {
+          err(`  ${C.y}${f.code}${C.x} ${f.nodeId ?? ''} ${f.detail}`);
+        }
+        return 1;
+      }
+      missions.recordPlan(id, graph);
+
+      const critique = await critiquePlan({
+        missionId: id, projectId: eng.projectId, goal: rec.goal, criteria: gate.criteria,
+        graph, validation: planned.validation, context,
+        provider: eng.opts.providers.reviewer, supervisor: eng.opts.supervisor,
+        policy, baseSha: rec.ratchetSha ?? rec.baseSha,
+      });
+      const acceptance = planAcceptance(critique);
+      missions.recordPlanCritique(id, {
+        version, findings: critique.findings, acceptance: acceptance.decision,
+        contaminated: !critique.valid,
+        contaminationDetail: critique.valid ? null : 'the critique payload was contaminated',
+      });
+
+      if (json) {
+        out(JSON.stringify({ version, graph, findings: critique.findings, acceptance }, null, 1));
+        if (acceptance.decision === 'FLOW') missions.acceptPlan(id, graph, { acceptedBy: 'auto' });
+        return acceptance.decision === 'REJECT' ? 1 : 0;
+      }
+
+      out(`${C.b}${id}${C.x} plan v${version} ${C.dim}(${graph.nodes.length} node(s))${C.x}`);
+      for (const n of graph.nodes) {
+        out(`  ${missionLabel(n.nodeId).padEnd(8)} ${(n.slug ?? '').padEnd(20).slice(0, 20)} `
+          + `${C.dim}${n.description.slice(0, 50)}${C.x}`);
+        if (n.dependsOn.length) out(`           ${C.dim}after ${n.dependsOn.map(missionLabel).join(', ')}${C.x}`);
+      }
+      renderPlanFindings(critique.findings);
+
+      if (acceptance.decision === 'REJECT') {
+        err(`${C.r}✗${C.x} ${acceptance.reasons.join('; ')}`);
+        err(`  ${C.dim}plan v${version} is recorded but NOT accepted; nothing may be spawned against it${C.x}`);
+        return 1;
+      }
+      if (acceptance.decision === 'STOP') {
+        // A findings-bearing plan needs a person. A --yes supplied before the
+        // findings existed cannot answer them, so it is refused here rather
+        // than honoured as consent.
+        if (!process.stdin.isTTY) {
+          err(`${C.r}✗${C.x} ${acceptance.advisory.length} finding(s) need a decision and this is not a terminal`);
+          err(`  ${C.dim}run it interactively, or read the findings and re-run once they are addressed${C.x}`);
+          return 1;
+        }
+        if (!rest.includes('--yes')) {
+          err(`${C.y}!${C.x} ${acceptance.reasons.join('; ')}`);
+          err(`  ${C.dim}re-run with --yes to accept the plan with those findings on the record${C.x}`);
+          return 1;
+        }
+        missions.acceptPlan(id, graph, {
+          acceptedBy: 'user-confirmed',
+          acceptedDespite: acceptance.advisory.map((f) => `${f.code}: ${f.detail}`),
+        });
+        out(`${C.g}✓${C.x} plan v${version} accepted with ${acceptance.advisory.length} finding(s) on the record`);
+        return 0;
+      }
+      missions.acceptPlan(id, graph, { acceptedBy: 'auto' });
+      out(`${C.g}✓${C.x} plan v${version} accepted ${C.dim}(the critique raised nothing)${C.x}`);
+      return 0;
+    }
+
+    case 'selftest': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      const live = rest.includes('--live');
+      if (!live) { err('usage: zeus mission selftest --live'); return 2; }
+      const report = await runLiveSelftest(ctx, engine, rest.includes('--mock'));
+      if (json) { out(JSON.stringify(report, null, 1)); return report.refused ? 1 : 0; }
+      renderSelftest(report);
+      if (raw) {
+        const id = resolve(raw);
+        if (missions.mission(id)) {
+          missions.events.append({ taskId: id, type: 'SELFTEST_LIVE', payload: { ...report } as any });
+        }
+      }
+      return report.refused ? 1 : 0;
+    }
+
+    case 'run': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission run <id> [--mock] [--yes]'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      if (rec.terminated) { err(`${id} is terminated (${rec.terminationReason})`); return 1; }
+
+      const gate = requireAcceptedOracle(missions, id);
+      if (!gate.ok) { err(`${C.r}✗${C.x} ${gate.message}`); return 1; }
+      if (!rec.acceptedPlan) {
+        err(`${C.r}✗${C.x} ${id} has no ACCEPTED plan in its log`);
+        err(`  ${C.dim}zeus mission plan ${missionLabel(id)} first — a recorded plan is a proposal, not a mandate${C.x}`);
+        return 1;
+      }
+
+      const mock = rest.includes('--mock');
+      const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
+
+      // The preflight runs BEFORE anything is spent. --mock skips it, and says
+      // so: a mocked run has nothing to preflight, and silently passing a lane
+      // that never ran would be the worst of both.
+      if (mock) {
+        out(`${C.dim}--mock: the live preflight was skipped, and no real provider will be called${C.x}`);
+      } else {
+        const pre = await runLiveSelftest(ctx, eng, false);
+        missions.events.append({ taskId: id, type: 'SELFTEST_LIVE', payload: { ...pre } as any });
+        renderSelftest(pre);
+        if (pre.refused) { err(`${C.r}✗${C.x} the mission will not start: ${pre.detail}`); return 1; }
+        if (pre.needsConfirmation) {
+          if (!process.stdin.isTTY) {
+            err(`${C.r}✗${C.x} ${pre.detail}, and this is not a terminal`);
+            return 1;
+          }
+          if (!rest.includes('--yes')) {
+            err(`${C.y}!${C.x} ${pre.detail}`);
+            err(`  ${C.dim}re-run with --yes to proceed with that on the record${C.x}`);
+            return 1;
+          }
+        }
+      }
+
+      const oracle = gate.oracle;
+      const host = missionHost({
+        engine: eng, missionId: id, projectRoot: ctx.root, oracle,
+        ledger: ledgerFrom(oracle), supervisor: eng.opts.supervisor,
+        judge: eng.opts.providers.reviewer,
+        onEvent: (line) => { if (!json) out(`  ${C.dim}${line}${C.x}`); },
+      });
+
+      const result = await runMissionLoop(missions, host, { missionId: id, oracle });
+      if (json) { out(JSON.stringify(result, null, 1)); return result.achievement === 'ACHIEVED' ? 0 : 1; }
+      out('');
+      out(`${C.b}${id}${C.x} ${result.achievement} / ${result.terminationReason}`);
+      out(`  ${result.detail}`);
+      out(`  ${C.dim}${result.cycles} cycle(s)${C.x}`);
+      for (const r of result.refusals) out(`  ${C.y}${r.code}${C.x} ${r.detail}`);
+      out(`  ${C.dim}zeus mission report ${missionLabel(id)} for the full account${C.x}`);
+      return result.achievement === 'ACHIEVED' ? 0 : 1;
+    }
+
+    case 'report': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission report <id> [--json]'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+
+      const log = missions.events.read(id);
+      const usage = missionUsage(log);
+      const score = progressFrom(log);
+      const integrations = log.filter((e) => e.type === 'INTEGRATION_RESULT').map((e) => e.payload as any);
+      const mismatches = log.filter((e) => e.type === 'EFFECT_MISMATCH').map((e) => e.payload as any);
+      const flips = log.filter((e) => e.type === 'OSCILLATION_DETECTED').map((e) => e.payload as any);
+      const replans = log.filter((e) => e.type === 'MISSION_REPLAN').map((e) => e.payload as any);
+      const escalations = log.filter((e) => e.type === 'MISSION_ESCALATED').map((e) => e.payload as any);
+      const o = rec.oracle as Oracle | null;
+
+      if (json) {
+        out(JSON.stringify({ mission: rec, usage, score, integrations, mismatches,
+          flips, replans, escalations }, null, 1));
+        return 0;
+      }
+
+      out(`${C.b}${rec.missionId}${C.x} ${rec.terminated
+        ? `${rec.achievement} / ${rec.terminationReason}` : `${C.y}ACTIVE${C.x}`}`);
+      out(`  goal            ${rec.goal}`);
+      // An invalidated plan keeps its version — that is history — but loses
+      // its mandate. Printing "v1 accepted (0 nodes)" would read as an empty
+      // plan rather than a revoked one.
+      const planLine = rec.acceptedPlanVersion === null ? `${C.dim}none accepted${C.x}`
+        : rec.acceptedPlan
+          ? `v${rec.acceptedPlanVersion} accepted (${rec.acceptedPlan.nodes.length} node(s))`
+          : `${C.y}v${rec.acceptedPlanVersion} invalidated${C.x} ${C.dim}— nothing may be spawned${C.x}`;
+      out(`  plan            ${planLine}`
+        + `  ${C.dim}${rec.planRejections} rejected, ${rec.planCritiques} critiqued${C.x}`);
+
+      if (o) {
+        const required = o.criteria.filter((c) => c.required);
+        const proven = required.filter((c) => rec.criterionOutcomes[c.criterionId] === 'PROVEN');
+        out(`  criteria        ${proven.length}/${required.length} required proven`);
+        for (const c of o.criteria) {
+          const outcome = rec.criterionOutcomes[c.criterionId] ?? 'UNEVALUATED';
+          const colour = outcome === 'PROVEN' ? C.g : outcome === 'FAILED' ? C.r : C.y;
+          out(`    ${missionLabel(c.criterionId).padEnd(8)} ${colour}${outcome.padEnd(12)}${C.x} `
+            + `${C.dim}${c.statement.slice(0, 52)}${C.x}`);
+        }
+      }
+
+      out(`  integrations    ${integrations.length}`);
+      for (const i of integrations) {
+        const mark = i.integrated && !i.invariantsBroken.length ? `${C.g}✓${C.x}` : `${C.r}✗${C.x}`;
+        out(`    ${mark} ${missionLabel(i.nodeId).padEnd(8)} ${String(i.reason).slice(0, 58)}`);
+      }
+      out(`  progress        ${score.provenRequired} proven, `
+        + `${score.enablingCredits.length} enabling credit(s), `
+        + `${score.consecutiveNoProgress} cycle(s) of nothing`);
+      if (mismatches.length) {
+        out(`  effect misses   ${mismatches.length}  ${C.dim}predicted vs observed${C.x}`);
+        for (const m of mismatches) {
+          for (const x of m.mismatches ?? []) {
+            out(`    ${C.y}${missionLabel(m.nodeId)}${C.x} predicted ${JSON.stringify(x.predicted)}, `
+              + `observed ${x.observed}`);
+          }
+        }
+      }
+      if (flips.length) {
+        out(`  oscillation     ${flips.length}`);
+        for (const f of flips) out(`    ${missionLabel(f.criterionId)} ${f.attribution}`);
+      }
+      if (replans.length) {
+        out(`  replans         ${replans.length}`);
+        for (const r of replans) out(`    ${C.y}${r.reason}${C.x} ${String(r.detail).slice(0, 60)}`);
+      }
+      if (escalations.length) {
+        out(`  escalations     ${escalations.length}`);
+        for (const e of escalations) out(`    ${C.y}${e.kind ?? 'escalated'}${C.x} ${String(e.detail ?? '').slice(0, 58)}`);
+      }
+      out(`  budget          ${usage.tasksSpawned} task(s) (${usage.repairs} repair), `
+        + `${usage.replans} replan(s), ${Math.round(usage.elapsedSeconds / 60)} min`);
+      out(`  cost            ${usage.costUsd > 0 ? `$${usage.costUsd.toFixed(4)} provider-reported` : `${C.dim}nothing reported${C.x}`}`
+        + (usage.unmeteredCalls ? `  ${C.y}${usage.unmeteredCalls} call(s) reported no cost${C.x}` : ''));
+      out(`  ratchet         ${rec.ratchetSha ? rec.ratchetSha.slice(0, 12) : `${C.dim}never advanced${C.x}`}`);
+      return 0;
+    }
+
     default:
-      err('usage: zeus mission <create|status|list|compile|confirm|recompile|evaluate|cancel|reconstruct-ratchet>');
+      err('usage: zeus mission <create|status|list|compile|confirm|plan|run|report|'
+        + 'recompile|evaluate|selftest|cancel|reconstruct-ratchet>');
       return 2;
   }
+}
+
+
+/** Renders plan-critic findings the way the oracle's are rendered. */
+function renderPlanFindings(findings: Array<{ code: string; severity: string; nodeId?: string; detail: string }>): void {
+  if (!findings.length) { out(`  ${C.dim}the independent critique raised nothing${C.x}`); return; }
+  out(`  ${C.y}${findings.length} finding(s)${C.x} ${C.dim}from the plan critic${C.x}`);
+  for (const f of findings) {
+    const colour = f.severity === 'BLOCKING' ? C.r : C.y;
+    out(`    ${colour}${f.severity.padEnd(9)}${C.x} ${(f.nodeId ? missionLabel(f.nodeId) : '—').padEnd(8)} `
+      + `${f.code} ${C.dim}${f.detail.slice(0, 50)}${C.x}`);
+  }
+}
+
+function renderSelftest(r: SelftestReport): void {
+  out(`${C.b}zeus selftest --live${C.x}`);
+  for (const l of r.lanes) {
+    const colour = l.status === 'PASS' ? C.g : l.status === 'FAIL' ? C.r
+      : l.status === 'DRIFT' ? C.y : C.dim;
+    out(`  ${colour}${l.status.padEnd(8)}${C.x} ${l.lane.padEnd(20)} ${C.dim}${l.detail.slice(0, 56)}${C.x}`);
+  }
+  out(`  ${C.dim}cost ${r.costUsd === null ? 'nothing reported' : `$${r.costUsd.toFixed(4)}`}`
+    + `${r.unmeteredCalls ? `, ${r.unmeteredCalls} call(s) reported none` : ''}${C.x}`);
+}
+
+/**
+ * The live preflight, with this project's providers.
+ *
+ * `--mock` is honoured but says so loudly at the call site: a preflight whose
+ * providers are fakes proves that Zeus can talk to fakes.
+ */
+async function runLiveSelftest(ctx: { root: string; cfg: ProjectConfig }, engine: Engine,
+  mock: boolean): Promise<SelftestReport> {
+  const providers = mock
+    ? [engine.opts.providers.reviewer]
+    : [...new Map([engine.opts.providers.planner, engine.opts.providers.implementer,
+      engine.opts.providers.reviewer].map((p) => [p.id, p])).values()];
+  const recordedVersions = (ctx.cfg as any).providers?.versions as Record<string, string> | undefined;
+  return selftestLive({
+    providers, supervisor: engine.opts.supervisor,
+    policy: defaultPolicy(ctx.root, ctx.root), projectId: engine.projectId,
+    isolation: isolationReport(),
+    recordedVersions,
+    versionOf: recordedVersions ? (id) => providerCliVersion(id) : undefined,
+  });
+}
+
+/** Reads a provider CLI's version, or null when it cannot be asked. */
+function providerCliVersion(providerId: string): string | null {
+  const bin = providerId === 'claude' ? 'claude' : providerId === 'codex' ? 'codex' : providerId;
+  try {
+    return require('child_process')
+      .execFileSync(bin, ['--version'], { encoding: 'utf8', timeout: 20_000,
+        stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\n')[0];
+  } catch { return null; }
 }
 
 function cmdSelfCheck(argv: string[]): number {

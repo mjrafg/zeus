@@ -21,7 +21,8 @@ export type PlanFindingCode =
   | 'CYCLE'
   | 'SCHEMA_INVALID'
   | 'UNREACHABLE_NODE'
-  | 'UNDECLARED_INTERFERENCE';
+  | 'UNDECLARED_INTERFERENCE'
+  | 'CRITERION_UNCOVERED';
 
 export interface PlanFinding {
   code: PlanFindingCode;
@@ -192,6 +193,42 @@ function ordered(nodes: Map<string, TaskNode>, a: string, b: string): boolean {
     return false;
   };
   return dependsPath(a, b) || dependsPath(b, a);
+}
+
+/**
+ * Every required criterion must be somebody's job.
+ *
+ * A plan that leaves a required criterion untouched cannot achieve the
+ * mission, and no amount of critique will notice it as reliably as counting
+ * will. Deterministic, and it runs BEFORE the critic — there is no point
+ * asking a model's opinion of a plan that provably cannot succeed.
+ */
+export function coverageFindings(graph: PlanGraph,
+  requiredCriteria: string[]): PlanFinding[] {
+  const covered = new Set<string>();
+  for (const n of graph?.nodes ?? []) {
+    for (const c of n?.affectedCriteria ?? []) covered.add(c);
+  }
+  return requiredCriteria
+    .filter((c) => !covered.has(c))
+    .map((criterionId) => ({
+      code: 'CRITERION_UNCOVERED' as const, severity: 'error' as const,
+      detail: `no node claims to affect "${criterionId}", so this plan cannot prove it`,
+      nodeId: undefined, otherNodeId: criterionId,
+    }));
+}
+
+/**
+ * The full deterministic gate for a plan compiled against an oracle.
+ *
+ * Structure first, then coverage. Both are facts about the plan, so both are
+ * answered before anyone is asked for an opinion about it.
+ */
+export function validatePlanForOracle(graph: PlanGraph, requiredCriteria: string[]): PlanValidation {
+  const base = validatePlan(graph);
+  const coverage = coverageFindings(graph, requiredCriteria);
+  const findings = [...base.findings, ...coverage];
+  return { ...base, findings, valid: !findings.some((f) => f.severity === 'error') };
 }
 
 export function validatePlan(graph: PlanGraph): PlanValidation {

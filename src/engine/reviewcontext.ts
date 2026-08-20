@@ -25,6 +25,7 @@ export type ReviewInputKind =
   // to be possible.
   | 'mission-goal' | 'compiled-criteria' | 'project-commands' | 'evidence-summary'
   | 'criterion-rubric' | 'judged-artifact'
+  | 'accepted-criteria' | 'task-plan' | 'validator-findings' | 'planner-transcript'
   | 'compiler-transcript' | 'compiler-reasoning' | 'critic-verdict' | 'judge-verdict';
 
 /** What a reviewer may see, and what it must never see. */
@@ -71,6 +72,27 @@ export const ORACLE_JUDGE_POLICY: ReviewContextPolicy = {
     'compiler-reasoning', 'critic-verdict', 'judge-verdict',
     'planner-reasoning', 'planner-plan', 'previous-review', 'adjudication',
     'acceptance-verdict', 'area-context',
+  ],
+  allowAreaContext: false,
+};
+
+/**
+ * What the PLAN CRITIC may see.
+ *
+ * The goal, the contract, the plan, what the project can run, the evidence, and
+ * the deterministic validator's findings — including the interference data,
+ * which is a fact about the plan rather than an opinion about it. Not the
+ * planner's reasoning, and not a previous critique: the planner seeing findings
+ * is the fix loop, a critic seeing its past self is contamination.
+ */
+export const PLAN_CRITIQUE_POLICY: ReviewContextPolicy = {
+  allowed: ['mission-goal', 'accepted-criteria', 'task-plan', 'project-commands',
+    'evidence-summary', 'validator-findings'],
+  forbidden: [
+    'planner-transcript', 'planner-reasoning', 'planner-plan', 'critic-verdict',
+    'compiler-transcript', 'compiler-reasoning', 'judge-verdict',
+    'implementer-transcript', 'implementer-rationale', 'previous-review',
+    'adjudication', 'acceptance-verdict', 'area-context',
   ],
   allowAreaContext: false,
 };
@@ -148,6 +170,7 @@ const LEAK_PATTERNS: Array<{ kind: ReviewInputKind; re: RegExp; what: string }> 
   { kind: 'compiler-reasoning', re: /COMPILER REASONING|I chose these criteria|why I compiled/i, what: 'the compiler reasoning' },
   { kind: 'critic-verdict', re: /CRITIC VERDICT|the critic (found|said)|"modeOpinion"\s*:/i, what: 'a critic verdict' },
   { kind: 'judge-verdict', re: /JUDGE VERDICT|previously judged (as )?satisfied|"satisfied"\s*:/i, what: 'a prior judge verdict' },
+  { kind: 'planner-transcript', re: /PLANNER TRANSCRIPT|"role"\s*:\s*"planner"/i, what: 'the planner transcript' },
 ];
 
 /**

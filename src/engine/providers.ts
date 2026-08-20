@@ -322,6 +322,27 @@ function defaultMockReply(req: AgentRequest): unknown {
       derivedFrom: failing.includes(name) ? [name] : [],
     })) };
   }
+  if (/^Plan the work that will satisfy this mission contract/.test(p)) {
+    // One node per required criterion, each covering exactly that criterion.
+    // Enough for the coverage rule to be satisfiable and for the scheduler to
+    // have real edges, without pretending to be a planner.
+    const criteria = (() => {
+      const m = /--- accepted criteria ---\n([\s\S]*?)\n--- /.exec(p);
+      try { return m ? JSON.parse(m[1]) as Array<any> : []; } catch { return []; }
+    })();
+    const required = criteria.filter((c) => c?.required);
+    return { nodes: required.map((c, i) => ({
+      nodeId: `node-${i + 1}`,
+      description: `satisfy ${c.statement ?? c.criterionId}`,
+      dependsOn: i === 0 ? [] : [`node-${i}`],
+      preconditions: [], reads: ['src/**'], writes: ['src/**'],
+      affectedCriteria: [c.criterionId],
+      predictedEffects: [], estimatedTier: 'FAST', estimatedCost: 1, risk: 'LOW',
+    })) };
+  }
+  if (/^Review this plan INDEPENDENTLY/.test(p)) {
+    return { findings: [], usedContext: ['mission-goal', 'accepted-criteria', 'task-plan'] };
+  }
   if (/reviewing a compiled mission contract/.test(p)) {
     return { findings: [], modeOpinion: null, usedContext: ['mission-goal', 'compiled-criteria'] };
   }

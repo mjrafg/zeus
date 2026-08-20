@@ -15,7 +15,7 @@
 import { EventStore, StoredEvent } from '../engine/events';
 import { killRecorded } from '../engine/exec';
 import {
-  Achievement, MissionCheckpoint, MissionRecord, PlanGraph, SpawnedTask,
+  Achievement, MissionCheckpoint, MissionRecord, PlanGraph, SpawnedTask, TaskNode,
   TerminationReason, makeMissionId, requireScope,
 } from './types';
 import { AcceptanceMode, CriterionOutcome, Evaluator, Oracle } from './oracle';
@@ -50,6 +50,11 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
     planVersion: null,
     plan: null,
     planInvalidations: [],
+    acceptedPlanVersion: null,
+    acceptedPlan: null,
+    planRejections: 0,
+    planCritiques: 0,
+    replans: 0,
     spawned: [],
     checkpoints: [],
     ratchetSha: null,
@@ -85,11 +90,28 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
         if (plan && Array.isArray((plan as PlanGraph).nodes)) rec.plan = plan as PlanGraph;
         break;
       }
+      case 'PLAN_ACCEPTED': {
+        const version = num(p.version);
+        const plan = p.plan as PlanGraph | undefined;
+        if (version !== null && plan && Array.isArray((plan as PlanGraph).nodes)) {
+          rec.acceptedPlanVersion = version;
+          rec.acceptedPlan = plan as PlanGraph;
+        }
+        break;
+      }
+      case 'PLAN_REJECTED': { rec.planRejections += 1; break; }
+      case 'PLAN_CRITIQUED': { rec.planCritiques += 1; break; }
+      case 'MISSION_REPLAN': { rec.replans += 1; break; }
       case 'PLAN_INVALIDATED': {
         rec.planInvalidations.push({ reason: str(p.reason, 'unstated'), supersededBy: num(p.supersededBy) });
         // The plan is gone until a new one is recorded; the version is not,
         // because "which version was invalidated" is part of the history.
         rec.plan = null;
+        // The MANDATE goes with it. An invalidated plan authorises nothing,
+        // so every later spawn is refused until a new plan is accepted —
+        // which is what stops execution running on a plan the world has
+        // already diverged from.
+        rec.acceptedPlan = null;
         break;
       }
       case 'TASK_SPAWNED': {
@@ -474,4 +496,157 @@ export class MissionRegistry {
     });
     return { cancelled: true, killed, tasks };
   }
+
+  /* ---- stage 3: the execution loop -------------------------------------- */
+
+  /** A plan the deterministic validator refused. Retryable, and recorded. */
+  recordPlanRejected(missionId: string, spec: {
+    version: number; findings: unknown[]; retryable: boolean; note?: string;
+  }): void {
+    this.append(missionId, 'PLAN_REJECTED', {
+      version: spec.version, findings: spec.findings,
+      retryable: spec.retryable, note: spec.note ?? null,
+    });
+  }
+
+  /** What the plan critic said, whether or not anyone acted on it. */
+  recordPlanCritique(missionId: string, spec: {
+    version: number; findings: unknown[]; acceptance: string;
+    contaminated: boolean; contaminationDetail?: string | null;
+  }): void {
+    this.append(missionId, 'PLAN_CRITIQUED', {
+      version: spec.version, findings: spec.findings, acceptance: spec.acceptance,
+      contaminated: spec.contaminated, contaminationDetail: spec.contaminationDetail ?? null,
+    });
+  }
+
+  /**
+   * Grants a plan the mandate `spawnNode` reads.
+   *
+   * Deliberately separate from `recordPlan`: recording a plan says one exists,
+   * accepting it says execution may act on it. Collapsing the two would make
+   * every proposal self-authorising.
+   */
+  acceptPlan(missionId: string, plan: PlanGraph, spec: {
+    acceptedBy: string; acceptedDespite?: string[];
+  }): void {
+    this.append(missionId, 'PLAN_ACCEPTED', {
+      version: plan.version, plan, nodes: plan.nodes.length,
+      acceptedBy: spec.acceptedBy, acceptedDespite: spec.acceptedDespite ?? [],
+    });
+  }
+
+  recordReplan(missionId: string, spec: {
+    reason: string; detail: string; fromVersion: number | null;
+  }): void {
+    this.append(missionId, 'MISSION_REPLAN', {
+      reason: spec.reason, detail: spec.detail, fromVersion: spec.fromVersion,
+    });
+  }
+
+  /**
+   * What integrating one node actually did.
+   *
+   * `dependents` is recorded here rather than looked up later because
+   * enabling credit is settled against the plan that was live AT THE TIME:
+   * a later replan must not retroactively grant or revoke credit.
+   */
+  recordIntegration(missionId: string, spec: {
+    nodeId: string; taskId: string; planVersion: number; integrated: boolean;
+    sha: string | null; provedCriteria: string[]; dependents: string[];
+    invariantsBroken: string[]; reason: string;
+  }): void {
+    this.append(missionId, 'INTEGRATION_RESULT', { ...spec });
+  }
+
+  recordEffectMismatch(missionId: string, spec: {
+    nodeId: string; planVersion: number; mismatches: unknown[];
+  }): void {
+    this.append(missionId, 'EFFECT_MISMATCH', {
+      nodeId: spec.nodeId, planVersion: spec.planVersion,
+      mismatches: spec.mismatches, count: spec.mismatches.length,
+    });
+  }
+
+  /** An observed flip, plus whatever the attribution machinery made of it. */
+  recordOscillation(missionId: string, spec: {
+    criterionId: string; at: string; attribution: string; evidence: string[];
+  }): void {
+    this.append(missionId, 'OSCILLATION_DETECTED', { ...spec });
+  }
+
+  recordProgress(missionId: string, spec: {
+    cycle: number; currency: string; nodeId: string | null;
+    provenRequired: number; consecutiveNoProgress: number;
+  }): void {
+    this.append(missionId, 'MISSION_PROGRESS', { ...spec });
+  }
+
+  /** A reconciliation between what the log says and what the world shows. */
+  recordReconciliation(missionId: string, spec: {
+    kind: string; expected: string; observed: string; resolution: string;
+  }): void {
+    this.append(missionId, 'MISSION_RECONCILIATION', { ...spec });
+  }
+
+  /**
+   * PRINCIPLE A. The only door through which a mission spawns a task.
+   *
+   * The node is looked up in the plan THE LOG SAYS WAS ACCEPTED, never in the
+   * graph object the caller is holding. Those two agree right up until the
+   * moment it matters — a stale caller, a replan that landed underneath, a
+   * node someone appended in memory — and in exactly those moments the log is
+   * right and the object is wrong. This is the selection-ledger principle
+   * moved up to the plan layer: a check that reads its own subject proves
+   * nothing.
+   */
+  authoriseNode(missionId: string, nodeId: string): SpawnDecision {
+    requireScope('MISSION', missionId);
+    const rec = this.mission(missionId);
+    if (!rec) return { ok: false, code: 'NO_SUCH_MISSION', message: `no mission ${missionId}` };
+    if (rec.terminated) {
+      return { ok: false, code: 'MISSION_TERMINATED',
+        message: `mission ${missionId} terminated (${rec.terminationReason ?? 'unstated'})` };
+    }
+    const plan = rec.acceptedPlan;
+    if (!plan || rec.acceptedPlanVersion === null) {
+      return { ok: false, code: 'PLAN_NOT_ACCEPTED',
+        message: `mission ${missionId} has no accepted plan in its log; nothing may be spawned` };
+    }
+    const node = plan.nodes.find((n) => n.nodeId === nodeId);
+    if (!node) {
+      return { ok: false, code: 'PLAN_NODE_NOT_ACCEPTED',
+        message: `node "${nodeId}" is not in the accepted plan (v${rec.acceptedPlanVersion}) `
+          + `for ${missionId}; accepted nodes are ${plan.nodes.map((n) => n.nodeId).join(', ') || '(none)'}` };
+    }
+    return { ok: true, planVersion: rec.acceptedPlanVersion, node };
+  }
+
+  spawnNode(missionId: string, taskId: string, nodeId: string, opts: {
+    repair?: boolean; reason?: string;
+  } = {}): SpawnDecision {
+    requireScope('TASK', taskId);
+    // Re-asked here, not inherited from an earlier call. The gap between
+    // authorising a node and recording its spawn is exactly where a replan
+    // lands, and a decision cached across that gap authorises the past.
+    const decision = this.authoriseNode(missionId, nodeId);
+    if (!decision.ok) return decision;
+    const rec = this.mission(missionId)!;
+    if (rec.spawned.some((sp) => sp.taskId === taskId)) {
+      return { ok: false, code: 'TASK_ALREADY_SPAWNED', message: `task ${taskId} is already recorded` };
+    }
+    this.append(missionId, 'TASK_SPAWNED', {
+      taskId, nodeId, planVersion: decision.planVersion,
+      repair: opts.repair === true, reason: opts.reason ?? null,
+    });
+    return decision;
+  }
 }
+
+export type SpawnRefusalCode =
+  | 'NO_SUCH_MISSION' | 'MISSION_TERMINATED' | 'PLAN_NOT_ACCEPTED'
+  | 'PLAN_NODE_NOT_ACCEPTED' | 'TASK_ALREADY_SPAWNED';
+
+export type SpawnDecision =
+  | { ok: true; planVersion: number; node: TaskNode }
+  | { ok: false; code: SpawnRefusalCode; message: string };

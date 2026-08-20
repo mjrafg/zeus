@@ -106,8 +106,8 @@ export async function oracleSuite(): Promise<void> {
       moved.filter((n) => !discovered.includes(n)).join(', '));
     // Pinned, not assumed: the probe went stale once, and the registry fix is
     // what stops it happening again.
-    check('OR12: the event-type total is pinned at 45',
-      discovered.length === 45, `${discovered.length} types`);
+    check('OR12: the event-type total is pinned at 55',
+      discovered.length === 55, `${discovered.length} types`);
     check('OR12c: ORACLE_RECOMPILED is emitted and discovered automatically',
       (MISSION_EVENT_TYPES as readonly string[]).includes('ORACLE_RECOMPILED')
       && discovered.includes('ORACLE_RECOMPILED'));

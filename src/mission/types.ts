@@ -130,6 +130,20 @@ export const MISSION_EVENT_TYPES = [
   // A compile that carried the previous critique back to the compiler, so the
   // fix loop is visible as its own step rather than as an unexplained v2.
   'ORACLE_RECOMPILED',
+  // Stage 3 — the execution loop.
+  'PLAN_REJECTED',
+  // The one event that makes a plan actionable. `PLAN_RECORDED` says a plan
+  // exists; only this says execution may act on it, and `spawnNode` reads it
+  // rather than the caller's object.
+  'PLAN_ACCEPTED',
+  'PLAN_CRITIQUED',
+  'MISSION_REPLAN',
+  'INTEGRATION_RESULT',
+  'EFFECT_MISMATCH',
+  'OSCILLATION_DETECTED',
+  'MISSION_PROGRESS',
+  'MISSION_RECONCILIATION',
+  'SELFTEST_LIVE',
 ] as const;
 
 export type MissionEventType = typeof MISSION_EVENT_TYPES[number];
@@ -146,8 +160,9 @@ export const RESERVED_MISSION_EVENT_NAMES = [
   // alongside them and stay reserved, so the names cannot be reused for
   // something unrelated while the design still wants them.
   'ORACLE_CONSULTED', 'ORACLE_VERDICT',
-  'EFFECT_MISMATCH', 'OSCILLATION_DETECTED',
-  'DEPENDENCY_MODEL_VIOLATION', 'MISSION_REPLAN',
+  // Stage 3 emitted EFFECT_MISMATCH, OSCILLATION_DETECTED and MISSION_REPLAN;
+  // they moved to the registry above. This one is still only a name.
+  'DEPENDENCY_MODEL_VIOLATION',
 ] as const;
 
 /* ------------------------------------------------------------------------ *
@@ -209,6 +224,8 @@ export const RISKS = ['LOW', 'MEDIUM', 'HIGH'] as const;
 
 export interface TaskNode {
   nodeId: string;
+  /** The name the planner gave this node. Display only; identity is nodeId. */
+  slug?: string;
   description: string;
   dependsOn: string[];
   preconditions: Precondition[];
@@ -262,6 +279,17 @@ export interface MissionRecord {
   planVersion: number | null;
   plan: PlanGraph | null;
   planInvalidations: Array<{ reason: string; supersededBy: number | null }>;
+  /**
+   * The plan version execution is allowed to act on.
+   *
+   * Separate from `planVersion` on purpose: a recorded plan is a proposal, an
+   * accepted one is a mandate, and stage 3 spawns only against the mandate.
+   */
+  acceptedPlanVersion: number | null;
+  acceptedPlan: PlanGraph | null;
+  planRejections: number;
+  planCritiques: number;
+  replans: number;
   spawned: SpawnedTask[];
   checkpoints: MissionCheckpoint[];
   /** The ratchet position the EVENTS imply. The git ref is a pointer to this. */

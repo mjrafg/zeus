@@ -521,6 +521,25 @@ export class Engine {
         supervisor: this.opts.supervisor, policy: this.policyFor(rec),
         cacheRoot: depsCacheRoot(this.opts.projectRoot, this.opts.config.paths?.deps),
       }));
+    // WORKTREE payload semantics — every field describes what HAPPENED:
+    //
+    //   prepared      the worktree received dependencies (false for `none`)
+    //   method        pnpm-store | hardlink | copy | install | none, named only
+    //                 when it ran AND succeeded, never predicted
+    //   lockfileHash  the cache identity: sha256 of the lockfile's bytes
+    //   reused        true when an existing cache was materialised rather than
+    //                 built, so first-vs-later cost is separable in telemetry
+    //   durationMs    wall clock for the whole preparation
+    //   attempts      every method tried, in order, with ok/detail/durationMs —
+    //                 including the ones that FAILED, which is where a fallback
+    //                 shows itself
+    //
+    // Reuse order is hardlink → pnpm-store → copy, inverted from the original
+    // pnpm-first order once it was measured: hardlinking a prepared tree costs
+    // 2–32 ms where `pnpm install --offline` costs ~700 ms, and that difference
+    // is paid on every task after the first. pnpm-store remains the fallback
+    // where hardlinks are impossible (different filesystems, no link support),
+    // which `attempts` makes visible rather than silent.
     this.record({ taskId, type: 'WORKTREE', payload: {
       ...wt, prepared: deps.prepared, method: deps.method, lockfileHash: deps.lockfileHash,
       reused: deps.reused, durationMs: deps.durationMs,

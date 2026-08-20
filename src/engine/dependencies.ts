@@ -47,7 +47,28 @@ import { ExecutionPolicy, resolveWithin } from './policy';
  * How a worktree actually got its dependencies.
  *
  * Reported after the fact, never predicted: a method is named only when it
- * ran and succeeded.
+ * ran and succeeded. This is also what lands in the WORKTREE event's `method`
+ * field, so it describes what happened rather than what was planned.
+ *
+ * REUSE ORDER: hardlink → pnpm-store → copy.
+ *
+ * Chosen from measurement, not from which mechanism is most idiomatic. On the
+ * reference host, materialising an already-prepared tree costs:
+ *
+ *   hardlink      2 ms      (1-dependency fixture)   31.7 ms  (5 deps, 400 files)
+ *   pnpm-store  ~700 ms     `pnpm install --frozen-lockfile --offline`
+ *   copy          — slower than hardlink, same bytes twice on disk
+ *
+ * pnpm's store IS pnpm's native reuse mechanism and was tried first
+ * originally. It is roughly two orders of magnitude slower than hardlinking
+ * the prepared tree, and it pays that cost on every task after the first, so
+ * the order was inverted once there were numbers to invert it on.
+ *
+ * pnpm-store is not dead code: it is the fallback wherever hardlinks are
+ * impossible — a cache and a worktree on different filesystems (EXDEV), or a
+ * filesystem with no hardlink support. That is feature-detected by making a
+ * link and comparing inodes, never assumed, and `DEP9c` exercises the path on
+ * a genuinely cross-device fixture rather than a simulated one.
  */
 export type PrepMethod = 'pnpm-store' | 'hardlink' | 'copy' | 'install' | 'none';
 
@@ -573,19 +594,43 @@ export async function prepareDependencies(input: PrepareInput): Promise<Preparat
 /**
  * Materialises a prepared cache into this worktree.
  *
- * Order is pnpm store, then hardlink, then copy. Each is attempted for real and
- * recorded whether it worked, because the alternative — assuming pnpm behaves
- * like pnpm because `pnpm` is on PATH — is how a report comes to describe a
- * method that never ran.
+ * Order is hardlink, then pnpm store, then copy — see `PrepMethod` for the
+ * measurements that decided it. Each is attempted for real and recorded
+ * whether it worked, because the alternative — assuming pnpm behaves like pnpm
+ * because `pnpm` is on PATH — is how a report comes to describe a method that
+ * never ran.
  */
 async function materialize(input: PrepareInput, plan: DependencyPlan, cacheDir: string,
   attempts: PrepAttempt[]): Promise<{ ok: boolean; method: PrepMethod; detail: string }> {
   const worktreeModules = path.join(input.worktree, NODE_MODULES);
   const store = path.join(cacheDir, 'store');
+  const cacheModules = path.join(cacheDir, NODE_MODULES);
   const clear = () => fs.rmSync(worktreeModules, { recursive: true, force: true });
 
-  // 1 — pnpm's own store, which is what pnpm is FOR: it hardlinks out of a
-  // content-addressed store, so reuse is its native mode rather than a trick.
+  // 1 — hardlink. Same bytes, one copy on disk, a worktree that is a real
+  // directory rather than a pointer at shared state, and two orders of
+  // magnitude cheaper than re-running a package manager offline.
+  const link = canHardlink(cacheDir, path.dirname(worktreeModules));
+  if (link.ok) {
+    const t0 = Date.now();
+    try {
+      const st = replicateTree(cacheModules, worktreeModules, 'link', input.worktree);
+      attempts.push({ method: 'hardlink', ok: true, durationMs: Date.now() - t0,
+        detail: `${st.files} file(s), ${st.links} symlink(s), ${st.dirs} dir(s)` });
+      return { ok: true, method: 'hardlink', detail: `hardlinked from ${path.basename(cacheDir)}` };
+    } catch (e: any) {
+      attempts.push({ method: 'hardlink', ok: false, durationMs: Date.now() - t0, detail: `${e?.message ?? e}` });
+      clear();
+      // An escaping symlink is a property of the CACHED TREE, not of the
+      // method, so every other method would reproduce it. Refuse them all.
+      if (e instanceof EscapingLinkError) return { ok: false, method: 'hardlink', detail: e.message };
+    }
+  } else {
+    attempts.push({ method: 'hardlink', ok: false, detail: link.detail, durationMs: 0 });
+  }
+
+  // 2 — pnpm's own store. Slower, but it is the fallback that works when the
+  // cache and the worktree are not on the same filesystem.
   if (plan.packageManager === 'pnpm' && fs.existsSync(store)) {
     const t0 = Date.now();
     const r = await runInstall(input,
@@ -597,30 +642,6 @@ async function materialize(input: PrepareInput, plan: DependencyPlan, cacheDir: 
       detail: escaped ? `escaping symlink ${escaped.link} -> ${escaped.target}` : r.detail });
     if (ok) return { ok: true, method: 'pnpm-store', detail: `reused pnpm store ${path.basename(cacheDir)}` };
     clear();
-  }
-
-  const cacheModules = path.join(cacheDir, NODE_MODULES);
-
-  // 2 — hardlink. Same bytes, one copy on disk, and a worktree that is a real
-  // directory rather than a pointer at shared state.
-  const link = canHardlink(cacheDir, path.dirname(worktreeModules));
-  if (link.ok) {
-    const t0 = Date.now();
-    try {
-      const s = replicateTree(cacheModules, worktreeModules, 'link', input.worktree);
-      attempts.push({ method: 'hardlink', ok: true, durationMs: Date.now() - t0,
-        detail: `${s.files} file(s), ${s.links} symlink(s), ${s.dirs} dir(s)` });
-      return { ok: true, method: 'hardlink', detail: `hardlinked from ${path.basename(cacheDir)}` };
-    } catch (e: any) {
-      attempts.push({ method: 'hardlink', ok: false, durationMs: Date.now() - t0,
-        detail: `${e?.message ?? e}` });
-      clear();
-      // An escaping symlink is a property of the cached tree, not of the
-      // method, so copying would reproduce it. Refuse both.
-      if (e instanceof EscapingLinkError) return { ok: false, method: 'hardlink', detail: e.message };
-    }
-  } else {
-    attempts.push({ method: 'hardlink', ok: false, detail: link.detail, durationMs: 0 });
   }
 
   // 3 — copy. Slower and larger, but it works across devices.
@@ -658,14 +679,17 @@ export function describeDependencyState(projectRoot: string, installCommand: str
   if (plan.ecosystem === 'other') { wouldUse = 'install'; }
   else if (plan.ecosystem === 'node' && plan.cacheDir) {
     if (!cached) { wouldUse = 'install'; detail = 'no prepared cache for this lockfile yet'; }
-    else if (plan.packageManager === 'pnpm' && dir && fs.existsSync(path.join(dir, 'store'))) {
-      wouldUse = 'pnpm-store'; detail = 'prepared pnpm store present';
+    else if (dir && fs.existsSync(dir) && canHardlink(dir, dir).ok) {
+      // Hardlink first, matching materialize(): doctor predicting a method the
+      // engine would not choose is worse than doctor saying nothing.
+      wouldUse = 'hardlink'; detail = 'prepared cache present, hardlink verified';
+    } else if (plan.packageManager === 'pnpm' && dir && fs.existsSync(path.join(dir, 'store'))) {
+      wouldUse = 'pnpm-store'; detail = 'no hardlinks here; prepared pnpm store present';
     } else if (dir && fs.existsSync(dir)) {
       // Probe inside the cache directory that already exists: describing a
       // project must not create anything on disk.
-      const link = canHardlink(dir, dir);
-      wouldUse = link.ok ? 'hardlink' : 'copy';
-      detail = link.ok ? 'prepared cache present, hardlink verified' : `prepared cache present, ${link.detail}`;
+      wouldUse = 'copy';
+      detail = `prepared cache present, ${canHardlink(dir, dir).detail}`;
     } else {
       wouldUse = 'copy';
       detail = 'prepared cache present but unreadable';

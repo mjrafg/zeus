@@ -103,11 +103,32 @@ function copyCheckout(from: string, to: string): void {
   }
 }
 
-/** A worktree is a copy of the manifest set — what `git worktree add` produces. */
-function makeWorktree(project: string, name: string): string {
-  const wt = path.join(TMP, name);
+/**
+ * A worktree is a copy of the manifest set — what `git worktree add` produces.
+ *
+ * `base` exists so one test can put a worktree on a DIFFERENT filesystem from
+ * the cache. That is not a simulation of "hardlinks unavailable": it is the
+ * real condition, produced by the real kernel, and it is how the pnpm-store
+ * fallback stays exercised now that hardlink is tried first.
+ */
+function makeWorktree(project: string, name: string, base = TMP): string {
+  const wt = path.join(base, name);
   copyCheckout(project, wt);
   return wt;
+}
+
+/** A directory on a filesystem other than TMP's, or null if the host has none. */
+function otherFilesystem(): string | null {
+  for (const candidate of ['/dev/shm', '/run/shm']) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const dir = fs.mkdtempSync(path.join(candidate, 'zeus-xdev-'));
+      // Genuinely cross-device only if a link between the two actually fails.
+      if (!canHardlink(TMP, dir).ok) return dir;
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch { /* not usable */ }
+  }
+  return null;
 }
 
 function prep(project: string, worktree: string, sup: ProcessSupervisor, extra: Record<string, unknown> = {}) {
@@ -392,11 +413,38 @@ export async function dependencySuite(): Promise<void> {
       pFirst.ok && fs.existsSync(path.join(pFirst.lockfileHash
         ? path.join(depsCacheRoot(pnpmProject), cacheKey('pnpm', pFirst.lockfileHash)) : '', 'store')),
       pFirst.detail);
+    // Same filesystem: hardlink wins, because it is ~2 orders of magnitude
+    // cheaper than re-running pnpm offline. That is the whole reason the order
+    // was inverted, so it is asserted rather than assumed.
     const p2 = makeWorktree(pnpmProject, 'wt-pnpm-2');
     const pSecond = await prep(pnpmProject, p2, sup);
-    check('DEP9c: and the second worktree reuses through the pnpm store',
-      pSecond.ok && pSecond.reused && pSecond.method === 'pnpm-store',
+    check('DEP9c: a pnpm project reuses by hardlink where the filesystem allows it',
+      pSecond.ok && pSecond.reused && pSecond.method === 'hardlink',
       `${pSecond.method}: ${pSecond.attempts.map((a) => `${a.method}=${a.ok}`).join(',')}`);
+
+    // Different filesystem: the hardlink probe fails for real, and the pnpm
+    // store is what makes the worktree runnable. This is the coverage the
+    // reorder had to keep — a fallback nobody exercises is a fallback nobody
+    // knows is broken.
+    const xdev = otherFilesystem();
+    check('DEP9c2-host: the host offers a second filesystem, so the fallback can be exercised',
+      xdev !== null, 'no cross-device directory available (/dev/shm, /run/shm)');
+    if (xdev) {
+      const p3 = makeWorktree(pnpmProject, 'wt-pnpm-xdev', xdev);
+      const pThird = await prep(pnpmProject, p3, sup);
+      const tried = pThird.attempts.find((a) => a.method === 'hardlink');
+      check('DEP9c2: across filesystems the hardlink is attempted and genuinely fails',
+        !!tried && tried.ok === false && /EXDEV|hardlink unavailable|inodes differ/.test(tried.detail),
+        tried ? tried.detail : 'hardlink was never attempted');
+      check('DEP9c3: and pnpm-store is what makes that worktree runnable',
+        pThird.ok && pThird.reused && pThird.method === 'pnpm-store'
+        && fs.existsSync(path.join(p3, 'node_modules', 'tinydep', 'index.js')),
+        `${pThird.method}: ${pThird.attempts.map((a) => `${a.method}=${a.ok}`).join(',')}`);
+      check('DEP9c4: the fallback result is contained too',
+        findEscapingLink(path.join(p3, 'node_modules'), p3) === null);
+      fs.rmSync(xdev, { recursive: true, force: true });
+    }
+
     check('DEP9d: pnpm\'s own symlinks stay inside the worktree',
       findEscapingLink(path.join(p2, 'node_modules'), p2) === null
       && fs.existsSync(path.join(p2, 'node_modules', 'tinydep', 'index.js')));

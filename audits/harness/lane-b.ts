@@ -38,7 +38,15 @@ export const laneB: LaneSpec = {
       id: 'B1', section: '§3', title: 'no engine module spawns outside the supervisor',
       run(ctx) {
         const dir = path.join(ctx.auditRoot, 'src/engine');
-        const allowed = ['exec.ts', 'isolation.ts', 'orchestrator.ts', 'providers.ts'];
+        // exec.ts is the supervisor; isolation.ts probes kernel capability;
+        // orchestrator.ts and providers.ts run git plumbing and binary probes,
+        // which are Zeus's own commands rather than the project's.
+        //
+        // gitro.ts is the read-only git context, and it is the NARROWEST of
+        // these: it refuses anything outside its allowlist before spawning.
+        // Listed here rather than exempted by pattern, so each entry stays a
+        // decision somebody made on purpose.
+        const allowed = ['exec.ts', 'isolation.ts', 'orchestrator.ts', 'providers.ts', 'gitro.ts'];
         const offenders: string[] = [];
         for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.ts'))) {
           if (allowed.includes(f)) continue;
@@ -49,17 +57,28 @@ export const laneB: LaneSpec = {
         const setupDir = path.join(ctx.auditRoot, 'src/setup');
         const setupOffenders = fs.readdirSync(setupDir).filter((f) => f.endsWith('.ts') && f !== 'probe.ts')
           .filter((f) => /child_process/.test(fs.readFileSync(path.join(setupDir, f), 'utf8')));
+        // An exemption for a file that no longer exists, or that no longer
+        // spawns anything, is a hole nobody is watching. Report it as one.
+        const present = new Set(fs.readdirSync(dir));
+        const stale = allowed.filter((f) => !present.has(f)
+          || !/\b(spawn|spawnSync|execFile|execFileSync|exec|execSync|fork)\s*\(/
+            .test(fs.readFileSync(path.join(dir, f), 'utf8')));
         const observed = compare([
           ['engine modules spawning directly', offenders.join(' | ') || '(none)'],
           ['setup modules bypassing the probe', setupOffenders.join(', ') || '(none)'],
+          ['exemptions that no longer apply', stale.join(', ') || '(none)'],
         ]);
-        return !offenders.length && !setupOffenders.length
+        return !offenders.length && !setupOffenders.length && !stale.length
           ? held(observed)
           : defect(observed, {
             sections: ['§3'], severity: 'P1',
             title: 'A module spawns processes outside the supervisor',
-            detail: `Direct process creation found in: ${[...offenders, ...setupOffenders].join(', ')}`,
-            impact: 'That path escapes policy, budgets, isolation and the run registry, so cancel cannot reach it.',
+            detail: offenders.length || setupOffenders.length
+              ? `Direct process creation found in: ${[...offenders, ...setupOffenders].join(', ')}`
+              : `The spawn exemption list names ${stale.join(', ')}, which no longer spawns anything or no longer exists.`,
+            impact: offenders.length || setupOffenders.length
+              ? 'That path escapes policy, budgets, isolation and the run registry, so cancel cannot reach it.'
+              : 'A stale exemption is a hole nobody is watching: the next file to take that name inherits it silently.',
           });
       },
     },

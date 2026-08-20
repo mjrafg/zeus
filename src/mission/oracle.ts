@@ -52,8 +52,24 @@ export const MODE_RANK: Record<AcceptanceMode, number> =
  * Evaluators
  * ------------------------------------------------------------------------ */
 
+/**
+ * How many times a command evaluator runs. 1..10.
+ *
+ * Determinism is proven by repetition, and the vocabulary had no way to say
+ * so. A real compile answered "make one flaky test deterministic" with
+ * `for i in 1 2 3 4 5; do npm run test || exit 1; done` — semantically right,
+ * and correctly refused, because a shell loop is proof logic hiding inside a
+ * command string where the ledger cannot see it. `repeat` is the door; the
+ * wall stays up.
+ *
+ * Bounded at 10 because this is a contract term, not a stress harness: N runs
+ * cost N executions of real budget, and an unbounded N would let a criterion
+ * spend a task's entire wall clock proving one thing.
+ */
+export const MAX_REPEAT = 10;
+
 export type Evaluator =
-  | { kind: 'command'; command: string; expect: 'PASSED' | 'TEST_FAILED' }
+  | { kind: 'command'; command: string; expect: 'PASSED' | 'TEST_FAILED'; repeat?: number }
   | { kind: 'rubric'; rubric: string; artifacts: string[] }
   | { kind: 'probe'; command: string; expect: 'PASSED' | 'TEST_FAILED'; requiresNetwork: boolean };
 
@@ -126,7 +142,8 @@ export type OracleFindingCode =
   | 'EVALUATOR_MISSING'
   | 'RUBRIC_MISSING'
   | 'UNRESOLVABLE_EVALUATOR'
-  | 'EVALUATOR_TYPE_MISMATCH';
+  | 'EVALUATOR_TYPE_MISMATCH'
+  | 'REPEAT_OUT_OF_RANGE';
 
 export interface OracleFinding {
   code: OracleFindingCode;
@@ -225,6 +242,13 @@ export function validateOracle(criteria: Criterion[], ctx: ProjectContext): Orac
       }
       if (!['PASSED', 'TEST_FAILED'].includes((ev as any).expect)) {
         bad('SCHEMA_INVALID', at, 'expect must be PASSED or TEST_FAILED');
+      }
+      const repeat = (ev as any).repeat;
+      if (repeat !== undefined
+        && (!Number.isInteger(repeat) || repeat < 1 || repeat > MAX_REPEAT)) {
+        bad('REPEAT_OUT_OF_RANGE', at,
+          `repeat must be a whole number between 1 and ${MAX_REPEAT} (got ${JSON.stringify(repeat)}); `
+          + 'a repetition count is a contract term, not a stress-test dial');
       }
       if (ev.kind === 'probe' && typeof ev.requiresNetwork !== 'boolean') {
         bad('SCHEMA_INVALID', at, 'a probe must declare whether it requires the network');

@@ -19,7 +19,7 @@ import { Provider } from '../engine/providers';
 import {
   buildReviewPayload, reconcileReviewerReport, ORACLE_JUDGE_POLICY,
 } from '../engine/reviewcontext';
-import { Criterion, CriterionOutcome, Oracle } from './oracle';
+import { Criterion, CriterionOutcome, MAX_REPEAT, Oracle } from './oracle';
 
 export interface CriterionResult {
   criterionId: string;
@@ -102,6 +102,8 @@ export interface EvaluateInput {
   ledger?: Set<string>;
   /** Paths that changed, for incremental selection via affectedBy. */
   touched?: string[];
+  /** Per-RUN wall clock. With `repeat`, each run gets this, not a share of it. */
+  timeoutSeconds?: number;
   baseSha?: string;
 }
 
@@ -145,17 +147,55 @@ async function runCommandEvaluator(input: EvaluateInput, c: Criterion,
   }
 
   const [cmd, ...args] = command.split(/\s+/).filter(Boolean);
-  const res = await input.supervisor.run({
-    id: `${c.criterionId}-${Date.now()}`,
-    projectId: input.projectId, taskId: c.criterionId, cls: 'light',
-    command: cmd, args, cwd: input.worktree,
-    policy: input.policy, confineFilesystem: true,
-  } as any);
+
+  // N SEPARATE SUPERVISED EXECUTIONS, never one execution repeated internally.
+  //
+  // Each run is individually bounded, individually classified and individually
+  // recorded, and each one takes a slot from the governor — so `repeat: 5`
+  // costs five executions of budget, which is what it actually is. A loop
+  // inside one spawn would have hidden four of them from every ceiling Zeus
+  // has.
+  const repeat = Math.max(1, Math.min(MAX_REPEAT,
+    Number.isInteger((c.evaluator as any).repeat) ? (c.evaluator as any).repeat : 1));
+  const runs: Array<{ index: number; outcome: string; durationMs: number; id: string }> = [];
+  let final: CriterionOutcome = 'UNEVALUATED';
+
+  for (let i = 1; i <= repeat; i += 1) {
+    const res = await input.supervisor.run({
+      id: `${c.criterionId}-r${i}-${Date.now()}`,
+      projectId: input.projectId, taskId: c.criterionId, cls: 'light',
+      command: cmd, args, cwd: input.worktree,
+      policy: input.policy, confineFilesystem: true,
+      ...(input.timeoutSeconds ? { timeoutSeconds: input.timeoutSeconds } : {}),
+    } as any);
+    runs.push({ index: i, outcome: res.outcome, durationMs: res.durationMs, id: res.id });
+    final = outcomeForExecution(res, expect);
+    // SHORT-CIRCUIT. Once a run has failed the criterion is disproven, and
+    // once a run failed to produce a verdict the criterion is unevaluable —
+    // in both cases the remaining runs cannot change the answer, and running
+    // them would spend budget to learn nothing. The runs that did not happen
+    // are reported as not-executed rather than left to be inferred from a
+    // count.
+    if (final !== 'PROVEN') break;
+  }
+
+  const executed = runs.length;
+  const totalMs = runs.reduce((a, r) => a + r.durationMs, 0);
+  const failing = final === 'PROVEN' ? null : runs[runs.length - 1];
   return {
     criterionId: c.criterionId,
-    outcome: outcomeForExecution(res, expect),
-    evidence: [`execution:${res.id}`, `outcome:${res.outcome}`],
-    detail: `${command} → ${res.outcome}`,
+    outcome: final,
+    evidence: [
+      ...runs.map((r) => `run:${r.index}/${repeat}:${r.outcome}:${r.durationMs}ms:${r.id}`),
+      `runs:${executed}/${repeat}`,
+      `totalRunMs:${totalMs}`,
+      ...(executed < repeat ? [`notExecuted:${repeat - executed}`] : []),
+    ],
+    detail: repeat === 1
+      ? `${command} → ${runs[0]?.outcome ?? 'not run'}`
+      : `${command} ×${repeat} → ${final}`
+        + (failing ? `, run ${failing.index} was ${failing.outcome}` : ', every run passed')
+        + (executed < repeat ? ` (runs ${executed + 1}-${repeat} not executed)` : ''),
     durationMs: Date.now() - started,
   };
 }

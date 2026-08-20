@@ -83,7 +83,11 @@ export function normaliseCriteria(missionId: string, raw: unknown, ctx?: Project
             requiresNetwork: ev.requiresNetwork === true }
         : kind === 'command'
           ? { kind: 'command' as const, command,
-              expect: (ev.expect === 'TEST_FAILED' ? 'TEST_FAILED' : 'PASSED') as 'PASSED' | 'TEST_FAILED' }
+              expect: (ev.expect === 'TEST_FAILED' ? 'TEST_FAILED' : 'PASSED') as 'PASSED' | 'TEST_FAILED',
+              // Carried through UNVALIDATED on purpose: an out-of-range value
+              // must reach validateOracle and be refused by name, not be
+              // quietly clamped into something the compiler never proposed.
+              ...(ev.repeat !== undefined ? { repeat: ev.repeat } : {}) }
           : (ev as any);
     const supplied = str(c?.criterionId);
     return {
@@ -116,6 +120,13 @@ const COMPILE_HEADER = [
   '',
   'Do not invent a criterionId; omit it, or use a short descriptive slug such as',
   '"unit-tests-pass". Zeus assigns the canonical identifier.',
+  '',
+  'To prove stability or determinism, add "repeat": N (1-10) to a declared',
+  'command — Zeus runs it N times and proves the criterion only if every run',
+  'passes. Never write shell loops, pipes or && chains inside "command": a',
+  'command string is a command, not a script.',
+  'For ad-hoc verification that is not a declared command, use EXTERNAL_FACT',
+  'with a probe — inline verification is a probe, not a command.',
   'An AI_JUDGED criterion carries {"kind":"rubric","rubric":"<what passing means>","artifacts":["path"]}.',
   'An EXTERNAL_FACT criterion carries {"kind":"probe","command":"...","expect":"PASSED","requiresNetwork":false}.',
   '',

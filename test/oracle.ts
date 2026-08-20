@@ -446,6 +446,106 @@ export async function oracleSuite(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------
+  section('oracle: determinism is proven by repetition');
+  {
+    // A counter file makes a command behave differently on each run, which is
+    // what a flaky test IS.
+    const counter = path.join(TMP, 'runs.count');
+    const script = (name: string, body: string): string => {
+      const f = path.join(TMP, name);
+      fs.writeFileSync(f, `#!/bin/bash\nn=$(( $(cat ${counter} 2>/dev/null || echo 0) + 1 ))\n`
+        + `echo $n > ${counter}\n${body}\n`, { mode: 0o755 });
+      return `bash ${f}`;
+    };
+    const reset = () => fs.writeFileSync(counter, '0');
+
+    const always = script('always.sh', 'exit 0');
+    const failsOnTwo = script('fails2.sh', 'if [ "$n" = "2" ]; then exit 1; fi\nexit 0');
+    const hangsOnTwo = script('hangs2.sh', 'if [ "$n" = "2" ]; then sleep 30; fi\nexit 0');
+
+    const runRepeat = async (command: string, repeat: number) => {
+      const c = criterion({ criterionId: 'p/M-0001/C-0004',
+        evaluator: { kind: 'command', command, expect: 'PASSED', repeat } as any });
+      const o = oracleOf([c]);
+      return (await evaluateCriteria({ oracle: o, ledger: acceptedCommands(o), projectId: 'p',
+        worktree: TMP, supervisor: sup, policy, scope: 'full', timeoutSeconds: 5 })).results[0];
+    };
+
+    reset();
+    const allPass = await runRepeat(always, 3);
+    const runsOf = (r: any) => r.evidence.filter((e: string) => e.startsWith('run:'));
+    check('OR120: repeat=3 with every run passing is PROVEN',
+      allPass.outcome === 'PROVEN', `${allPass.outcome}: ${allPass.detail}`);
+    check('OR121: and all three runs are recorded individually',
+      runsOf(allPass).length === 3
+      && runsOf(allPass).every((e: string, i: number) => e.startsWith(`run:${i + 1}/3:COMPLETED:`)),
+      runsOf(allPass).join(' | '));
+    check('OR122: each run is a SEPARATE supervised execution, so the budget sees three',
+      new Set(runsOf(allPass).map((e: string) => e.split(':').pop())).size === 3
+      && Number(fs.readFileSync(counter, 'utf8').trim()) === 3,
+      `counter=${fs.readFileSync(counter, 'utf8').trim()}`);
+    check('OR123: the durations are recorded per run and summed',
+      allPass.evidence.some((e) => /^totalRunMs:\d+$/.test(e))
+      && allPass.evidence.includes('runs:3/3'),
+      allPass.evidence.filter((e) => !e.startsWith('run:')).join(', '));
+
+    reset();
+    const failsSecond = await runRepeat(failsOnTwo, 3);
+    check('OR124: a failure on run 2 is FAILED, and names the run',
+      failsSecond.outcome === 'FAILED' && /run 2 was FAILED/.test(failsSecond.detail),
+      failsSecond.detail);
+    check('OR125: SHORT-CIRCUIT — run 3 is never executed',
+      runsOf(failsSecond).length === 2
+      && failsSecond.evidence.includes('runs:2/3')
+      && failsSecond.evidence.includes('notExecuted:1')
+      && Number(fs.readFileSync(counter, 'utf8').trim()) === 2,
+      `counter=${fs.readFileSync(counter, 'utf8').trim()}, evidence=${failsSecond.evidence.join(',')}`);
+    check('OR126: and the skipped runs are stated, not left to be inferred from a count',
+      /runs 3-3 not executed/.test(failsSecond.detail), failsSecond.detail);
+
+    reset();
+    const hangsSecond = await runRepeat(hangsOnTwo, 3);
+    check('OR127: a TIMEOUT on run 2 is UNEVALUATED, never FAILED',
+      hangsSecond.outcome === 'UNEVALUATED', `${hangsSecond.outcome}: ${hangsSecond.detail}`);
+    check('OR128: the run that did not produce a verdict proves nothing, and stops the rest',
+      runsOf(hangsSecond).length === 2 && /TIMEOUT/.test(runsOf(hangsSecond)[1])
+      && hangsSecond.evidence.includes('notExecuted:1'),
+      runsOf(hangsSecond).join(' | '));
+
+    reset();
+    const once = await runRepeat(always, 1);
+    check('OR129: repeat=1 behaves exactly as before',
+      once.outcome === 'PROVEN' && runsOf(once).length === 1
+      && Number(fs.readFileSync(counter, 'utf8').trim()) === 1);
+
+    // Validation: the field is bounded, and the wall it opens a door in stays.
+    const repeatFindings = (repeat: unknown) => validateOracle([criterion({
+      evaluator: { kind: 'command', command: 'node -e process.exit(0)', expect: 'PASSED', repeat } as any,
+    })], CTX).findings.map((f) => f.code);
+    check('OR130: repeat must be a whole number in 1..10',
+      repeatFindings(0).includes('REPEAT_OUT_OF_RANGE')
+      && repeatFindings(11).includes('REPEAT_OUT_OF_RANGE')
+      && repeatFindings(-1).includes('REPEAT_OUT_OF_RANGE')
+      && repeatFindings(2.5).includes('REPEAT_OUT_OF_RANGE'));
+    check('OR131: and a valid repeat is accepted',
+      !repeatFindings(1).includes('REPEAT_OUT_OF_RANGE')
+      && !repeatFindings(10).includes('REPEAT_OUT_OF_RANGE')
+      && !repeatFindings(undefined).includes('REPEAT_OUT_OF_RANGE'));
+    check('OR132: a shell loop in a command string is STILL refused — the wall stays',
+      validateOracle([criterion({ evaluator: { kind: 'command',
+        command: 'for i in 1 2 3 4 5; do npm run test || exit 1; done', expect: 'PASSED' } })], CTX)
+        .findings.some((f) => f.code === 'UNRESOLVABLE_EVALUATOR'));
+    check('OR133: and repeat does not launder one — the loop is refused with repeat set too',
+      validateOracle([criterion({ evaluator: { kind: 'command',
+        command: 'for i in 1 2 3; do npm test; done', expect: 'PASSED', repeat: 3 } as any })], CTX)
+        .findings.some((f) => f.code === 'UNRESOLVABLE_EVALUATOR'));
+    check('OR134: the prompt teaches the field and forbids the loop',
+      (() => { const src = fs.readFileSync(path.resolve(__dirname, '../src/mission/compile.ts'), 'utf8');
+        return /"repeat": N \(1-10\)/.test(src) && /Never write shell loops/.test(src)
+          && /inline verification is a probe, not a command/.test(src); })());
+  }
+
+  // ---------------------------------------------------------------------
   section('oracle: the outcome mapping keeps non-verdicts out of FAILED');
   {
     const map = (outcome: string, expect: 'PASSED' | 'TEST_FAILED' = 'PASSED') =>

@@ -108,6 +108,41 @@ itself remains open. *Next step:* re-run the dogfood with the diagnostics fix
 in place and read `AGENT_FAILED.diagnostics`, which will now contain the values
 that were missing this time. First target for Cycle 2.
 
+**G-U2 — a read-only phase is enforced by instruction, not by policy (P2).**
+
+Recorded because it was demonstrated, not theorised. A branch-inventory task was
+declared read-only: no merge, rebase, push, commit, branch deletion. During it,
+`git fetch /srv/zeus main:refs/tmp-legacy` was run to establish whether the
+legacy repository shared history with this one. That command violated none of
+the named prohibitions and was nevertheless a write: it copied 14 commits into
+this repository's object store and created two tags (`extracted-baseline`,
+`v0.0.0-extracted`) that this repository had never had. A second command,
+`git fsck --lost-found`, wrote five files into `.git/lost-found/`.
+
+Both were noticed and reverted — the tags deleted, the directory removed, the
+starting state restored and verified — but only because the operator happened to
+re-check the repository state afterwards. Nothing in Zeus noticed, refused, or
+recorded any of it.
+
+*Impact.* "Read-only" is currently a property of a prompt, not of the system.
+The prohibition list enumerates the obvious mutations and misses everything
+else: fetch, `fsck --lost-found`, `gc`, `reflog expire`, `notes add`,
+`config set`, anything writing under `.git/`. An agent instructed to inspect a
+repository can therefore mutate it while remaining literally compliant, and the
+audit trail will show no sign. This is the same class of gap as the
+change-visibility P0 from this cycle: the guarantee was believed because the
+obvious paths were covered, and the unobvious one was not.
+
+*Not fixed this cycle.* A real fix is a mode, not a rule — an inspection
+context that refuses object-writing git invocations and fails loudly rather
+than trusting the caller to have read the list. Carried as target 8 in
+`next-cycle-targets.md`.
+
+*Evidence.* The imported tags and their absence from `origin`
+(`git ls-remote --tags origin` returned nothing for either), the 14 unreachable
+legacy commits still resident in the object store, and the restored state
+recorded in `docs/BRANCH-INVENTORY.md` §7.
+
 ## Verdict
 
 `CANDIDATE_SAFE_TO_INSTALL` — 49 probes across six lanes, all holding, against

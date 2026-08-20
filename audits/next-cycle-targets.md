@@ -76,6 +76,21 @@ Cycle 2 should add a meta-probe: every probe must touch the product's own
 exported API, and a probe whose observed output does not change when the
 relevant module is stubbed is not testing that module.
 
+## 8 — a read-only mode that is enforced rather than promised  · MEDIUM
+
+From finding G-U2. A phase declared read-only was mutated by a command that
+broke none of the stated prohibitions: `git fetch` into a temporary ref, which
+imported 14 commits and two tags. `git fsck --lost-found` also wrote into
+`.git/`. Both were caught by a manual re-check, not by the system.
+
+Worth building: an inspection context that refuses object-writing git
+invocations outright — fetch, gc, fsck --lost-found, reflog expire, notes,
+config set, anything writing under `.git/` — and records the refusal. Worth
+probing first: whether any existing Zeus code path performs a repository write
+while presenting itself as inspection. `zeus revalidate` is the obvious
+candidate, since it already rebases a worktree as part of answering a question
+(finding F-F5 in this cycle).
+
 ## Telemetry inputs
 
 No `VALIDATION_MISS`, `SUSPECTED_FLAKE` or `TEST_RELIABILITY` records existed at

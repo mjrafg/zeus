@@ -119,13 +119,32 @@ export async function boundarySuite(): Promise<void> {
   check('PB5: no file hard-codes a machine-specific absolute path',
     absolutePaths.length === 0, absolutePaths.slice(0, 5).join(', '));
 
+  // Files that legitimately contain credential SHAPES: the detectors themselves
+  // and the fixtures that prove they fire. Each is listed rather than pattern-
+  // matched, so adding one is a decision somebody made on purpose.
+  const CREDENTIAL_FIXTURES = [
+    'scripts/package.sh',            // the artifact scanner's own patterns
+    'test/boundary.ts',              // this file
+    'src/engine/orchestrator.ts',    // redactSecrets(): the shapes it removes
+    'audits/harness/lane-c.ts',      // probes that plant synthetic secrets
+    'test/audit.ts',                 // regression fixtures for redaction
+  ];
   const credentialish = everything
-    .filter((f) => !/scripts\/package\.sh$|test\/boundary\.ts$/.test(f))
+    .filter((f) => !CREDENTIAL_FIXTURES.includes(path.relative(REPO, f)))
     .filter((f) => /BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}/
       .test(fs.readFileSync(f, 'utf8')))
     .map((f) => path.relative(REPO, f));
-  check('PB6: the working tree carries no credential-shaped content',
+  check('PB6: the working tree carries no credential-shaped content outside the detectors',
     credentialish.length === 0, credentialish.join(', '));
+  // The exceptions must earn their place: a listed file that no longer exists,
+  // or that stopped being about credentials, is a stale hole in the check.
+  const staleExceptions = CREDENTIAL_FIXTURES.filter((f) => {
+    const abs = path.join(REPO, f);
+    if (!fs.existsSync(abs)) return true;
+    return !/redact|credential|secret|PRIVATE KEY|sk-|ghp_|AKIA/i.test(fs.readFileSync(abs, 'utf8'));
+  });
+  check('PB6b: every credential-fixture exception is still needed',
+    staleExceptions.length === 0, staleExceptions.join(', '));
 
   // Identifier scan. Only runs when a maintainer supplies the private list.
   const r = rules();

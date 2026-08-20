@@ -171,6 +171,14 @@ export function inspectCommand(policy: ExecutionPolicy, command: string, args: s
   if (/:\(\)\s*\{.*\|.*&\s*\}\s*;?\s*:/.test(full)) {
     v.push({ code: 'FORK_BOMB', detail: 'shell fork bomb pattern' });
   }
+  // Recursive ownership or permission changes on a system path. These destroy
+  // a machine as thoroughly as rm does, just more slowly, and no build step
+  // legitimately chmods / or $HOME.
+  if (/\b(chmod|chown|chgrp)\b/.test(full)
+      && /(^|\s)-[a-zA-Z]*R[a-zA-Z]*(\s|$)|--recursive/.test(full)
+      && /\s\/(\s|$)|\s\/(etc|usr|var|bin|sbin|lib|boot|dev|root)(\/|\s|$)|\s~\/?(\s|$)|\s\$HOME/.test(full)) {
+    v.push({ code: 'DESTRUCTIVE_COMMAND', detail: 'recursive permission or ownership change on a system path' });
+  }
   // Writing to another user's shell profile or to systemd units.
   if (/>>?\s*(~|\$HOME)\/\.(bashrc|profile|zshrc)|\/etc\/systemd|\/etc\/cron/.test(full)) {
     v.push({ code: 'PERSISTENCE_ATTEMPT', detail: 'writing outside the project to gain persistence' });

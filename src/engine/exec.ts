@@ -69,6 +69,22 @@ export interface ExecutionResult {
   /** True only when the outcome says something about the code under test. */
   productSignal: boolean;
   budgets: { memoryMaxMb: number; cpuQuotaPercent: number; maxProcesses: number; testWorkers: number };
+  /**
+   * Monotonic instants around the child process, for latency measurement.
+   *
+   * Passive: these are read from the clock at moments the supervisor already
+   * passes through, and nothing branches on them. `firstOutputNs` is the
+   * closest observable proxy for "the program finished starting up and began
+   * doing work" — for a test runner that is compilation and collection, for a
+   * model CLI it is connection and first token. Absent when the process
+   * produced no output at all.
+   */
+  timing?: {
+    requestedNs: string;
+    spawnedNs: string;
+    firstOutputNs: string | null;
+    exitedNs: string;
+  };
 }
 
 interface LiveJob { pgid: number; unit: string | null; projectId: string; taskId?: string; cancelled: boolean }
@@ -84,6 +100,23 @@ interface LiveJob { pgid: number; unit: string | null; projectId: string; taskId
 export interface RunRecord {
   jobId: string; pgid: number; pid: number; unit: string | null;
   projectId: string; taskId: string | null; hostname: string; startedAt: string; command: string;
+  /**
+   * The kernel's start time for this pid, in clock ticks since boot
+   * (/proc/<pid>/stat field 22). A pid number is reusable; a pid PLUS its
+   * start time is not, which is what makes it safe to signal later.
+   */
+  startTicks?: number | null;
+}
+
+/** Reads a process's start time, so a recycled pid can be told apart. */
+export function processStartTicks(pid: number): number | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // comm can contain spaces and parentheses, so parse after the last ')'.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const ticks = Number(fields[19]);
+    return Number.isFinite(ticks) ? ticks : null;
+  } catch { return null; }
 }
 
 export function registryDirFor(stateRoot: string): string { return path.join(stateRoot, 'running'); }
@@ -115,18 +148,53 @@ function groupAlive(pgid: number): boolean {
 }
 
 /**
+ * Is the live process wearing this pid actually the one we recorded?
+ *
+ * Pid numbers recycle, and quickly under load — which is exactly when stale
+ * records pile up after crashed runs. Signalling on the strength of a number
+ * alone means `zeus cancel` can kill somebody else's process tree and report
+ * it as having cancelled the task. Comparing the kernel's start time settles
+ * it. Where that is unavailable (non-Linux), a record is trusted only while it
+ * is young enough that reuse is implausible.
+ */
+const REUSE_SAFE_AGE_MS = 60 * 60_000;
+
+export function stillOurProcess(rec: RunRecord): { ours: boolean; reason: string } {
+  const now = processStartTicks(rec.pid);
+  if (rec.startTicks != null && now != null) {
+    return now === rec.startTicks
+      ? { ours: true, reason: 'kernel start time matches the recorded value' }
+      : { ours: false, reason: `pid ${rec.pid} has been recycled (start time ${now} != recorded ${rec.startTicks})` };
+  }
+  const ageMs = Date.now() - Date.parse(rec.startedAt);
+  if (!Number.isFinite(ageMs)) return { ours: false, reason: 'record has no usable start time and cannot be verified' };
+  return ageMs < REUSE_SAFE_AGE_MS
+    ? { ours: true, reason: `start time unavailable; record is ${Math.round(ageMs / 1000)}s old, within the reuse-safe window` }
+    : { ours: false, reason: `start time unavailable and the record is ${Math.round(ageMs / 60000)} minutes old; refusing to signal a possibly recycled pid` };
+}
+
+/**
  * Kills recorded process groups from ANY process — this is what makes
  * `zeus cancel` work against a task started by a different invocation.
  */
 export function killRecorded(stateRoot: string, filter: { taskId?: string; projectId?: string }, reason: string):
-  { killed: number; pruned: number; records: RunRecord[] } {
+  { killed: number; pruned: number; records: RunRecord[]; unverified: Array<{ jobId: string; pid: number; reason: string }> } {
   const dir = registryDirFor(stateRoot);
   let killed = 0, pruned = 0;
   const hit: RunRecord[] = [];
+  // Records that named a live pid we could not prove was ours. Reported rather
+  // than silently dropped: "we declined to kill something" is information.
+  const unverified: Array<{ jobId: string; pid: number; reason: string }> = [];
   for (const rec of listRunRecords(dir)) {
     if (filter.taskId && rec.taskId !== filter.taskId) continue;
     if (filter.projectId && rec.projectId !== filter.projectId) continue;
     if (!groupAlive(rec.pgid)) { removeRunRecord(dir, rec.jobId); pruned += 1; continue; }
+    // Alive is not the same as ours.
+    const identity = stillOurProcess(rec);
+    if (!identity.ours) {
+      unverified.push({ jobId: rec.jobId, pid: rec.pid, reason: identity.reason });
+      removeRunRecord(dir, rec.jobId); pruned += 1; continue;
+    }
     if (rec.unit) spawnSync('systemctl', ['--user', 'stop', rec.unit], { timeout: 10_000 });
     for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
       try { if (rec.pgid > 1) process.kill(-rec.pgid, sig); } catch { /* raced */ }
@@ -135,7 +203,7 @@ export function killRecorded(stateRoot: string, filter: { taskId?: string; proje
     hit.push(rec); killed += 1;
   }
   void reason;
-  return { killed, pruned, records: hit };
+  return { killed, pruned, records: hit, unverified };
 }
 
 /**
@@ -291,11 +359,15 @@ export class ProcessSupervisor {
     const timeoutMs = 1000 * (req.timeoutSeconds
       ?? (req.cls === 'light' ? budgets.lightTimeoutSeconds : budgets.heavyTimeoutSeconds));
 
+    const requestedNs = process.hrtime.bigint();
     return await new Promise<ExecutionResult>((resolve) => {
       let settled = false;
+      let spawnedNs = requestedNs;
+      let firstOutputNs: bigint | null = null;
       let child;
       try {
         child = spawn(wrapped.command, wrapped.args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        spawnedNs = process.hrtime.bigint();
       } catch (e: any) {
         this.release(req.cls);
         return resolve({ ...base, outcome: 'INFRASTRUCTURE_FAILURE', exitCode: null, signal: null,
@@ -310,12 +382,15 @@ export class ProcessSupervisor {
             jobId: req.id, pgid, pid: child.pid ?? 0, unit: wrapped.unit,
             projectId: req.projectId, taskId: req.taskId ?? null, hostname: require('os').hostname(),
             startedAt: new Date().toISOString(), command: `${req.command} ${req.args.join(' ')}`.slice(0, 300),
+            // Captured now, while we know the pid is ours.
+            startTicks: processStartTicks(child.pid ?? 0),
           });
         }
       }
 
       let out = '';
       const cap = (d: Buffer) => {
+        if (firstOutputNs === null) firstOutputNs = process.hrtime.bigint();
         const s = d.toString('utf8');
         if (out.length < 8 * 1024 * 1024) out += s;
         req.onOutput?.(s);
@@ -340,6 +415,12 @@ export class ProcessSupervisor {
           backend: wrapped.backend, isolationFallback: wrapped.fallback, enforced: wrapped.enforced,
           violations: [],
           productSignal: outcome === 'COMPLETED' || outcome === 'FAILED',
+          timing: {
+            requestedNs: requestedNs.toString(),
+            spawnedNs: spawnedNs.toString(),
+            firstOutputNs: firstOutputNs === null ? null : (firstOutputNs as bigint).toString(),
+            exitedNs: process.hrtime.bigint().toString(),
+          },
         });
       };
 

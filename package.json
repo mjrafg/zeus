@@ -14,7 +14,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "ts-node --transpile-only test/run.ts",
     "cli": "ts-node --transpile-only src/cli.ts",
-    "package": "bash scripts/package.sh"
+    "package": "bash scripts/package.sh",
+    "self-audit": "ts-node --transpile-only src/cli.ts self-audit"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

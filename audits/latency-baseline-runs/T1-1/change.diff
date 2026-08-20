@@ -1,0 +1,11 @@
+diff --git a/README.md b/README.md
+index e18729f..ce286ea 100644
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,5 @@
+ # Ledger
+ 
+-A small sample application used as a latency measurement subject.
++A compact sample application used as a latency measurement subject.
+ 
+ It has a session layer, a presentation layer and a handful of pure functions.

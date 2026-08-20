@@ -51,7 +51,7 @@ export interface ProjectConfig {
     };
   };
   integrations: { graphify: 'auto' | 'on' | 'off' };
-  paths: { state: string; logs: string; worktrees: string };
+  paths: { state: string; logs: string; worktrees: string; deps: string };
 }
 
 /** Where per-user runtime state lives, XDG-respecting. */
@@ -175,7 +175,7 @@ export function defaultConfig(root: string): ProjectConfig {
       },
     },
     integrations: { graphify: 'auto' },
-    paths: { state: '.zeus/state', logs: '.zeus/logs', worktrees: '.zeus/worktrees' },
+    paths: { state: '.zeus/state', logs: '.zeus/logs', worktrees: '.zeus/worktrees', deps: '.zeus/deps' },
   };
 }
 
@@ -250,7 +250,7 @@ export function validateConfig(cfg: any): ConfigProblem[] {
     }
   }
 
-  for (const key of ['state', 'logs', 'worktrees'] as const) {
+  for (const key of ['state', 'logs', 'worktrees', 'deps'] as const) {
     const v = String(cfg.paths?.[key] ?? '');
     if (path.isAbsolute(v) || v.split(/[\\/]/).includes('..')) {
       p.push({ level: 'error', message: `paths.${key} must stay inside the project (got "${v}")` });

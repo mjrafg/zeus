@@ -497,6 +497,10 @@ async function multiProjectSuite(): Promise<void> {
 
   const cfgA = defaultConfig(nodeRoot); cfgA.commands.unitTest = 'node -e process.exit(0)'; cfgA.commands.typecheck = null;
   const cfgB = defaultConfig(goRoot); cfgB.commands.unitTest = 'true'; cfgB.commands.typecheck = null;
+  // This fixture is a go.mod and one file, on a host with no Go toolchain. It
+  // declares no install step, because there is nothing to download — and a
+  // project that says so must not have `go mod download` inferred for it.
+  cfgB.commands.install = null;
   check('M1: each project detects its own type',
     cfgA.project.adapter === 'node' && cfgB.project.adapter === 'go');
 

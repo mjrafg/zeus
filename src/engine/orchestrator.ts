@@ -16,6 +16,7 @@ import { EventStore, StoredEvent } from './events';
 import { ProjectLock } from './lock';
 import { ProcessSupervisor, ExecutionResult, killRecorded } from './exec';
 import { ExecutionPolicy, defaultPolicy } from './policy';
+import { prepareDependencies, depsCacheRoot, PrepMethod } from './dependencies';
 import { Provider, AgentResponse, Role } from './providers';
 import { ProjectConfig } from '../config';
 import { adapterById } from '../adapters';
@@ -520,8 +521,65 @@ export class Engine {
     const adapter = adapterById(cfg.project?.adapter ?? 'generic');
 
     const wt = this.spans.sync('worktree.prepare', 'SETUP', () => this.prepareWorktree(rec));
-    this.record({ taskId, type: 'WORKTREE', payload: wt });
-    if (!wt.ok) { this.setState(taskId, 'FAILED', 'worktree'); return 'FAILED'; }
+    if (!wt.ok) {
+      this.record({ taskId, type: 'WORKTREE', payload: {
+        ...wt, prepared: false, method: 'none' as PrepMethod, lockfileHash: null,
+        reused: false, durationMs: 0 } });
+      this.setState(taskId, 'FAILED', 'worktree');
+      return 'FAILED';
+    }
+
+    // Dependencies BEFORE design, because every phase after this point runs
+    // commands in the worktree and a worktree without dependencies produces
+    // `Cannot find module` — a validation result that says nothing about the
+    // code. Measured under SETUP so its true cost is visible in the latency
+    // report rather than hidden inside the first check.
+    const deps = await this.spans.async('setup.dependencies', 'SETUP',
+      () => prepareDependencies({
+        projectRoot: this.opts.projectRoot, worktree: rec.worktree,
+        taskId, projectId: this.projectId,
+        // The configured command wins: the adapter supplies a default, the
+        // project's config is the contract. A project that declares it has no
+        // install step must not have one inferred for it.
+        // `??` would be wrong here: a configured `install: null` means "this
+        // project has no install step", and coalescing it away would infer one
+        // anyway. Presence of the key is the signal, not its truthiness.
+        installCommand: cfg.commands && 'install' in cfg.commands
+          ? cfg.commands.install : (adapter?.commands(rec.worktree).install ?? null),
+        supervisor: this.opts.supervisor, policy: this.policyFor(rec),
+        cacheRoot: depsCacheRoot(this.opts.projectRoot, this.opts.config.paths?.deps),
+      }));
+    this.record({ taskId, type: 'WORKTREE', payload: {
+      ...wt, prepared: deps.prepared, method: deps.method, lockfileHash: deps.lockfileHash,
+      reused: deps.reused, durationMs: deps.durationMs,
+      dependencyDetail: deps.detail, attempts: deps.attempts,
+    } });
+    if (!deps.ok) {
+      // A dependency install that fails is INFRASTRUCTURE_FAILURE, never a
+      // failing test: the code under test never ran. Proceeding to checks that
+      // cannot pass would turn a broken environment into a verdict about the
+      // change.
+      const tail = redactSecrets((deps.output ?? '').slice(-4000));
+      this.record({ taskId, type: 'DEPENDENCIES_FAILED', payload: {
+        method: deps.method, lockfileHash: deps.lockfileHash, detail: deps.detail,
+        outcome: 'INFRASTRUCTURE_FAILURE', attempts: deps.attempts,
+        installOutput: tail.text, ...(tail.redactions ? { redactions: tail.redactions } : {}),
+      } });
+      return this.escalateToHuman(taskId, 'NEEDS_RECONCILIATION', 'dependencies', {
+        reasonCode: 'MISSING_ENVIRONMENT',
+        blocked: `dependency preparation failed in the task worktree: ${deps.detail}`,
+        tried: deps.attempts.map((a) => `${a.method}: ${a.detail}`),
+        evidence: [{ kind: 'event', id: 'DEPENDENCIES_FAILED', detail: 'install output, redacted' }],
+        needed: {
+          kind: 'fix',
+          description: 'a worktree that can install this project\'s dependencies',
+          how: 'reproduce the install command shown in the event, then fix the cause '
+            + '(unreachable registry, missing toolchain, or a lockfile the manifest disagrees with)',
+        },
+        resumeBehavior: 'rerun the task: preparation is retried and, once it succeeds, '
+          + 'is published to the project cache so later tasks reuse it',
+      });
+    }
 
     // ---- DESIGN ------------------------------------------------------------
     this.setState(taskId, 'DESIGN', 'design');

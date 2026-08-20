@@ -17,6 +17,7 @@ import {
 } from './config';
 import { detectProject } from './adapters';
 import { probe, summarize, Capability } from './doctor';
+import { describeDependencyState, cleanDependencyCache, depsCacheRoot } from './engine/dependencies';
 import { Engine, TERMINAL } from './engine/orchestrator';
 import { ProcessSupervisor } from './engine/exec';
 import { deriveBudgets } from './engine/budget';
@@ -72,6 +73,7 @@ ${C.b}Usage${C.x}
   zeus revalidate <taskId> [--into <ref>]     recheck a verified task against a moved integration target
   zeus self-audit [--lane A-F] [--cycle-id <id>]  audit this checkout adversarially, on a disposable copy
   zeus self-check                             gate for Zeus's own commits: boundary checks + the non-service suite
+  zeus clean --deps                           remove this project's prepared dependency caches
   zeus version
   zeus help
 
@@ -419,6 +421,22 @@ function cmdDoctor(args: string[]): number {
   out(`  test workers               : ${budgets.maxTestWorkers} (playwright ${budgets.maxPlaywrightWorkers})`);
   out(`  concurrency                : heavy ${budgets.globalHeavyConcurrency}, light ${budgets.globalLightConcurrency}`);
 
+  // Dependency preparation, reported as state rather than intent: a cache
+  // that was never built and a cache that was deleted must not look alike, and
+  // "would use" is a different fact from "has".
+  if (root) {
+    const dep = describeDependencyState(root,
+      adapterFor(root, cfg)?.commands(root).install ?? null, depsCacheRoot(root, cfg?.paths?.deps));
+    out(`\n${C.b}Dependency preparation${C.x}`);
+    out(`  ecosystem        ${dep.ecosystem}${dep.packageManager ? ` (${dep.packageManager})` : ''}`);
+    out(`  lockfile         ${dep.lockfile ?? `${C.dim}none${C.x}`}`);
+    out(`  lockfile hash    ${dep.lockfileHash ? dep.lockfileHash.slice(0, 16) : `${C.dim}n/a${C.x}`}`);
+    out(`  prepared cache   ${dep.cached ? `${C.g}present${C.x} (${(dep.cacheBytes / 1e6).toFixed(1)} MB)` : `${C.y}none${C.x}`}`);
+    out(`  cache directory  ${dep.cacheDir ? path.relative(root, dep.cacheDir) : `${C.dim}n/a${C.x}`}`);
+    out(`  caches for this project  ${dep.caches}`);
+    out(`  next task would use      ${dep.wouldUse}  ${C.dim}${dep.detail}${C.x}`);
+  }
+
   const { ok, blocking } = summarize(caps);
   const providerGaps = caps.filter((c) => c.provider && c.level === 'missing');
   out(`\n${ok ? `${C.g}Ready.${C.x}` : `${C.r}Not ready:${C.x} ${blocking.map((b) => b.label).join(', ')}`}`);
@@ -631,6 +649,44 @@ async function cmdSelfAudit(argv: string[]): Promise<number> {
  * Used by `.githooks/pre-commit`. Exits non-zero and names the failing checks,
  * so a refusal says what is wrong rather than that something is.
  */
+/**
+ * `zeus clean --deps` — remove prepared dependency caches for THIS project.
+ *
+ * Nothing evicts on its own: a content-addressed cache is either the right one
+ * or unreachable, so there is no age at which deleting it is automatically
+ * correct. Removal is therefore something a person asks for, and this is where
+ * they ask.
+ */
+/** The adapter this project is configured to use, or the detected one. */
+function adapterFor(root: string, cfg: ProjectConfig | null) {
+  const { adapterById, detectProject } = require('./adapters');
+  return (cfg?.project?.adapter ? adapterById(cfg.project.adapter) : null)
+    ?? detectProject(root).primary;
+}
+
+function cmdClean(argv: string[]): number {
+  const root = findProjectRoot();
+  if (!root) { err(`${C.r}not inside a project${C.x}`); return 2; }
+  if (!argv.includes('--deps')) {
+    err('usage: zeus clean --deps');
+    err('  --deps  remove prepared dependency caches for this project');
+    return 2;
+  }
+  const cfg = readConfig(root);
+  const cacheRoot = depsCacheRoot(root, cfg?.paths?.deps);
+  const before = describeDependencyState(root, adapterFor(root, cfg)?.commands(root).install ?? null, cacheRoot);
+  const r = cleanDependencyCache(cacheRoot);
+  if (argv.includes('--json')) {
+    out(JSON.stringify({ cacheRoot, removed: r.removed, bytes: r.bytes, cachesBefore: before.caches }, null, 1));
+    return 0;
+  }
+  if (!r.removed.length) { out(`${C.dim}nothing to clean in ${path.relative(root, cacheRoot)}${C.x}`); return 0; }
+  out(`${C.g}✓${C.x} removed ${r.removed.length} dependency artifact(s), ${(r.bytes / 1e6).toFixed(1)} MB`);
+  for (const n of r.removed) out(`  ${C.dim}${n}${C.x}`);
+  out(`${C.dim}the next task in this project prepares dependencies again${C.x}`);
+  return 0;
+}
+
 function cmdSelfCheck(argv: string[]): number {
   const root = findProjectRoot() ?? process.cwd();
   const json = argv.includes('--json');
@@ -782,6 +838,7 @@ export async function main(argv: string[]): Promise<number> {
     case 'revalidate': return cmdRevalidate(rest);
     case 'self-audit': return cmdSelfAudit(rest);
     case 'self-check': return cmdSelfCheck(rest);
+    case 'clean': return cmdClean(rest);
     default: err(`unknown command "${cmd}"`); usage(); return 2;
   }
 }

@@ -30,6 +30,44 @@ worker caps pushed into the environment and argv, wall clocks, process-group
 and cgroup termination. A command that forks 100 children is bounded, all
 descendants die, and the control plane keeps working.
 
+*Aggregate memory, closed 2026-08-20.* The claim above was only ever true of a
+single process while this host ran without a cgroup: `ulimit -v` bounds one
+address space, so N workers each comfortably inside the ceiling could still
+exhaust the machine together — the exact shape of the original outage. Three
+things closed it:
+
+  * **Detection now means operational capability.** `systemd-scope` is
+    advertised only after a probe creates a real transient scope and reads
+    `memory.max`, `pids.max` and `cpu.max` back from inside it. A scope that
+    comes up without a memory ceiling makes the backend *unavailable*, because
+    a backend that looks like containment and is not is worse than none.
+    `XDG_RUNTIME_DIR` is derived when absent (`su`, cron and service managers
+    do not set it) and then proved, never assumed — that alone was why this
+    host reported "no systemd user manager" while having one.
+  * **Containment is classified by elimination, not by signal.** The same
+    256 MB aggregate overrun was contained twice with different signatures:
+    SIGKILL when the kernel OOM killer fired first, SIGTERM when systemd
+    stopped the unit first. Under a scope, cancellation and the wall clock are
+    both excluded earlier, so a tree that goes down as a unit is a resource
+    event. Classifying on the signal alone reported containment as a failing
+    test about half the time.
+  * **`OOMPolicy=kill`** takes the whole tree down when any member is
+    OOM-killed, rather than leaving survivors behind a dead leader.
+
+Held by `CG9`–`CG14` in `test/cgroup.ts`: six processes of ~80 MB inside a
+256 MB scope, no single one near the ceiling, contained in ~250 ms, classified
+`RESOURCE_LIMIT_EXCEEDED`, `productSignal` false, host responsive. Lifecycle by
+`CG15`–`CG20`: no transient unit survives a normal exit, an explicit kill or a
+supervisor crash. Detection honesty by `CG1`–`CG7`.
+
+**This closure is host-conditional and says so.** Tree-wide enforcement
+requires a systemd user manager, which requires lingering for a non-interactive
+account (`loginctl enable-linger`). Where that is unavailable — a container
+without systemd, a host where the probe fails — Zeus keeps the rlimit ceiling
+and **aggregate exhaustion by many small processes remains possible**. That is
+stated in `zeus doctor`, in the README, and here, rather than being left to the
+reader to discover.
+
 **P0-2 shell and filesystem confinement** → policy evaluated before every
 spawn: symlink-aware containment, traversal and absolute-path refusal,
 destructive/fork-bomb/persistence/env-poisoning detection, environment

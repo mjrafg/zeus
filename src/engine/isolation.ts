@@ -40,6 +40,14 @@ export interface WrappedCommand {
    * accounting, and one boolean hid that distinction.
    */
   resourceEnforcement: ResourceEnforcement;
+  /**
+   * Environment the WRAPPER needs, not the command. `systemd-run --user` talks
+   * to a per-user bus and cannot find it without XDG_RUNTIME_DIR, which is
+   * absent under `su`, cron and most service managers. This is Zeus's own
+   * environment, so it is applied after the policy's allowlist rather than
+   * through it.
+   */
+  env?: Record<string, string>;
 }
 
 function has(bin: string): boolean {
@@ -51,12 +59,106 @@ function cgroup2Available(): boolean {
   return fs.existsSync('/sys/fs/cgroup/cgroup.controllers');
 }
 
-function systemdUserAvailable(): boolean {
-  if (!has('systemd-run')) return false;
-  // A user manager must actually be running, or --user scopes fail at spawn.
-  const r = spawnSync('systemctl', ['--user', 'is-system-running'], { encoding: 'utf8', timeout: 8_000 });
+/**
+ * Where this user's systemd bus lives.
+ *
+ * pam_systemd exports XDG_RUNTIME_DIR for interactive logins and for nothing
+ * else. Zeus is normally started by a service manager, a cron entry or `su`,
+ * none of which set it — so a host with a perfectly good user manager reported
+ * "no systemd" purely because of how the process was launched. Deriving the
+ * path does not assume it works; the probe below still has to succeed.
+ */
+export function userRuntimeDir(): string | null {
+  const fromEnv = process.env.XDG_RUNTIME_DIR;
+  if (fromEnv && fs.existsSync(fromEnv)) return fromEnv;
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (uid === null) return null;
+  const guess = `/run/user/${uid}`;
+  try { return fs.statSync(guess).isDirectory() ? guess : null; } catch { return null; }
+}
+
+/** The environment a `--user` systemd command needs to reach its own bus. */
+export function systemdUserEnv(): Record<string, string> {
+  const dir = userRuntimeDir();
+  if (!dir) return {};
+  return {
+    XDG_RUNTIME_DIR: dir,
+    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS ?? `unix:path=${dir}/bus`,
+  };
+}
+
+export interface ScopeProbe {
+  ok: boolean;
+  detail: string;
+  /** Ceilings this host was OBSERVED to apply, read from inside a real scope. */
+  enforces: string[];
+}
+
+/**
+ * Whether a systemd user scope actually enforces anything here.
+ *
+ * The previous check asked whether a user manager was running and concluded
+ * that memory, CPU and process caps were therefore in force. Those are
+ * different questions: delegation can be partial, a controller can be absent
+ * from the subtree, and a scope can be created successfully while enforcing
+ * nothing at all.
+ *
+ * So this probe creates a real scope with real properties and has it read its
+ * OWN cgroup files back. A ceiling is claimed only when the kernel was seen
+ * holding it.
+ */
+function probeSystemdScope(): ScopeProbe {
+  if (!has('systemd-run')) return { ok: false, detail: 'systemd-run not installed', enforces: [] };
+  const env = systemdUserEnv();
+  if (!env.XDG_RUNTIME_DIR) {
+    return { ok: false, detail: 'no XDG_RUNTIME_DIR and no /run/user/<uid> — no user bus to reach', enforces: [] };
+  }
+  const MEM = 64 * 1024 * 1024;
+  const TASKS = 32;
+  const script = 'cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); '
+    + 'printf "MEM=%s PIDS=%s CPU=%s KILL=%s\n" '
+    + '"$(cat $cg/memory.max 2>/dev/null)" "$(cat $cg/pids.max 2>/dev/null)" '
+    + '"$(cat $cg/cpu.max 2>/dev/null)" "$(test -e $cg/cgroup.kill && echo yes || echo no)"';
+  const r = spawnSync('systemd-run', [
+    '--user', '--scope', '--quiet', '--collect',
+    `--unit=zeus-probe-${process.pid}-${Date.now()}`,
+    `--property=MemoryMax=${MEM}`, `--property=TasksMax=${TASKS}`, '--property=CPUQuota=50%',
+    'sh', '-c', script,
+  ], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, ...env } });
+
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  return r.status === 0 || /running|degraded|starting/.test(out);
+  if (r.status !== 0) {
+    const why = out.trim().split('\n').filter(Boolean).pop() ?? `exit ${r.status}`;
+    return { ok: false, detail: `user scope could not be created: ${why}`, enforces: [] };
+  }
+  const enforces: string[] = [];
+  const memOk = new RegExp(`MEM=${MEM}\\b`).test(out);
+  const pidsOk = new RegExp(`PIDS=${TASKS}\\b`).test(out);
+  const cpuOk = /CPU=50000 \d+/.test(out);
+  const killOk = /KILL=yes/.test(out);
+  if (memOk) enforces.push('memory cap (cgroup)');
+  if (cpuOk) enforces.push('cpu quota (cgroup)');
+  if (pidsOk) enforces.push('process cap (cgroup)');
+  if (killOk) enforces.push('cgroup kill of the whole tree');
+  if (!memOk) {
+    // A scope with no memory ceiling is the dangerous case: it looks like
+    // containment and is not. Refuse the backend rather than advertise it.
+    return {
+      ok: false, enforces: [],
+      detail: `scope created but MemoryMax was not applied (${out.trim().split('\n').pop()})`,
+    };
+  }
+  return { ok: true, detail: `verified inside a live scope: ${enforces.join(', ')}`, enforces };
+}
+
+/**
+ * Memoised: the probe spawns a process, and detection is called per supervisor
+ * and by `doctor`. Capability does not change inside one process's lifetime.
+ */
+let scopeProbeCache: ScopeProbe | null = null;
+export function systemdScopeProbe(force = false): ScopeProbe {
+  if (force || !scopeProbeCache) scopeProbeCache = probeSystemdScope();
+  return scopeProbeCache;
 }
 
 function bubblewrapUsable(): { ok: boolean; detail: string } {
@@ -70,20 +172,17 @@ function bubblewrapUsable(): { ok: boolean; detail: string } {
 
 export function detectBackends(): BackendCapability[] {
   const cg = cgroup2Available();
-  const sysd = systemdUserAvailable();
+  const scope = cg ? systemdScopeProbe() : { ok: false, detail: 'cgroup v2 not mounted', enforces: [] };
   const bw = bubblewrapUsable();
   return [
     {
-      id: 'systemd-scope', available: sysd && cg,
-      detail: sysd ? (cg ? 'systemd --user + cgroup v2' : 'systemd-run present but cgroup v2 missing')
-                   : 'no systemd user manager',
-      // `enforces` describes what this backend delivers HERE, not what the
-      // mechanism can do in principle. An unavailable backend enforces nothing,
-      // and printing its capabilities anyway is how a report comes to describe
-      // a configuration rather than a machine.
-      enforces: (sysd && cg)
-        ? ['memory cap (cgroup)', 'cpu quota (cgroup)', 'process cap (cgroup)', 'cgroup kill of the whole tree']
-        : [],
+      id: 'systemd-scope', available: scope.ok,
+      detail: scope.detail,
+      // `enforces` is the list the probe OBSERVED the kernel holding, not the
+      // list the mechanism supports. Availability means operational capability:
+      // a backend that was never successfully probed advertises nothing, and a
+      // scope that came up without a memory ceiling is not available at all.
+      enforces: scope.enforces,
     },
     {
       id: 'bubblewrap', available: bw.ok, detail: bw.detail,
@@ -155,6 +254,7 @@ export function wrap(cmd: string, args: string[], req: IsolationRequest,
   let outArgs = [...args];
   const enforced: string[] = [];
   let unit: string | null = null;
+  let scopeEnv: Record<string, string> = {};
 
   if (useBwrap) {
     // Read-only host, writable only where the policy says, private /tmp, and
@@ -177,10 +277,21 @@ export function wrap(cmd: string, args: string[], req: IsolationRequest,
       `--property=TasksMax=${req.budgets.maxProcesses}`,
       // Kill the whole cgroup, not just the leader, when the scope stops.
       '--property=KillMode=control-group',
+      // When the kernel OOM-kills ANY member, take the whole tree down.
+      //
+      // Measured, not assumed: a six-process hog inside a 256 MB scope was
+      // contained either way, but the default policy stops the unit with
+      // SIGTERM and the leader exits 143 — indistinguishable from an ordinary
+      // termination, which the supervisor would classify as a failing test.
+      // With this policy the leader dies by SIGKILL (137), so containment is
+      // reported as RESOURCE_LIMIT_EXCEEDED rather than blamed on the code.
+      '--property=OOMPolicy=kill',
     ];
     outArgs = [...props, outCmd, ...outArgs];
     outCmd = 'systemd-run';
-    enforced.push('memory cap', 'cpu quota', 'process cap', 'cgroup tree kill');
+    // What the probe saw the kernel hold, not what the flags asked for.
+    enforced.push(...(avail.get('systemd-scope')?.enforces ?? []));
+    scopeEnv = systemdUserEnv();
   }
 
   // No cgroup means no memory ceiling, so apply the portable one. Outermost, so
@@ -198,7 +309,7 @@ export function wrap(cmd: string, args: string[], req: IsolationRequest,
   if (backend === 'process-group') enforced.push('process-group termination');
 
   return {
-    command: outCmd, args: outArgs, backend,
+    command: outCmd, args: outArgs, backend, env: scopeEnv,
     // Fallback means: weaker than the strongest thing this host offers.
     fallback: backend === 'process-group',
     // Reported separately, because a run can be filesystem-confined and still

@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ExecutionPolicy, buildEnv, inspectCommand, resolveWithin, PolicyViolation } from './policy';
 import { Budgets, deriveBudgets } from './budget';
-import { wrap, detectBackends, BackendCapability, BackendId } from './isolation';
+import { wrap, detectBackends, BackendCapability, BackendId, systemdUserEnv } from './isolation';
 
 export type ExecClass = 'light' | 'heavy' | 'agent';
 
@@ -368,7 +368,12 @@ export class ProcessSupervisor {
         CARGO_HOME: path.join(cacheDir, 'cargo'), npm_config_cache: path.join(cacheDir, 'npm'),
       };
     }
-    const env = buildEnv(req.policy, { ...workerEnv(budgets), ...cacheEnv, ...(req.env ?? {}) });
+    // The wrapper's own environment is applied AFTER the policy allowlist:
+    // XDG_RUNTIME_DIR is Zeus's, not the project's, and `systemd-run --user`
+    // cannot find its bus without it. Filtering it through the project's
+    // allowlist would silently disable cgroup enforcement.
+    const env = { ...buildEnv(req.policy, { ...workerEnv(budgets), ...cacheEnv, ...(req.env ?? {}) }),
+      ...(wrapped.env ?? {}) };
 
     // Diagnose a missing toolchain before any wrapper can disguise it.
     const exe = resolveExecutable(req.command, env);
@@ -455,6 +460,21 @@ export class ProcessSupervisor {
         // A cgroup kill, an OOM exit or the classic heap message are the
         // machine running out of room — never a verdict about the code.
         if (signal === 'SIGKILL' || code === 137 || code === 139) return finish('RESOURCE_LIMIT_EXCEEDED', code, signal ?? null);
+        // Under a systemd scope, the whole tree being terminated is a resource
+        // event by elimination. Cancellation and the wall clock are both
+        // checked above, so if neither of those stopped it and the unit went
+        // down as a unit, the actor left is the resource policy.
+        //
+        // Measured: the same 256 MB aggregate overrun was contained twice with
+        // different signatures — SIGKILL when the kernel OOM killer fired
+        // first, SIGTERM when systemd stopped the unit first. Classifying on
+        // the signal alone made containment look like a failing test roughly
+        // half the time. The direction of this inference is also the safe one:
+        // it can turn an exotic self-termination into "not a verdict", never a
+        // real failure into a pass.
+        if (wrapped.backend === 'systemd-scope' && (signal === 'SIGTERM' || code === 143)) {
+          return finish('RESOURCE_LIMIT_EXCEEDED', code, signal ?? null);
+        }
         // Runtimes announce exhaustion in their own words and then die by a
         // signal that on its own means nothing. A probe against the rlimit
         // ceiling exited on SIGTRAP saying "Fatal process OOM in Failed to
@@ -479,7 +499,10 @@ export class ProcessSupervisor {
     if (!job) return false;
     if (this.registryDir) removeRunRecord(this.registryDir, id);
     if (markCancelled) job.cancelled = true;
-    if (job.unit) spawnSync('systemctl', ['--user', 'stop', job.unit], { timeout: 10_000 });
+    if (job.unit) {
+      spawnSync('systemctl', ['--user', 'stop', job.unit],
+        { timeout: 10_000, env: { ...process.env, ...systemdUserEnv() } });
+    }
     for (const sig of ['SIGTERM', 'SIGKILL'] as const) {
       try { if (job.pgid > 1) process.kill(-job.pgid, sig); } catch { /* already gone */ }
     }

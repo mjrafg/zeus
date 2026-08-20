@@ -52,8 +52,17 @@ a failing test.
 by one supervisor. Budgets are derived from the host, a share is reserved for
 the control plane, and each execution gets a bounded slice of the rest — memory,
 CPU quota, process cap, wall clock, and test-worker limits pushed into the
-environment so your own `npm test` is bounded without rewriting it. A task that
-forks a hundred workers is contained; the machine stays usable.
+environment so your own `npm test` is bounded without rewriting it.
+
+How far containment reaches depends on the machine, and `zeus doctor` tells you
+which of the two you have. With a systemd user manager and cgroup v2 — verified
+by creating a scope and reading its ceilings back out of the kernel, not by
+finding the binaries — a task's whole process tree is bounded **as a unit**: a
+hundred workers that each look modest cannot exhaust the host between them, and
+the tree is killed together. Without one, Zeus falls back to a per-process
+address-space limit. That stops one runaway allocation and does **not** stop
+many processes exhausting memory together. Zeus reports which is in force
+rather than claiming the stronger one.
 
 **Confinement, not good intentions.** Project commands run under filesystem
 confinement with a read-only host, a writable worktree and no network. Paths are

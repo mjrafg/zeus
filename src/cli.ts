@@ -415,6 +415,14 @@ function cmdDoctor(args: string[]): number {
   out(`  ${C.b}resource ceilings:${C.x} ${kernelBacked ? `${C.g}cgroup${C.x}` : `${C.y}rlimit only${C.x}`}`);
   out(`  ${C.dim}${iso.resourceDetail}${C.x}`);
   out(`  ${C.dim}enforces: ${iso.enforces.join(', ')}${C.x}`);
+  if (!kernelBacked) {
+    // The limitation, in the words that matter to someone deciding whether to
+    // trust this machine with an autonomous task.
+    out(`  ${C.y}!${C.x} many processes can still exhaust memory TOGETHER: the ceiling here`);
+    out(`     bounds one address space, not the process tree.`);
+    out(`     ${C.dim}→ a systemd user manager gives tree-wide cgroup ceilings:${C.x}`);
+    out(`     ${C.dim}  loginctl enable-linger "$USER"   (then re-run zeus doctor)${C.x}`);
+  }
   out(`\n${C.b}Derived budgets${C.x} ${C.dim}(from ${budgets.derivedFrom.cpus} cpus / ${budgets.derivedFrom.totalMemMb} MB)${C.x}`);
   out(`  reserved for control plane : ${budgets.reservedCpus} cpu, ${budgets.reservedMemMb} MB`);
   out(`  per execution              : ${budgets.cpuQuotaPercent}% cpu, ${budgets.memoryMaxMb} MB, ${budgets.maxProcesses} procs`);

@@ -468,11 +468,25 @@ export class ProcessSupervisor {
         // Measured: the same 256 MB aggregate overrun was contained twice with
         // different signatures — SIGKILL when the kernel OOM killer fired
         // first, SIGTERM when systemd stopped the unit first. Classifying on
-        // the signal alone made containment look like a failing test roughly
-        // half the time. The direction of this inference is also the safe one:
-        // it can turn an exotic self-termination into "not a verdict", never a
-        // real failure into a pass.
-        if (wrapped.backend === 'systemd-scope' && (signal === 'SIGTERM' || code === 143)) {
+        // SIGKILL alone made containment look like a failing test roughly half
+        // the time.
+        //
+        // A SIGNAL, and only a signal. An exit CODE is the program's own
+        // statement, and `exit 143` is a number a test suite is free to
+        // choose; a signal on our direct child is something done TO it. The
+        // first version of this rule also matched `code === 143` and therefore
+        // classified a project that exited 143 as a resource event — Zeus
+        // refusing to believe a test result the test had stated plainly.
+        //
+        // Nothing is lost by dropping it: `OOMPolicy=kill` takes the whole
+        // scope down together, so real containment kills our direct child too
+        // and arrives as SIGKILL or SIGTERM with a null code. A 128+N exit code
+        // with no signal means a shell SURVIVED to report a child's death,
+        // which is not the tree being stopped. (`code === 137` above is a
+        // different case and stays: it is the rlimit path's OOM signature,
+        // where the kernel kills the runaway and its shell parent lives to
+        // report it. Measured on all four backend combinations.)
+        if (wrapped.backend === 'systemd-scope' && signal === 'SIGTERM') {
           return finish('RESOURCE_LIMIT_EXCEEDED', code, signal ?? null);
         }
         // Runtimes announce exhaustion in their own words and then die by a

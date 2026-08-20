@@ -130,6 +130,40 @@ export async function cgroupSuite(): Promise<void> {
       alive.status === 0 && free > 200, `${free.toFixed(0)} MB free`);
 
     // -------------------------------------------------------------------
+    section('containment is a signal, never a number the project chose');
+    {
+      // The reclassification that makes CG10 work says: under a scope, a tree
+      // that goes down as a unit is a resource event. It must not extend to
+      // exit CODES. `exit 143` is a number a test suite is free to return —
+      // 128+SIGTERM is a common convention for "I shut down on request" — and
+      // an earlier version of the rule matched it, so Zeus refused to believe
+      // a test result the test had stated plainly.
+      const exits: Array<[number, string]> = [[143, 'the SIGTERM convention'],
+        [1, 'an ordinary failure']];
+      for (const [code, what] of exits) {
+        const r = await sup.run({
+          id: `own-exit-${code}`, projectId: 'cg', taskId: 'T-cg-exit', cls: 'light',
+          command: sh(`exit${code}.sh`, `echo "the suite is reporting a result"; exit ${code}`),
+          args: [], cwd: TMP, policy: defaultPolicy(TMP, TMP), confineFilesystem: false,
+          timeoutSeconds: 30,
+        } as any);
+        check(`CG21-${code}: a project that EXITS ${code} (${what}) is a failing test, not a resource event`,
+          r.outcome === 'FAILED' && r.productSignal === true && r.exitCode === code && r.signal === null,
+          `${r.outcome} code=${r.exitCode} signal=${r.signal} productSignal=${r.productSignal} backend=${r.backend}`);
+      }
+
+      // And the other side of the same line: a SIGNAL on our direct child is
+      // something done TO the execution, and under a scope the only actor left
+      // once cancellation and the wall clock are excluded is the resource
+      // policy. CG10 is the live proof; this pins the rule's shape so the
+      // `code === 143` clause cannot come back.
+      const exec = fs.readFileSync(path.resolve(__dirname, '../src/engine/exec.ts'), 'utf8');
+      check('CG22: the scope rule keys on the signal alone, never on an exit code',
+        /wrapped\.backend === 'systemd-scope' && signal === 'SIGTERM'/.test(exec)
+        && !/systemd-scope' && \(signal === 'SIGTERM' \|\| code === 143\)/.test(exec));
+    }
+
+    // -------------------------------------------------------------------
     section('cgroup lifecycle: nothing leaks');
     check('CG15: a contained execution leaves no transient unit behind',
       zeusUnits().length <= before, zeusUnits().join(','));

@@ -4,6 +4,11 @@ Derived from Audit Cycle 1 (`cycle-1` → `cycle-1-final`, candidate
 `22e3c808d1c5`). Ranked, not scored: a list a person can work down, which is
 all the targeting a lane-depth decision needs.
 
+Targets 9 and 10 were added after cycle 1, from the `b4274f8` incident — a
+secret-redaction regression that reached `origin/main` and the probe defect that
+made it visible only downstream of the push. Findings arriving between cycles are
+recorded here as they happen rather than held for the next Lane G pass.
+
 `zeus self-audit` in a future cycle should read this file to bias depth toward
 the areas below, and Lane G regenerates it at the end of every cycle.
 
@@ -90,6 +95,75 @@ probing first: whether any existing Zeus code path performs a repository write
 while presenting itself as inspection. `zeus revalidate` is the obvious
 candidate, since it already rebases a worktree as part of answering a question
 (finding F-F5 in this cycle).
+
+## 9 — redaction is per-path, so any new event path can silently lose it  · HIGH
+
+From the `b4274f8` incident. `CHECK_RESULT` redacts the command line it
+records. The `CHECK_REFUSED` path, added days later in `80a362e`, recorded the
+same command verbatim. Nothing failed: the suite was green, both commit gates
+held, and the leak reached `origin/main`. Only lane C's probe found it, one
+step downstream of publication.
+
+The defect is not that one call site forgot `redactSecrets()`. It is that
+forgetting is possible at all. Redaction lives at each call site, so the safe
+behaviour is opt-in and the number of places that must opt in grows with every
+event type. Target 2 already noted that only `CHECK_RESULT` is redacted; this
+is the sharper version, with an incident behind it: the problem is not *which*
+paths redact, it is that "which paths redact" is a question anyone can answer
+wrongly by writing ordinary code.
+
+**Proposed direction — one redacting sink.** Route every command and every
+project-derived string through a single recording boundary, so that raw text
+cannot reach the event store by any path:
+
+- give the event store a typed payload boundary that accepts `Redacted<string>`
+  for command lines, output tails, diffs and review payloads, and refuses a
+  bare `string` at the type level;
+- make `redactSecrets()` the only producer of that type, so the compiler names
+  the omission instead of a probe finding it after publication;
+- move redaction from the call sites to `record()`, and delete the per-site
+  calls, so a new event path inherits the behaviour rather than re-declaring it;
+- add a probe that writes a known secret through *every* event type the store
+  accepts and asserts none of them reach `events.jsonl` — a check that scales
+  with the schema rather than with the list someone remembered to write.
+
+This is a design change to the recording boundary, not a patch, and it is
+deliberately **not** being applied as part of the fix that surfaced it.
+Constraining a shape and repairing an instance are different work, and doing
+them in one commit hides which one was verified.
+
+## 10 — probe C-C5 was measuring the wrong path  · HIGH
+
+The same incident exposed a second defect, in the harness rather than the
+product. Lane C's C-C5 probe called `engine.runCheck` directly to prove a
+secret is redacted before it is recorded. Once the selection ledger landed,
+that call was correctly *refused* — the check was not in the ledger — so the
+probe was observing a `CHECK_REFUSED` record and asserting redaction against
+it. It reported `secret present: true` for a real reason, but not the reason it
+was written to test, and it would have reported the same thing had the
+redaction it exists to guard been perfect.
+
+A probe that still fails is the benign version. The dangerous version is the
+same shape passing: a probe whose subject has moved underneath it, reporting
+green about code it no longer reaches.
+
+**Sweep, cycle 2.** Target 7 already asks for a meta-probe on probe quality;
+this narrows it to a specific, checkable shape. Audit every probe in
+`audits/harness/` for:
+
+- calls into product internals that a policy, ledger or gate can now refuse —
+  the probe must reach its subject through the same path a real task does, or
+  assert explicitly that it is testing the refusal;
+- assertions that pass or fail for more than one reason, where the probe cannot
+  distinguish "the property holds" from "the property was never exercised";
+- probes whose result does not change when the module under test is stubbed
+  out — the stub test from target 7, applied to each probe individually rather
+  than as a blanket rule.
+
+Findings-so-far give the prior: three of eleven cycle-1 findings were probe
+defects, and this makes four across two cycles. The harness needs the same
+suspicion as the product, and it currently gets less, because nothing audits
+the auditor.
 
 ## Telemetry inputs
 

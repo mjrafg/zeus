@@ -1,0 +1,90 @@
+#!/bin/sh
+# Zeus gates what leaves the repository, not just what enters it.
+#
+# Evidence: 9f889a6 was pushed to origin/main while the release gate was
+# refusing. The commit carried a real regression — a new event path recorded a
+# command verbatim that every other path redacts — and it sat on the public
+# remote until the packaging step, which runs downstream of the push, found it.
+# pre-commit and pre-merge-commit both held. Neither one covers publication,
+# because a push creates no commit.
+#
+# So this hook runs the two gates that would have caught it, in cost order:
+#
+#   1. zeus self-check  — boundary checks + the non-service suite
+#   2. zeus self-audit  — the adversarial lanes, on a disposable checkout
+#
+# The audit is the one that matters here: the suite was green at 9f889a6. Only
+# lane C's probe found the leak.
+#
+# WHAT IS AUDITED. `zeus self-audit` audits HEAD, by design — it checks out the
+# commit under audit into a disposable worktree so a defect in the candidate
+# cannot disable the checks looking for it. That means this hook can only speak
+# for a push whose commits ARE HEAD. Pushing some other ref is refused rather
+# than waved through, because the alternative is a gate that prints a verdict
+# about a commit it never examined.
+#
+# Deleting a remote ref publishes nothing new and is not gated.
+#
+# Bypassing with `git push --no-verify` is outside any hook's control. That is a
+# stated limit of hook-based enforcement, not a supported route.
+set -e
+
+# Retargeting variables, unset for the same reason pre-merge-commit's gate
+# strips them: anything under GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE would
+# point the audit's disposable checkout back at this repository. Today git does
+# not export them to pre-push — GIT_EXEC_PATH and GIT_PREFIX are all that
+# arrive — but the merge-hook case proved that relying on which variables
+# happen to be set is how this breaks.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+head=$(git rev-parse HEAD)
+zero=0000000000000000000000000000000000000000
+
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
+publishing=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "$local_sha" ] || continue
+  if [ "$local_sha" = "$zero" ]; then continue; fi        # deleting a remote ref
+  if [ "$local_sha" != "$head" ]; then
+    echo "pre-push: refusing to push $local_ref -> $remote_ref" >&2
+    echo "  that ref is at $(printf %.12s "$local_sha"), HEAD is at $(printf %.12s "$head")." >&2
+    echo "  zeus self-audit audits HEAD, so this gate cannot speak for that commit." >&2
+    echo "  Check it out and push from there, so the gate examines what you are publishing." >&2
+    exit 1
+  fi
+  publishing=1
+done
+
+if [ "$publishing" -eq 0 ]; then
+  exit 0
+fi
+
+if [ ! -x "$root/node_modules/.bin/ts-node" ]; then
+  echo "pre-push: ts-node is missing; run npm install so the push gate can run" >&2
+  echo "pre-push: refusing rather than publishing unverified" >&2
+  exit 1
+fi
+ts_node="$root/node_modules/.bin/ts-node"
+
+echo "pre-push: gate 1/2 — self-check (boundary checks + non-service suite)..." >&2
+"$ts_node" --transpile-only "$root/src/cli.ts" self-check >&2
+
+short=$(git rev-parse --short=12 HEAD)
+cycle="prepush-$short"
+echo "pre-push: gate 2/2 — self-audit lanes against $short (disposable checkout)..." >&2
+if "$ts_node" --transpile-only "$root/src/cli.ts" self-audit --cycle-id "$cycle" >&2; then
+  # Clean on the way out: a passing audit should leave no untracked report
+  # behind for the next command to trip over. A refusal keeps its evidence.
+  rm -rf "$root/audits/cycles/$cycle"
+  exit 0
+fi
+
+echo "" >&2
+echo "pre-push: REFUSED — the self-audit reported open findings at $short." >&2
+echo "  report  audits/cycles/$cycle/report.md" >&2
+echo "  data    audits/cycles/$cycle/findings.json" >&2
+echo "  Publishing is refused rather than allowed while a finding is open." >&2
+exit 1

@@ -377,6 +377,93 @@ export async function selectionSuite(): Promise<void> {
   }
 
   // -----------------------------------------------------------------------
+  section('test 10 (push): publication is gated too');
+  {
+    const hooksDir = path.resolve(__dirname, '../.githooks');
+    const hook = path.join(hooksDir, 'pre-push');
+    check('PG1: the push gate exists and is executable',
+      fs.existsSync(hook) && (fs.statSync(hook).mode & 0o111) !== 0);
+    const hookText = fs.existsSync(hook) ? fs.readFileSync(hook, 'utf8') : '';
+    check('PG2: it runs both gates — the suite and the audit lanes',
+      /self-check/.test(hookText) && /self-audit/.test(hookText));
+    check('PG3: it refuses rather than publishing when the gate cannot run',
+      /refusing rather than publishing unverified/.test(hookText));
+
+    // End to end against real git with a real remote: a commit reached
+    // origin/main while the release gate was refusing, because nothing runs
+    // between a green commit and publication.
+    const repo = path.join(TMP, 'push-gate');
+    const remote = path.join(TMP, 'push-gate-remote.git');
+    const hooks = path.join(repo, 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    const cp = require('child_process');
+    const git = (...args: string[]) => cp.spawnSync('git',
+      ['-C', repo, '-c', 'user.email=t@e', '-c', 'user.name=t', ...args],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const remoteHead = () => cp.spawnSync('git', ['-C', remote, 'rev-parse', 'refs/heads/main'],
+      { encoding: 'utf8' }).stdout.trim();
+
+    cp.spawnSync('git', ['init', '-q', '--bare', remote]);
+    git('init', '-q', '-b', 'main');
+    git('config', 'core.hooksPath', 'hooks');
+    git('remote', 'add', 'origin', remote);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
+    git('add', '-A'); git('commit', '-qm', 'base');
+    git('push', '-q', 'origin', 'main');
+    const published = remoteHead();
+
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'a change that fails its audit\n');
+    git('add', '-A'); git('commit', '-qm', 'work');
+    const local = git('rev-parse', 'HEAD').stdout.trim();
+
+    // A gate that reports an open finding, in the shape ours does.
+    fs.writeFileSync(path.join(hooks, 'pre-push'),
+      '#!/bin/sh\ncat >/dev/null\necho "pre-push: REFUSED - the self-audit reported open findings." >&2\n'
+      + 'echo "  C-C5: a recorded command reached the event store unredacted" >&2\nexit 1\n');
+    fs.chmodSync(path.join(hooks, 'pre-push'), 0o755);
+
+    const refused = git('push', 'origin', 'main');
+    check('PG4: a push whose gate fails is refused',
+      refused.status !== 0, `git push exited ${refused.status}`);
+    check('PG5: nothing reaches the remote',
+      remoteHead() === published,
+      `remote at ${remoteHead().slice(0, 8)}, local at ${local.slice(0, 8)}`);
+    check('PG6: the refusal reaches the operator, naming the finding',
+      /C-C5/.test(`${refused.stdout}${refused.stderr}`));
+
+    fs.writeFileSync(path.join(hooks, 'pre-push'), '#!/bin/sh\ncat >/dev/null\nexit 0\n');
+    fs.chmodSync(path.join(hooks, 'pre-push'), 0o755);
+    const allowed = git('push', 'origin', 'main');
+    check('PG7: a green gate allows the push',
+      allowed.status === 0 && remoteHead() === local,
+      `exited ${allowed.status}, remote at ${remoteHead().slice(0, 8)}`);
+
+    // The real hook's own branching, exercised without running the suite it
+    // would otherwise invoke: with no ts-node in this throwaway repo, every
+    // path that reaches the gate refuses, and every path that returns before
+    // the gate does so for a stated reason. That is the decision logic.
+    const zero = '0'.repeat(40);
+    const runHook = (stdin: string) => cp.spawnSync('sh', [hook],
+      { cwd: repo, input: stdin, encoding: 'utf8' });
+
+    const deleting = runHook(`(delete) ${zero} refs/heads/gone ${local}\n`);
+    check('PG8: deleting a remote ref publishes nothing and is not gated',
+      deleting.status === 0, `exited ${deleting.status}: ${deleting.stderr.trim()}`);
+
+    const wrongRef = runHook(`refs/heads/side ${published} refs/heads/side ${zero}\n`);
+    check('PG9: a ref that is not HEAD is refused, not silently blessed',
+      wrongRef.status !== 0 && /audits HEAD/.test(wrongRef.stderr),
+      wrongRef.stderr.trim().split('\n')[0]);
+
+    const atHead = runHook(`refs/heads/main ${local} refs/heads/main ${published}\n`);
+    check('PG10: a gate that cannot run refuses the push',
+      atHead.status !== 0 && /refusing rather than publishing unverified/.test(atHead.stderr));
+
+    check('PG11: the hook worked in the pushing repository, not this one',
+      !fs.existsSync(path.resolve(__dirname, `../audits/cycles/prepush-${local.slice(0, 12)}`)));
+  }
+
+  // -----------------------------------------------------------------------
   section('the ledger is what the supervisor enforces against');
   {
     const ledger = selectChecks({

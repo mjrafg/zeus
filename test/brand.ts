@@ -146,7 +146,10 @@ export async function brandSuite(): Promise<void> {
 
   section('product identity: the product is Zeus');
   {
-    const files = walk(REPO, ['.git', 'node_modules', 'dist', 'dist-release', 'internal', 'test', 'docs', '.github'])
+    // `.zeus` holds Zeus's own scratch — task worktrees (full source checkouts) and
+    // the dependency cache. It is not the project's source, and scanning it made
+    // the first live mission's leftover worktrees fail this project's own probes.
+    const files = walk(REPO, ['.git', 'node_modules', 'dist', 'dist-release', 'internal', 'test', 'docs', '.github', '.zeus'])
       .filter((f) => /\.(ts|js|json|md|sh)$/.test(f) || !path.extname(f));
     const offenders: string[] = [];
     for (const f of files) {

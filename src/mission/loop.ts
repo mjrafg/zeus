@@ -23,7 +23,7 @@ import {
 import {
   EFFECT_MODEL_WRONG_THRESHOLD, MissionBudgets, ObservedEvidence, checkMissionBudgets,
   clampAchievement, genuineFlips, mergeMissionBudgets, missionUsage, mismatchesForVersion,
-  plannedExhausted, progressFrom, verifyEffects,
+  plannedExhausted, progressFrom, providerSpendOf, verifyEffects,
 } from './progress';
 
 /* ------------------------------------------------------------------------ *
@@ -112,6 +112,11 @@ export async function runMissionLoop(
   let cycles = 0;
 
   const events = () => missions.events.read(missionId);
+  /** Provider cost lives on the spawned task's log, not the mission's. */
+  const spendOf = (taskId: string) => {
+    try { return providerSpendOf(missions.events.read(taskId)); }
+    catch { return { costUsd: 0, unmetered: 0 }; }
+  };
   const notedFlips = new Set<string>();
 
   /**
@@ -171,7 +176,7 @@ export async function runMissionLoop(
   const replanOrStop = async (reason: string, detail: string): Promise<LoopResult | null> => {
     const rec = missions.mission(missionId)!;
     missions.invalidatePlan(missionId, reason, null);
-    const usage = missionUsage(events(), host.now());
+    const usage = missionUsage(events(), host.now(), spendOf);
     if (usage.replans >= budgets.maxReplans) {
       return finish('PARTIAL', 'BUDGET_EXCEEDED',
         `${reason}: already replanned ${usage.replans} time(s), the limit is ${budgets.maxReplans}`);
@@ -207,7 +212,7 @@ export async function runMissionLoop(
 
     // Budgets, recomputed from the log every cycle rather than tracked in a
     // counter. A counter survives neither a crash nor a second process.
-    const usage = missionUsage(events(), host.now());
+    const usage = missionUsage(events(), host.now(), spendOf);
     const breach = checkMissionBudgets(budgets, usage);
     if (breach) return finish('PARTIAL', 'BUDGET_EXCEEDED', `${breach.limit}: ${breach.detail}`);
 

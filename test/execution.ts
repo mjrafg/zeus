@@ -26,8 +26,11 @@ import {
 import {
   missionUsage, checkMissionBudgets, mergeMissionBudgets, verifyEffects, progressFrom,
   genuineFlips, detectFlips, clampAchievement, mismatchesForVersion, plannedExhausted,
-  EFFECT_MODEL_WRONG_THRESHOLD,
+  EFFECT_MODEL_WRONG_THRESHOLD, providerSpendOf,
 } from '../src/mission/progress';
+import {
+  isZeusArtifact, ZEUS_PATHSPEC_EXCLUDES, ZEUS_WORKTREE_EXCLUDES,
+} from '../src/engine/orchestrator';
 import { runMissionLoop, LoopHost, NodeExecution } from '../src/mission/loop';
 import {
   selftestLive, selftestCostCap, SELFTEST_PER_CONTACT_CAP_USD, OBSERVED_CONTACT_COST_USD,
@@ -949,5 +952,70 @@ export async function executionSuite(): Promise<void> {
     check('AP4: and only the accepted node may spawn — the newer plan is not a mandate',
       missions.authoriseNode(rec.missionId, `${rec.missionId}/N-0001`).ok
       && !missions.authoriseNode(rec.missionId, `${rec.missionId}/N-0002`).ok);
+  }
+  section('live contact: Zeus scratch is not the project’s work');
+  {
+    check('ZA1: the dependency cache is recognised as Zeus scratch',
+      isZeusArtifact('.zeus-cache/npm/_cacache/content-v2/sha512/19/16/9743')
+      && isZeusArtifact('.zeus-cache') && isZeusArtifact('./.zeus-cache/x'));
+    check('ZA2: so is project state, wherever it is quoted or prefixed',
+      isZeusArtifact('.zeus/state/tasks/x/events.jsonl') && isZeusArtifact('"' + '.zeus/logs/a' + '"'));
+    check('ZA3: files that belong to the project are not',
+      !isZeusArtifact('README.md') && !isZeusArtifact('src/zeus-cache.ts')
+      && !isZeusArtifact('docs/.zeusish'), 'no false positives');
+    check('ZA4: the pathspec and the exclude file name the same two things',
+      ZEUS_PATHSPEC_EXCLUDES.length === ZEUS_WORKTREE_EXCLUDES.length
+      && ZEUS_PATHSPEC_EXCLUDES.every((p) => p.includes('.zeus')),
+      ZEUS_PATHSPEC_EXCLUDES.join(' '));
+  }
+
+  section('live contact: a mission’s USD ceiling can actually bind');
+  {
+    const at = (n: number) => new Date(1_700_000_000_000 + n * 1000).toISOString();
+    const ev = (type: string, payload: any, seq: number): StoredEvent =>
+      ({ id: `e${seq}`, taskId: 'p/M-0001', seq, ts: at(seq), type, prev: '', payload });
+    const log = [
+      ev('MISSION_CREATED', {}, 1),
+      ev('TASK_SPAWNED', { taskId: 'p/T-0001', nodeId: 'N-1' }, 2),
+      ev('TASK_SPAWNED', { taskId: 'p/T-0002', nodeId: 'N-2' }, 3),
+    ];
+    // What the first live run actually looked like: the mission log carries no
+    // cost at all, and every dollar is on the tasks it spawned.
+    const taskLogs: Record<string, StoredEvent[]> = {
+      'p/T-0001': [
+        { id: 'a', taskId: 'p/T-0001', seq: 1, ts: at(1), type: 'AGENT_FINISHED', prev: '',
+          payload: { providerUsage: { totalCostUsd: 0.6353065 } } },
+        { id: 'b', taskId: 'p/T-0001', seq: 2, ts: at(2), type: 'AGENT_FINISHED', prev: '',
+          payload: { providerUsage: { usage: { input_tokens: 4 } } } },
+      ],
+      'p/T-0002': [
+        { id: 'c', taskId: 'p/T-0002', seq: 1, ts: at(3), type: 'AGENT_FINISHED', prev: '',
+          payload: { providerUsage: { totalCostUsd: 0.7461 } } },
+      ],
+    };
+    const spendOf = (id: string) => providerSpendOf(taskLogs[id] ?? []);
+
+    const blind = missionUsage(log, 1_700_000_010_000);
+    const seeing = missionUsage(log, 1_700_000_010_000, spendOf);
+
+    check('MC1: without reaching into the task logs the mission reports nothing spent',
+      blind.costUsd === 0, String(blind.costUsd));
+    // Asserted as a value, not a bit pattern: each task's total is rounded to
+    // six places before the mission adds them, so the last digit is a property
+    // of double rounding rather than of anything worth pinning.
+    check('MC2: reaching into them recovers the real provider-reported spend',
+      Math.abs(seeing.costUsd - (0.6353065 + 0.7461)) < 0.000_01
+      && seeing.costUsd > 0.7461, String(seeing.costUsd));
+    check('MC3: a usage block with no price is unmetered, not zero',
+      seeing.unmeteredCalls === 1, String(seeing.unmeteredCalls));
+
+    const budgets = mergeMissionBudgets({ costCeilingUsd: 1 });
+    check('MC4: the ceiling could never bind before, and binds now',
+      checkMissionBudgets(budgets, blind) === null
+      && checkMissionBudgets(budgets, seeing)?.limit === 'costCeilingUsd',
+      JSON.stringify(checkMissionBudgets(budgets, seeing)));
+    check('MC5: and the breach names the unpriced call it could not add in',
+      checkMissionBudgets(budgets, seeing)!.detail.includes('reported no cost'),
+      checkMissionBudgets(budgets, seeing)!.detail);
   }
 }

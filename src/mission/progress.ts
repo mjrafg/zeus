@@ -69,8 +69,37 @@ export interface MissionUsage {
   reserveDraws: Array<{ kind: string; reason: string }>;
 }
 
-/** Everything the loop has spent, recomputed from the log on every cycle. */
-export function missionUsage(events: StoredEvent[], now = Date.now()): MissionUsage {
+/**
+ * Reads provider cost out of a TASK's log.
+ *
+ * Cost is reported by the provider to the task that invoked it, so it lands on
+ * the task's events and never on the mission's. The mission is what holds the
+ * budget, so without this the USD ceiling was structurally unreachable: a
+ * mission could spend without limit and report $0.00, which the first live run
+ * demonstrated at $0.635 for a single agent call.
+ */
+export function providerSpendOf(taskEvents: StoredEvent[]): { costUsd: number; unmetered: number } {
+  let costUsd = 0;
+  let unmetered = 0;
+  for (const e of taskEvents) {
+    const usage = (e.payload as any)?.providerUsage as { totalCostUsd?: unknown } | undefined;
+    if (!usage || typeof usage !== 'object') continue;
+    if (typeof usage.totalCostUsd === 'number' && Number.isFinite(usage.totalCostUsd)) {
+      costUsd += usage.totalCostUsd;
+    } else unmetered += 1;
+  }
+  return { costUsd: Number(costUsd.toFixed(6)), unmetered };
+}
+
+/**
+ * Everything the loop has spent, recomputed from the log on every cycle.
+ *
+ * `spendOf` reaches into each spawned task's own log for provider cost. It is
+ * injected rather than assumed so this stays a pure function over events, and
+ * so a caller with no store still gets every other budget.
+ */
+export function missionUsage(events: StoredEvent[], now = Date.now(),
+  spendOf?: (taskId: string) => { costUsd: number; unmetered: number }): MissionUsage {
   let tasksSpawned = 0, plannedTasks = 0, replans = 0, repairs = 0, planRecompiles = 0;
   let costUsd = 0, unmeteredCalls = 0;
   const reserveDraws: Array<{ kind: string; reason: string }> = [];
@@ -80,13 +109,17 @@ export function missionUsage(events: StoredEvent[], now = Date.now()): MissionUs
     const p = (e.payload ?? {}) as Record<string, any>;
     if (startedAt === null) startedAt = Date.parse(e.ts) || null;
     switch (e.type) {
-      case 'TASK_SPAWNED':
+      case 'TASK_SPAWNED': {
         tasksSpawned += 1;
+        // The task's own log is where the provider reported what it charged.
+        const spend = spendOf && typeof p.taskId === 'string' ? spendOf(p.taskId) : null;
+        if (spend) { costUsd += spend.costUsd; unmeteredCalls += spend.unmetered; }
         if (p.repair === true) {
           repairs += 1;
           reserveDraws.push({ kind: 'repair', reason: String(p.reason ?? 'unstated') });
         } else plannedTasks += 1;
         break;
+      }
       case 'MISSION_REPLAN':
         replans += 1;
         reserveDraws.push({ kind: 'replan', reason: String(p.reason ?? 'unstated') });

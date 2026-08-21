@@ -16,8 +16,8 @@ rather than quietly dropped.
 | Severity | OPEN | ACCEPTED_RISK | PARTIALLY_FIXED | FIXED | OBSOLETE |
 |---|---|---|---|---|---|
 | **P0** | **0** | 0 | 0 | 5 | 2 |
-| **P1** | **0** | 1 | 0 | 9 | 4 |
-| P2 | **1** | 0 | 0 | 0 | 0 |
+| **P1** | **0** | 1 | 0 | 14 | 4 |
+| P2 | **3** | 0 | 0 | 0 | 0 |
 | P3 | **0** | 0 | 0 | 3 | 0 |
 
 ## v1.0.0-rc.1 closure review
@@ -51,6 +51,45 @@ whole-preflight constant sized for one provider tripped on a healthy
 two-provider run. The cap now scales with contacts actually made, from an
 observed per-contact price with a stated headroom factor, and an unpriced
 contact keeps the total a lower bound rather than becoming zero.
+
+## First live execution-loop contact
+
+Seven findings, none of which any amount of deterministic testing had produced,
+because every one of them lives at a boundary the fakes stood in for. The
+mission is committed as evidence in `audits/missions/M-0004.md`; it did not
+complete end to end, and the record says so.
+
+**P1-15 — the dependency cache was the task's work.** A task that changed
+nothing reported 43 changed files, all cache blobs, and the validator
+classified binary cache objects as hunks of unknown surface. It did not merely
+add noise: it hid that the agent had produced no change at all.
+
+**P1-16 — a mission locked the repository against its own gate.** Leftover task
+worktrees under `.zeus/` are full source checkouts, and the project's probes
+walked them as project source. PB6 and BR1 failed; since the pre-commit hook
+runs the suite, no commit could be made while any mission worktree existed.
+
+**P1-17 — the USD ceiling could never bind.** $1.3814 was spent and the mission
+reported nothing. Providers report cost to the task that invoked them; the
+budget lives on the mission. The two never met.
+
+**P1-18 — you could not consent to the plan you were shown.** `mission plan
+--yes` re-ran the planner and accepted whatever came back. Following the tool's
+own printed instruction produced approval for unseen findings.
+
+**P1-19 — a refused plan did not record what it was.** The first live planner
+call invented precondition kinds and was correctly refused, and what it had
+proposed could not be read back without paying for another call. The prompt had
+never shown it the five kinds that exist.
+
+**P2-2 — a required check timed out on this project's own suite**, and the
+vocabulary got it right: `TEST_TIMEOUT`, not `TEST_FAILED`, escalating
+`REQUIRED_TEST_NOT_RUN` — *the check did not fail, it did not run*. An
+unverified change was never allowed to look like a verified one.
+
+**P2-3 — the loop cannot execute a node whose product is a decision.** The plan
+language can express an analysis node; the execution model, defined entirely in
+terms of commits, can only fail one. Left open as a design question.
 
 **P2-1 — test sources are never type-checked.** `tsconfig.json` covers `src/`
 only and the runner is `--transpile-only`. Type-checking the tests by hand

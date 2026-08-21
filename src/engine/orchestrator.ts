@@ -102,6 +102,24 @@ export interface EngineOptions {
 }
 
 /** Maps a supervisor result onto the check vocabulary the product reasons in. */
+/**
+ * Zeus's own artifacts inside a task worktree.
+ *
+ * Named once. These are Zeus scratch, not the project's work, and every place
+ * that reads "what did this task change" must agree about them — a diff that
+ * excludes them and a status that does not would disagree about whether a task
+ * did anything.
+ */
+export const ZEUS_WORKTREE_EXCLUDES = ['/.zeus-cache/', '/.zeus/'];
+
+export const ZEUS_PATHSPEC_EXCLUDES = [':(exclude).zeus-cache/**', ':(exclude).zeus/**'];
+
+export function isZeusArtifact(p: string): boolean {
+  const clean = p.replace(/^\.\//, '').replace(/^"|"$/g, '');
+  return clean === '.zeus-cache' || clean === '.zeus'
+    || clean.startsWith('.zeus-cache/') || clean.startsWith('.zeus/');
+}
+
 export function classifyCheck(res: ExecutionResult, required: boolean): CheckOutcome {
   switch (res.outcome) {
     case 'COMPLETED': return 'PASSED';
@@ -342,6 +360,34 @@ export class Engine {
     return { ...p, writablePaths: [rec.worktree, this.stateRoot] };
   }
 
+  /**
+   * Keeps Zeus's own scratch out of the project's change surface.
+   *
+   * The dependency cache is materialised INSIDE the worktree, so git sees it
+   * as the agent's work. The first live mission made the consequence plain:
+   * a task that changed nothing reported 43 changed files, all of them cache
+   * blobs, and the validator classified binary cache objects as hunks of
+   * unknown surface — which forced a heavier tier and, worse, hid the fact
+   * that the agent had produced no change at all.
+   */
+  private excludeZeusArtifacts(worktree: string): void {
+    try {
+      const cp = require('child_process');
+      // A linked worktree keeps its metadata in a file, not a directory, so
+      // the exclude path is asked for rather than assumed.
+      const gitDir = cp.execFileSync('git', ['-C', worktree, 'rev-parse', '--git-dir'],
+        { encoding: 'utf8', timeout: 30_000 }).trim();
+      const abs = path.isAbsolute(gitDir) ? gitDir : path.join(worktree, gitDir);
+      const info = path.join(abs, 'info');
+      fs.mkdirSync(info, { recursive: true });
+      const file = path.join(info, 'exclude');
+      const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+      if (existing.includes(ZEUS_WORKTREE_EXCLUDES[0])) return;
+      fs.writeFileSync(file, `${existing}${existing.endsWith('\n') || !existing ? '' : '\n'}`
+        + `# Zeus scratch, never the project's work\n${ZEUS_WORKTREE_EXCLUDES.join('\n')}\n`, 'utf8');
+    } catch { /* an un-excludable worktree still works; the diff is just noisier */ }
+  }
+
   /** Creates the task's isolated worktree from the project's git repository. */
   private prepareWorktree(rec: TaskRecord): { ok: boolean; detail: string } {
     const { execFileSync } = require('child_process');
@@ -350,6 +396,7 @@ export class Engine {
       if (fs.existsSync(rec.worktree)) return { ok: true, detail: 'worktree already present' };
       execFileSync('git', ['-C', this.opts.projectRoot, 'worktree', 'add', '--detach', rec.worktree, rec.baseSha],
         { encoding: 'utf8', timeout: 300_000 });
+      this.excludeZeusArtifacts(rec.worktree);
       return { ok: true, detail: 'worktree created' };
     } catch (e: any) {
       // A repository with no commits cannot produce a worktree; copy instead so
@@ -1139,7 +1186,8 @@ export class Engine {
     const cp = require('child_process');
     const names = new Set<string>();
     try {
-      const out = cp.execFileSync('git', ['-C', rec.worktree, 'diff', '--name-only', rec.baseSha, '--'],
+      const out = cp.execFileSync('git',
+        ['-C', rec.worktree, 'diff', '--name-only', rec.baseSha, '--', ...ZEUS_PATHSPEC_EXCLUDES],
         { encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
       for (const l of out.split('\n').filter(Boolean)) names.add(l.trim());
     } catch { /* fall through to status */ }
@@ -1148,7 +1196,10 @@ export class Engine {
     try {
       const st = cp.execFileSync('git', ['-C', rec.worktree, 'status', '--porcelain'],
         { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] });
-      for (const l of st.split('\n').filter(Boolean)) names.add(l.slice(3).trim());
+      for (const l of st.split('\n').filter(Boolean)) {
+        const name = l.slice(3).trim();
+        if (!isZeusArtifact(name)) names.add(name);
+      }
     } catch { /* nothing more to add */ }
     return [...names].filter(Boolean);
   }
@@ -1157,7 +1208,8 @@ export class Engine {
     this.markIntentToAdd(rec);
     try {
       return require('child_process')
-        .execFileSync('git', ['-C', rec.worktree, 'diff', '--stat', '-p', rec.baseSha, '--'],
+        .execFileSync('git',
+          ['-C', rec.worktree, 'diff', '--stat', '-p', rec.baseSha, '--', ...ZEUS_PATHSPEC_EXCLUDES],
           { encoding: 'utf8', timeout: 60_000, maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch { return '(diff unavailable)'; }
   }

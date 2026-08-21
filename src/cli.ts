@@ -32,7 +32,7 @@ import {
 } from './mission/planner';
 import { runMissionLoop } from './mission/loop';
 import { missionHost, ledgerFrom } from './mission/host';
-import { missionUsage, progressFrom } from './mission/progress';
+import { missionUsage, progressFrom, providerSpendOf } from './mission/progress';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -1527,7 +1527,10 @@ async function cmdMission(argv: string[]): Promise<number> {
       if (!rec) { err(`unknown mission ${id}`); return 2; }
 
       const log = missions.events.read(id);
-      const usage = missionUsage(log);
+      const usage = missionUsage(log, Date.now(), (taskId) => {
+        try { return providerSpendOf(missions.events.read(taskId)); }
+        catch { return { costUsd: 0, unmetered: 0 }; }
+      });
       const score = progressFrom(log);
       const integrations = log.filter((e) => e.type === 'INTEGRATION_RESULT').map((e) => e.payload as any);
       const mismatches = log.filter((e) => e.type === 'EFFECT_MISMATCH').map((e) => e.payload as any);

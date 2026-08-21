@@ -111,7 +111,10 @@ export async function boundarySuite(): Promise<void> {
   check('PB4: configuration defaults name no specific project, path or domain',
     !/\/srv\/|\/home\/[a-z]/.test(cfgSrc));
 
-  const everything = walk(REPO, ['.git', 'node_modules', 'dist', 'dist-release']);
+  // `.zeus` holds Zeus's own scratch — task worktrees (full source checkouts) and
+  // the dependency cache. It is not the project's source, and scanning it made
+  // the first live mission's leftover worktrees fail this project's own probes.
+  const everything = walk(REPO, ['.git', 'node_modules', 'dist', 'dist-release', '.zeus']);
   const absolutePaths = everything
     .filter((f) => !/test\/(boundary|brand)\.ts$/.test(f))
     .filter((f) => /(^|[^\w])\/(srv|home\/[a-z])\//.test(fs.readFileSync(f, 'utf8')))

@@ -355,6 +355,100 @@
    "rootCause": "The suite is executed rather than compiled, and the compile step's include list stops at src/. A vacuous assertion is indistinguishable from a passing one in the report, so the suite's own green is weaker evidence than it appears.",
    "resolution": "Not fixed in this cycle. M3-2f is corrected to assert `validation.valid` and now reports the codes it saw. Extending the type-check to test/ requires resolving the four inherited test/setup.ts errors first, which is next-cycle work rather than something to fold into a release gate.",
    "regressionTests": []
+  },
+  {
+   "id": "P1-15",
+   "severity": "P1",
+   "title": "Zeus's dependency cache was counted as the task's own work",
+   "status": "FIXED",
+   "observed": "First live mission, task T-0001: CODE_CHANGE recorded 43 changed files, all 43 under .zeus-cache/. The agent's real change count was zero. The validator then classified binary cache blobs as hunks of unknown surface, which pushed confidence to UNKNOWN and forced a NORMAL-tier full validation.",
+   "rootCause": "The dependency cache is materialised inside the task worktree, and nothing excluded it from `git status` or `git diff`. Every reader of 'what did this task change' therefore saw Zeus's own scratch as the agent's work. Worse than noise: it masked the fact that the agent had produced no change at all, and it would make any declared-writes check spurious.",
+   "resolution": "ZEUS_WORKTREE_EXCLUDES / ZEUS_PATHSPEC_EXCLUDES name .zeus-cache and .zeus once. A new worktree gets them written into its git exclude file, and changedFiles/diff apply the same pathspec directly, so an edited exclude file cannot put cache blobs back into the evidence.",
+   "regressionTests": [
+    "ZA1: the dependency cache is recognised as Zeus scratch",
+    "ZA2: so is project state, wherever it is quoted or prefixed",
+    "ZA3: files that belong to the project are not",
+    "ZA4: the pathspec and the exclude file name the same two things"
+   ]
+  },
+  {
+   "id": "P1-16",
+   "severity": "P1",
+   "title": "A mission's leftover worktrees made the project's own self-check fail",
+   "status": "FIXED",
+   "observed": "After the first live mission, PB6 (credential-shaped content) and BR1 (product-facing source names the old product) failed. Neither had failed at the immediately preceding commit. The cause was .zeus/worktrees/, which holds full source checkouts plus an npm cache, being walked as though it were the project's source.",
+   "rootCause": "The probes enumerate the working tree and excluded .git, node_modules and dist but not .zeus. Because the pre-commit hook runs the suite, the practical effect was that no commit could be made while any mission worktree existed \u2014 a running mission locked the repository against its own gate.",
+   "resolution": "Both walkers exclude .zeus. This narrows the probes to what they claim to measure \u2014 the project's source \u2014 rather than weakening them: a disposable task worktree is Zeus scratch, not project source.",
+   "regressionTests": [
+    "PB6: the working tree carries no credential-shaped content outside the detectors",
+    "BR1: no product-facing source names the old product"
+   ]
+  },
+  {
+   "id": "P1-17",
+   "severity": "P1",
+   "title": "The mission USD ceiling could never bind",
+   "status": "FIXED",
+   "observed": "The first live mission spent $1.3814 in provider-reported cost and its report read `cost nothing reported`. A single agent call carried providerUsage.totalCostUsd = 0.6353065 on the TASK log.",
+   "rootCause": "Providers report cost to the task that invoked them, so usage lands on task events. missionUsage() reads only the mission's own log, where no event has ever carried providerUsage. costUsd was therefore structurally always zero and checkMissionBudgets could never reach costCeilingUsd \u2014 a budget that cannot fire, the same class of defect as P1-13.",
+   "resolution": "providerSpendOf() reads cost out of a task's log, and missionUsage() takes an injected spendOf so it stays a pure function over events. The loop and `mission report` both supply it. An unpriced usage block is still counted as unmetered, never as zero.",
+   "regressionTests": [
+    "MC1: without reaching into the task logs the mission reports nothing spent",
+    "MC2: reaching into them recovers the real provider-reported spend",
+    "MC3: a usage block with no price is unmetered, not zero",
+    "MC4: the ceiling could never bind before, and binds now",
+    "MC5: and the breach names the unpriced call it could not add in"
+   ]
+  },
+  {
+   "id": "P1-18",
+   "severity": "P1",
+   "title": "You could not consent to the plan you were shown",
+   "status": "FIXED",
+   "observed": "`mission plan` stopped for consent when the plan critic raised findings and told the operator to re-run with --yes. Re-running called the planner again and accepted whatever came back \u2014 a different plan, whose findings nobody had read.",
+   "rootCause": "Consent was attached to the command that GENERATES a plan rather than to a plan that exists. Following the tool's own printed instruction therefore produced approval for unseen findings, which is precisely the hazard the consent gate exists to prevent.",
+   "resolution": "`mission accept-plan <id> [--version N] --yes` accepts the plan recorded on the log, by version, and records every finding it was accepted despite. It refuses a plan with no critique (nothing to consent over), a contaminated critique, and one the critic rejected. `mission plan` no longer accepts --yes.",
+   "regressionTests": [
+    "AP1: the accepted plan is the one that was reviewed, by version",
+    "AP2: the findings consented over are on the record, in full",
+    "AP3: consent names who gave it",
+    "AP4: and only the accepted node may spawn \u2014 the newer plan is not a mandate"
+   ]
+  },
+  {
+   "id": "P1-19",
+   "severity": "P1",
+   "title": "A refused plan recorded that it was refused, but not what it was",
+   "status": "FIXED",
+   "observed": "The first live planner call produced preconditions in kinds that do not exist and was correctly refused. The PLAN_REJECTED event carried findings, version and retryability \u2014 and not the nodes, so what the model had actually proposed could not be read back without paying for another planner call.",
+   "rootCause": "ORACLE_COMPILE_REJECTED already records the criteria it refused. The plan layer did not inherit that lesson.",
+   "resolution": "PLAN_REJECTED records the normalised nodes and their count. Separately, the planner prompt now enumerates the five precondition kinds and states plainly that there is no kind for 'the working tree is clean' \u2014 the model was being asked to guess a closed vocabulary that was never shown to it.",
+   "regressionTests": [
+    "PR1: the refusal records WHAT was proposed, not only that it was refused",
+    "PR2: the invented precondition kind is legible from the log alone",
+    "PR3: the findings and the retryability are still recorded",
+    "PR4: a refused plan is not an accepted one"
+   ]
+  },
+  {
+   "id": "P2-2",
+   "severity": "P2",
+   "title": "A required check timed out on this project's own test suite",
+   "status": "OPEN",
+   "observed": "unit-test (`npm run test`) ran for 180263 ms inside the task scope and was killed as TEST_TIMEOUT. The same suite completes in roughly 130-145 s in the pre-commit gate; inside a constrained systemd scope it is slower. Both live tasks ended NEEDS_RECONCILIATION for this reason.",
+   "rootCause": "The per-check ceiling at NORMAL tier is shorter than the time this project's own suite needs under isolation. Note what did NOT go wrong: the outcome vocabulary handled it exactly as designed \u2014 TEST_TIMEOUT, not TEST_FAILED, escalating REQUIRED_TEST_NOT_RUN with 'the check did not fail, it did not run'. An unverified change was never allowed to look like a verified one.",
+   "resolution": "Not fixed. The right fix is per-project check timeouts derived from observed check duration rather than a global constant, which is a change to the validation configuration model and not something to fold into a release gate.",
+   "regressionTests": []
+  },
+  {
+   "id": "P2-3",
+   "severity": "P2",
+   "title": "The execution loop cannot represent a node whose product is a decision",
+   "status": "OPEN",
+   "observed": "Plan v2's first node, survey-readme, declares reads=['README.md'] and writes=[]. Its output is a choice of which sentence to fix, consumed by the next node. The loop treats a node that produced no diff as a failed integration, so a legitimate analysis node can only ever fail, be repaired once, and be abandoned.",
+   "rootCause": "Integration is defined entirely in terms of a commit. There is no channel by which a node hands a finding, a decision or a selection to its dependants, so the plan language can express a node the execution model cannot execute. The plan critic independently flagged the node's scope; the deeper problem is that the plan was expressible at all.",
+   "resolution": "Not fixed. This is a design question \u2014 either the planner is constrained to emit only diff-producing nodes, or nodes gain a typed output artifact that dependants read. Recorded as a V1 limitation rather than patched under a release gate.",
+   "regressionTests": []
   }
  ]
 }

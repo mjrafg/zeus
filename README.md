@@ -289,17 +289,25 @@ held to the same rule. As of this commit, from the event log:
 
 | | Observed |
 |---|---|
-| Regression suite | 1045 checks, 0 failing |
+| Regression suite | 1087 checks, 0 failing |
 | Completed tasks | 0 |
 | `ZERO_TOUCH_CLEAN_RATE` | `n/a` — no completed tasks |
 | Mission oracle sessions against live models | 4 (`claude` compiler, `codex` critic) |
+| Live Mission execution-loop runs | 1 (`M-0004`, terminated `PARTIAL / BLOCKED`) |
 | Real end-to-end Mission executions | **0** |
 
-The Mission execution loop — plan, plan critic, scheduler, spawn, integrate,
-ratchet, effect verification — is covered by deterministic regression tests
-and **has not yet run against live providers**. The oracle layer has: four
-missions were compiled and independently critiqued by real models, and the
-critique escalated consent on every one of them.
+The Mission execution loop has now run once against live providers, and the
+run is committed in full as [`audits/missions/M-0004.md`](audits/missions/M-0004.md).
+It did not complete: both spawned tasks ended `NEEDS_RECONCILIATION` because a
+required check timed out, nothing was integrated, and the mission ratchet never
+advanced. $1.3814 of provider-reported cost, and seven findings — recorded in
+`docs/AUDIT-STATUS.json`, five of them fixed.
+
+So: planning, plan critique, both consent gates, the live preflight, task
+spawning, worktree isolation, the check vocabulary, escalation, final oracle
+evaluation and termination have all executed against live providers.
+**Integration, the green ratchet and effect verification have not** — nothing
+reached them. They are covered by deterministic regression tests only.
 
 No number in this README is projected, extrapolated, or illustrative. If a
 figure is not derivable from the committed log, it is not here.

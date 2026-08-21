@@ -37,6 +37,8 @@ import {
   missionUsage, progressFrom, providerSpendOf, negotiateBudget, applyBudgetRevisions,
   mergeMissionBudgets, BudgetNegotiation,
 } from './mission/progress';
+import { missionStatusView, missionListView, missionReportView } from './views';
+import { startWebServer, defaultSpawnRun } from './web/server';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -85,6 +87,7 @@ ${C.b}Usage${C.x}
   zeus setup [dependencies|providers]    interactive bootstrap: check, install, sign in
         [--dry-run] [--non-interactive] [--json] [--advanced]
   zeus init [--force] [--adapter <id>]   inspect this repository and create .zeus/config.yaml
+  zeus web [--port N] [--host H]         the Control Center for this project
   zeus doctor                            report what this machine can actually do
   zeus run "<task>" [--mock]              run a task in this project
   zeus status [<taskId>]
@@ -982,7 +985,7 @@ async function cmdMission(argv: string[]): Promise<number> {
 
     case 'list': {
       const ids = missions.list();
-      const recs = ids.map((id) => missions.mission(id)).filter((r): r is NonNullable<typeof r> => !!r);
+      const recs = missionListView(missions);
       if (json) { out(JSON.stringify(recs, null, 1)); return 0; }
       if (!recs.length) { out(`${C.dim}no missions in this project${C.x}`); return 0; }
       for (const r of recs) {
@@ -1000,7 +1003,7 @@ async function cmdMission(argv: string[]): Promise<number> {
       if (rec === null) return 2;
       if (!rec) { err(`unknown mission ${id}`); return 2; }
       const ratchet = readRatchet(ctx.root, id);
-      if (json) { out(JSON.stringify({ ...rec, ratchetRef: ratchetRef(id), ratchetRefSha: ratchet }, null, 1)); return 0; }
+      if (json) { out(JSON.stringify(missionStatusView(missions, ctx.root, id), null, 1)); return 0; }
       out(`${C.b}${rec.missionId}${C.x} ${rec.terminated ? `${C.dim}(terminated)${C.x}` : ''}`);
       out(`  goal            ${rec.goal}`);
       out(`  created         ${rec.createdAt}  ${C.dim}base ${rec.baseSha.slice(0, 12)}${C.x}`);
@@ -1659,8 +1662,7 @@ async function cmdMission(argv: string[]): Promise<number> {
       const o = rec.oracle as Oracle | null;
 
       if (json) {
-        out(JSON.stringify({ mission: rec, usage, score, integrations, mismatches,
-          flips, replans, escalations }, null, 1));
+        out(JSON.stringify(missionReportView(missions, id), null, 1));
         return 0;
       }
 
@@ -1836,6 +1838,55 @@ function renderReadiness(r: ReadinessReport): void {
   out(`  ${r.ok ? C.g : C.r}${r.summary}${C.x}`);
 }
 
+/**
+ * The Control Center.
+ *
+ * Loopback by default, and `--host` prints what it is exposing rather than
+ * quietly doing it: a console that can spend money and run agents against a
+ * repository is not something to bind outward by accident.
+ */
+async function cmdWeb(argv: string[]): Promise<number> {
+  const ctx = requireProject();
+  if (!ctx) return 2;
+  const portIdx = argv.indexOf('--port');
+  const hostIdx = argv.indexOf('--host');
+  const port = portIdx >= 0 ? Number(argv[portIdx + 1]) : 4317;
+  const host = hostIdx >= 0 ? argv[hostIdx + 1] : '127.0.0.1';
+  if (!Number.isFinite(port) || port < 0 || port > 65535) {
+    err(`${C.r}✗${C.x} --port must be a port number`); return 2;
+  }
+  const engine = engineFor(ctx.root, ctx.cfg);
+
+  const server = await startWebServer({
+    projectRoot: ctx.root, stateRoot: engine.stateRoot, projectId: engine.projectId,
+    port, host,
+    spawnRun: (missionId) => defaultSpawnRun(ctx.root, missionId),
+  });
+
+  out(`${C.b}zeus web${C.x} ${C.dim}${engine.projectId}${C.x}`);
+  out(`  ${server.url}`);
+  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+    out(`  ${C.y}!${C.x} bound to ${C.b}${host}${C.x}, not loopback — this exposes a console that can`);
+    out(`     spend money and run agents against ${ctx.root} to everything that can reach it.`);
+  }
+  if (server.tokenCreated) {
+    // Once. A secret reprinted on every start is a secret in every scrollback.
+    out('');
+    out(`  ${C.b}token${C.x} ${server.token}`);
+    out(`  ${C.dim}shown once — stored at ${engine.stateRoot}/web-token (owner-only)${C.x}`);
+  } else {
+    out(`  ${C.dim}token already generated; read it from ${engine.stateRoot}/web-token${C.x}`);
+  }
+  out(`  ${C.dim}one project per server; ctrl-c to stop${C.x}`);
+
+  await new Promise<void>((resolve) => {
+    const stop = () => { void server.close().then(resolve); };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+  return 0;
+}
+
 function cmdSelfCheck(argv: string[]): number {
   const root = findProjectRoot() ?? process.cwd();
   const json = argv.includes('--json');
@@ -1986,6 +2037,7 @@ export async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case 'setup': return cmdSetup(rest);
     case 'init': return cmdInit(rest);
+    case 'web': return cmdWeb(rest);
     case 'doctor': return cmdDoctor(rest);
     case 'version': case '--version': case '-v': out(VERSION); return 0;
     case 'help': case '--help': case '-h': case undefined: usage(); return 0;

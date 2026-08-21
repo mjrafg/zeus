@@ -34,6 +34,7 @@ import { oracleSuite } from './oracle';
 import { unwrapSuite } from './unwrap';
 import { executionSuite } from './execution';
 import { readinessSuite } from './readiness';
+import { webSuite } from './web';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-test-'));
 const mk = (name: string, files: Record<string, string>): string => {
@@ -351,6 +352,7 @@ function identitySuite(): void {
   await oracleSuite();
   await executionSuite();
   await readinessSuite();
+  await webSuite();
   unwrapSuite();
   identitySuite();
   const t = totals();

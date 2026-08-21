@@ -33,6 +33,9 @@ import {
 } from '../mission/chat';
 import { EventTailer, cursorFromLastId, eventId } from './tail';
 import { UI_HTML } from './ui';
+import { listProjects, freeSlug, slugForUrl, slugify, isProject } from '../projects';
+import { routeFor, carriesCredentials, draftCreationCard, CreationCard } from '../create';
+import { extractZip, DEFAULT_ZIP_LIMITS } from '../zip';
 
 export interface WebServerOptions {
   projectRoot: string;
@@ -42,6 +45,19 @@ export interface WebServerOptions {
   host?: string;
   /** Injected so tests drive the server without a real engine or CLI. */
   spawnRun?: (missionId: string) => { ok: boolean; pid: number | null; detail: string };
+  /**
+   * A directory of Zeus projects. Absent means the Projects home is off and
+   * the server serves only the project it was started in.
+   */
+  projectsRoot?: string;
+  /**
+   * Runs a creation step (clone, init, doctor) through the supervisor.
+   *
+   * Injected so tests exercise the route without a network, and so the server
+   * cannot acquire its own way of running commands.
+   */
+  createRunner?: (spec: { kind: 'clone' | 'init'; args: string[]; cwd: string })
+  => Promise<{ ok: boolean; detail: string }>;
   /** Injected reader for git diffs, so the route is testable and read-only. */
   diff?: (from: string, to: string, cwd: string) => string;
   /**
@@ -80,6 +96,7 @@ export const READ_ROUTES = [
   'GET /api/files/diff',
   'GET /api/missions/:id/consent',
   'GET /api/chat',
+  'GET /api/projects',
   'GET /api/events/stream',
 ] as const;
 
@@ -93,6 +110,8 @@ export const WRITE_ROUTES = [
   'POST /api/missions/:id/evaluate',
   'POST /api/chat',
   'POST /api/chat/decide',
+  'POST /api/projects/draft',
+  'POST /api/projects/decide',
 ] as const;
 
 /**
@@ -251,6 +270,16 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/api/projects') {
+        if (!opts.projectsRoot) {
+          send(res, 200, { projectsRoot: null, projects: [],
+            detail: 'this server was started inside a single project; no projects root is configured' });
+          return;
+        }
+        send(res, 200, { projectsRoot: opts.projectsRoot, projects: listProjects(opts.projectsRoot) });
+        return;
+      }
+
       if (method === 'GET' && url.pathname === '/api/chat') {
         // History IS the log. Nothing is stored anywhere else, which is what
         // makes it survive a restart and sit beside the missions it created.
@@ -349,6 +378,14 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     }
   });
 
+  /** zeus init, then doctor — the same two steps every path ends with. */
+  async function initialise(
+    run: NonNullable<WebServerOptions['createRunner']>, target: string,
+  ): Promise<{ ok: boolean; detail: string; isProject: boolean }> {
+    const out = await run({ kind: 'init', cwd: target, args: ['init'] });
+    return { ok: out.ok, detail: out.detail, isProject: isProject(target) };
+  }
+
   /** The one place a mission is created. Chat calls this; so does the route. */
   function createMission(goal: string) {
     const head = (() => {
@@ -367,6 +404,100 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       if (!goal) { send(res, 400, { error: 'GOAL_REQUIRED' }); return; }
       const rec = createMission(goal);
       send(res, 201, missionStatusView(missions, opts.projectRoot, rec.missionId));
+      return;
+    }
+
+    if (url.pathname === '/api/projects/draft') {
+      if (!opts.projectsRoot) { send(res, 503, { error: 'NO_PROJECTS_ROOT' }); return; }
+      const message = typeof body?.message === 'string' ? body.message.trim() : '';
+      const hasAttachment = body?.hasAttachment === true;
+      const decision = routeFor({ message, hasAttachment });
+      const desired = decision.route === 'CLONE' ? slugForUrl(message)
+        : decision.route === 'ZIP' ? slugify(String(body?.filename ?? 'upload').replace(/\.zip$/i, ''))
+          : slugify(message.split(/\s+/).slice(0, 4).join('-'));
+      const card = draftCreationCard({
+        route: decision.route, source: message || String(body?.filename ?? 'upload'),
+        projectsRoot: opts.projectsRoot,
+        targetSlug: freeSlug(opts.projectsRoot, desired),
+        limits: DEFAULT_ZIP_LIMITS,
+      });
+      // A card is a PROPOSAL. Nothing is created on this path, ever.
+      send(res, 200, { route: decision.route, decision, card });
+      return;
+    }
+
+    if (url.pathname === '/api/projects/decide') {
+      if (!opts.projectsRoot) { send(res, 503, { error: 'NO_PROJECTS_ROOT' }); return; }
+      const card = body?.card as CreationCard | undefined;
+      const digest = String(body?.cardDigest ?? '');
+      const decisionId = String(body?.decision ?? '');
+      if (!card || !digest || !decisionId) {
+        send(res, 400, { error: 'CARD_DECISION_INCOMPLETE' }); return;
+      }
+      const fresh = draftCreationCard({
+        route: card.route, source: card.source, projectsRoot: opts.projectsRoot,
+        targetSlug: card.targetSlug, limits: DEFAULT_ZIP_LIMITS,
+      });
+      // The confirm-with-hash rule, fourth deployment.
+      if (fresh.digest !== digest || card.digest !== digest) {
+        send(res, 409, {
+          error: 'CARD_DIGEST_MISMATCH',
+          detail: 'the card changed since it was rendered to you — read it again before deciding',
+          current: fresh,
+        });
+        return;
+      }
+      if (decisionId === 'cancel') { send(res, 200, { decision: 'cancel', created: null }); return; }
+
+      // A credentialed URL never reaches a command line.
+      if (card.route === 'CLONE' && carriesCredentials(card.source)) {
+        send(res, 400, {
+          error: 'CREDENTIALED_URL_REFUSED',
+          detail: 'this URL carries a credential. Use an SSH agent or a public URL — '
+            + 'a secret in a URL reaches process listings and the run registry.',
+        });
+        return;
+      }
+
+      const target = path.join(opts.projectsRoot, card.targetSlug);
+      if (fs.existsSync(target)) { send(res, 409, { error: 'TARGET_EXISTS', target }); return; }
+      const run = opts.createRunner;
+      if (!run) { send(res, 503, { error: 'CREATE_RUNNER_UNAVAILABLE' }); return; }
+
+      if (card.route === 'CLONE') {
+        // Through the supervisor: bounded, killable, in the run registry.
+        const cloned = await run({ kind: 'clone', cwd: opts.projectsRoot,
+          args: ['clone', '--depth', '1', card.source, card.targetSlug] });
+        if (!cloned.ok) {
+          fs.rmSync(target, { recursive: true, force: true });
+          send(res, 502, { error: 'CLONE_FAILED', detail: cloned.detail });
+          return;
+        }
+      } else if (card.route === 'ZIP') {
+        const raw = typeof body?.zipBase64 === 'string' ? body.zipBase64 : '';
+        if (!raw) { send(res, 400, { error: 'ARCHIVE_REQUIRED' }); return; }
+        const result = extractZip(Buffer.from(raw, 'base64'), target, DEFAULT_ZIP_LIMITS);
+        if (!result.ok) { send(res, 400, { error: 'ARCHIVE_REFUSED', detail: result.refusal, result }); return; }
+        send(res, 201, { decision: 'create', route: 'ZIP', slug: card.targetSlug,
+          target, extraction: result, initialised: await initialise(run, target) });
+        return;
+      } else {
+        // DESCRIPTION: an empty project. Building the thing is a mission, and
+        // a mission is what the next card is for — there is no scaffold path.
+        fs.mkdirSync(target, { recursive: true });
+        await run({ kind: 'clone', cwd: target, args: ['init', '-q', '-b', 'main', '.'] });
+      }
+
+      const initialised = await initialise(run, target);
+      const payload: Record<string, unknown> = {
+        decision: 'create', route: card.route, slug: card.targetSlug, target, initialised,
+      };
+      if (card.route === 'DESCRIPTION') {
+        // Hand off to the SAME mission card W1c built, goal prefilled.
+        payload.missionCard = draftCard({ intent: 'WORK', message: card.source });
+        payload.handoff = 'the project is empty; accept the mission card to build it';
+      }
+      send(res, 201, payload);
       return;
     }
 

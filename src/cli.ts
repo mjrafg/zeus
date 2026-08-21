@@ -39,6 +39,7 @@ import {
 } from './mission/progress';
 import { missionStatusView, missionListView, missionReportView } from './views';
 import { startWebServer, defaultSpawnRun } from './web/server';
+import { defaultProjectsRoot } from './projects';
 import { compileMissionOracle, planMissionGraph } from './mission/operations';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
@@ -88,7 +89,8 @@ ${C.b}Usage${C.x}
   zeus setup [dependencies|providers]    interactive bootstrap: check, install, sign in
         [--dry-run] [--non-interactive] [--json] [--advanced]
   zeus init [--force] [--adapter <id>]   inspect this repository and create .zeus/config.yaml
-  zeus web [--port N] [--host H]         the Control Center for this project
+  zeus web [--port N] [--host H] [--projects <dir>]
+                                         the Control Center; --projects enables the home
   zeus doctor                            report what this machine can actually do
   zeus run "<task>" [--mock]              run a task in this project
   zeus status [<taskId>]
@@ -1804,6 +1806,9 @@ async function cmdWeb(argv: string[]): Promise<number> {
   if (!ctx) return 2;
   const portIdx = argv.indexOf('--port');
   const hostIdx = argv.indexOf('--host');
+  const rootIdx = argv.indexOf('--projects');
+  const projectsRoot = rootIdx >= 0 ? path.resolve(argv[rootIdx + 1] ?? '')
+    : (process.env.ZEUS_PROJECTS_ROOT ? defaultProjectsRoot() : null);
   const port = portIdx >= 0 ? Number(argv[portIdx + 1]) : 4317;
   const host = hostIdx >= 0 ? argv[hostIdx + 1] : '127.0.0.1';
   if (!Number.isFinite(port) || port < 0 || port > 65535) {
@@ -1826,6 +1831,23 @@ async function cmdWeb(argv: string[]): Promise<number> {
     projectRoot: ctx.root, stateRoot: engine.stateRoot, projectId: engine.projectId,
     port, host,
     spawnRun: (missionId) => defaultSpawnRun(ctx.root, missionId),
+    ...(projectsRoot ? { projectsRoot } : {}),
+    // Creation steps run through the supervisor: bounded, killable, and in the
+    // run registry like every other execution Zeus causes.
+    createRunner: async (spec) => {
+      const res = await engine.opts.supervisor.run({
+        id: `create-${spec.kind}-${Date.now()}`,
+        projectId: engine.projectId, taskId: null, cls: 'heavy',
+        command: spec.kind === 'init' ? process.execPath : 'git',
+        args: spec.kind === 'init'
+          ? [path.resolve(__dirname, 'cli.ts'), 'init']
+          : spec.args,
+        cwd: spec.cwd, inspectArgs: false, timeoutSeconds: 600,
+        policy: defaultPolicy(spec.cwd, spec.cwd),
+      } as any);
+      return { ok: res.outcome === 'COMPLETED',
+        detail: `${spec.kind} ${res.outcome}${res.exitCode === null ? '' : ` (exit ${res.exitCode})`}` };
+    },
     operations: {
       compile: (missionId) => compileMissionOracle(opCtx(), missionId),
       plan: (missionId) => planMissionGraph(opCtx(), missionId),
@@ -1851,7 +1873,9 @@ async function cmdWeb(argv: string[]): Promise<number> {
   } else {
     out(`  ${C.dim}token already generated; read it from ${engine.stateRoot}/web-token${C.x}`);
   }
-  out(`  ${C.dim}one project per server; ctrl-c to stop${C.x}`);
+  out(projectsRoot
+    ? `  ${C.dim}projects root ${projectsRoot}; ctrl-c to stop${C.x}`
+    : `  ${C.dim}single project (pass --projects <dir> for the Projects home); ctrl-c to stop${C.x}`);
 
   await new Promise<void>((resolve) => {
     const stop = () => { void server.close().then(resolve); };

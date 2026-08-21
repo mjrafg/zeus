@@ -218,7 +218,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 10 && WRITE_ROUTES.length === 9,
+      READ_ROUTES.length === 11 && WRITE_ROUTES.length === 11,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -967,5 +967,198 @@ export async function webSuite(): Promise<void> {
       slugify('../../etc/passwd') === 'etc-passwd', slugify('../../etc/passwd'));
     check('PC15c: a taken name gets a free suffix instead of clobbering',
       freeSlug(root, 'alpha') === 'alpha-2', freeSlug(root, 'alpha'));
+  }
+  section('project creation: over HTTP, nothing is created without an accepted card');
+  {
+    const proot = path.join(TMP, `hproot-${seq += 1}`);
+    fs.mkdirSync(proot, { recursive: true });
+    const fx = fixture();
+    const ran: string[] = [];
+    const runner = async (spec: { kind: string; args: string[]; cwd: string }) => {
+      ran.push(`${spec.kind}:${spec.args.join(' ')}`);
+      if (spec.args[0] === 'clone') {
+        // Stand in for a real clone: the point of the test is the route and
+        // the walls, not git's network stack.
+        const dest = path.join(spec.cwd, spec.args[spec.args.length - 1]);
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, 'package.json'), '{"name":"cloned"}\n');
+      }
+      if (spec.args[0] === 'init' && spec.kind === 'init') {
+        fs.mkdirSync(path.join(spec.cwd, '.zeus', 'state'), { recursive: true });
+        fs.writeFileSync(path.join(spec.cwd, '.zeus', 'config.yaml'),
+          'version: 1\nproject:\n  name: made\n  adapter: node\n');
+      }
+      return { ok: true, detail: `${spec.kind} ok` };
+    };
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        projectsRoot: proot, createRunner: runner,
+      });
+      const auth = { authorization: `Bearer ${server.token}` };
+
+      const empty = await get(`${server.url}/api/projects`, auth);
+      check('PC20: the projects home lists an empty root without inventing anything',
+        empty.status === 200 && empty.json.projects.length === 0
+        && empty.json.projectsRoot === proot, JSON.stringify(empty.json?.projects?.length));
+
+      const draft = await post(server, '/api/projects/draft',
+        { message: 'https://github.com/owner/repo.git' });
+      check('PC21: a URL drafts a CLONE card and creates nothing',
+        draft.json.route === 'CLONE' && !!draft.json.card
+        && fs.readdirSync(proot).length === 0, JSON.stringify(draft.json?.route));
+      check('PC21b: the card shows where it would land',
+        draft.json.card.targetSlug === 'repo'
+        && draft.json.card.targetPath === path.join(proot, 'repo'),
+        draft.json.card.targetPath);
+
+      const stale = await post(server, '/api/projects/decide', {
+        card: { ...draft.json.card, targetSlug: 'somewhere-else' },
+        cardDigest: draft.json.card.digest, decision: 'create',
+      });
+      check('PC22: a card that changed is refused, and nothing is created',
+        stale.status === 409 && stale.json.error === 'CARD_DIGEST_MISMATCH'
+        && fs.readdirSync(proot).length === 0, JSON.stringify(stale.json?.error));
+
+      const created = await post(server, '/api/projects/decide', {
+        card: draft.json.card, cardDigest: draft.json.card.digest, decision: 'create',
+      });
+      check('PC23: an accepted card clones and initialises',
+        created.status === 201 && created.json.slug === 'repo'
+        && created.json.initialised.isProject === true, JSON.stringify(created.json?.slug));
+      check('PC23b: the clone ran shallow, through the injected runner',
+        ran.some((r) => r.includes('clone --depth 1')), ran.join(' | '));
+      check('PC23c: and the new project appears in the projects home',
+        (await get(`${server.url}/api/projects`, auth)).json.projects
+          .map((p: any) => p.slug).join(',') === 'repo');
+
+      // A credentialed URL never reaches a command line.
+      const credDraft = await post(server, '/api/projects/draft',
+        { message: 'https://user:tok@github.com/owner/secret.git' });
+      const credDecide = await post(server, '/api/projects/decide', {
+        card: credDraft.json.card, cardDigest: credDraft.json.card.digest, decision: 'create',
+      });
+      check('PC24: a credentialed URL is refused at the decision, not cloned',
+        credDecide.status === 400 && credDecide.json.error === 'CREDENTIALED_URL_REFUSED',
+        JSON.stringify(credDecide.json?.error));
+      check('PC24b: and it never reached the runner',
+        !ran.some((r) => r.includes('tok@')), ran.join(' | '));
+
+      // DESCRIPTION → empty project + the W1c mission card, goal prefilled.
+      const descDraft = await post(server, '/api/projects/draft',
+        { message: 'build a CLI that renames files by pattern' });
+      check('PC25: a description drafts a DESCRIPTION card',
+        descDraft.json.route === 'DESCRIPTION', descDraft.json.route);
+      const descMade = await post(server, '/api/projects/decide', {
+        card: descDraft.json.card, cardDigest: descDraft.json.card.digest, decision: 'create',
+      });
+      check('PC26: it creates an EMPTY project and hands off to a mission card',
+        descMade.status === 201 && !!descMade.json.missionCard
+        && descMade.json.missionCard.originalGoal === 'build a CLI that renames files by pattern',
+        JSON.stringify(descMade.json?.missionCard?.originalGoal));
+      check('PC26b: the handoff says plainly that building it is a mission',
+        /accept the mission card to build it/.test(descMade.json.handoff), descMade.json.handoff);
+      check('PC26c: no scaffolding was written — the project is empty but initialised',
+        descMade.json.initialised.isProject === true
+        && !fs.existsSync(path.join(proot, descMade.json.slug, 'src')),
+        descMade.json.slug);
+
+      // Two projects now exist, and their state does not cross.
+      const both = await get(`${server.url}/api/projects`, auth);
+      check('PC27: multi-project listing shows both with their own identity',
+        both.json.projects.length === 2
+        && new Set(both.json.projects.map((p: any) => p.root)).size === 2,
+        both.json.projects.map((p: any) => p.slug).join(','));
+      check('PC27b: each project has its own state directory',
+        both.json.projects.every((p: any) => p.root.startsWith(proot)));
+
+      const noAuth = await get(`${server.url}/api/projects`);
+      check('PC28: the projects home is authenticated like everything else',
+        noAuth.status === 401, String(noAuth.status));
+    } finally { await server?.close(); }
+  }
+
+  section('project creation: a zip arrives through the same card boundary');
+  {
+    const proot = path.join(TMP, `zproot-${seq += 1}`);
+    fs.mkdirSync(proot, { recursive: true });
+    const fx = fixture();
+    const runner = async (spec: { kind: string; args: string[]; cwd: string }) => {
+      if (spec.kind === 'init') {
+        fs.mkdirSync(path.join(spec.cwd, '.zeus', 'state'), { recursive: true });
+        fs.writeFileSync(path.join(spec.cwd, '.zeus', 'config.yaml'),
+          'version: 1\nproject:\n  name: zipped\n  adapter: node\n');
+      }
+      return { ok: true, detail: 'ok' };
+    };
+    const zipOf = (files: Array<{ name: string; body: string; mode?: number }>): Buffer => {
+      const locals: Buffer[] = []; const centrals: Buffer[] = []; let offset = 0;
+      for (const f of files) {
+        const name = Buffer.from(f.name, 'utf8');
+        const body = Buffer.from(f.body, 'utf8');
+        const lh = Buffer.alloc(30);
+        lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 8);
+        lh.writeUInt32LE(body.length, 18); lh.writeUInt32LE(body.length, 22);
+        lh.writeUInt16LE(name.length, 26);
+        const local = Buffer.concat([lh, name, body]);
+        const ch = Buffer.alloc(46);
+        ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+        ch.writeUInt16LE(0, 10);
+        ch.writeUInt32LE(body.length, 20); ch.writeUInt32LE(body.length, 24);
+        ch.writeUInt16LE(name.length, 28);
+        ch.writeUInt32LE((((f.mode ?? 0o100644) << 16) >>> 0), 38);
+        ch.writeUInt32LE(offset, 42);
+        centrals.push(Buffer.concat([ch, name])); locals.push(local); offset += local.length;
+      }
+      const cd = Buffer.concat(centrals);
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+      eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+      return Buffer.concat([...locals, cd, eocd]);
+    };
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        projectsRoot: proot, createRunner: runner,
+      });
+      const draft = await post(server, '/api/projects/draft',
+        { hasAttachment: true, filename: 'my-app.zip' });
+      check('PC30: an attachment routes to ZIP whatever the text says',
+        draft.json.route === 'ZIP' && draft.json.card.targetSlug === 'my-app',
+        draft.json.card?.targetSlug);
+
+      const good = zipOf([{ name: 'src/index.ts', body: 'export const x = 1;\n' },
+        { name: 'link', body: '/etc/passwd', mode: 0o120777 }]);
+      const made = await post(server, '/api/projects/decide', {
+        card: draft.json.card, cardDigest: draft.json.card.digest, decision: 'create',
+        zipBase64: good.toString('base64'),
+      });
+      check('PC31: a good archive extracts and initialises',
+        made.status === 201 && made.json.extraction.written === 1
+        && made.json.initialised.isProject === true, JSON.stringify(made.json?.error ?? made.status));
+      check('PC31b: the skipped link is reported back on the result',
+        made.json.extraction.skippedLinks.join(',') === 'link',
+        JSON.stringify(made.json.extraction.skippedLinks));
+
+      const d2 = await post(server, '/api/projects/draft',
+        { hasAttachment: true, filename: 'evil.zip' });
+      const evil = zipOf([{ name: '../../escaped.txt', body: 'pwned' }]);
+      const refused = await post(server, '/api/projects/decide', {
+        card: d2.json.card, cardDigest: d2.json.card.digest, decision: 'create',
+        zipBase64: evil.toString('base64'),
+      });
+      check('PC32: a traversal archive is refused over HTTP too',
+        refused.status === 400 && refused.json.error === 'ARCHIVE_REFUSED',
+        JSON.stringify(refused.json?.error));
+      check('PC32b: and nothing landed anywhere',
+        !fs.existsSync(path.join(proot, 'evil'))
+        && !fs.existsSync(path.join(proot, 'escaped.txt'))
+        && !fs.existsSync(path.join(TMP, 'escaped.txt')));
+    } finally { await server?.close(); }
   }
 }

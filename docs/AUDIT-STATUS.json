@@ -449,6 +449,31 @@
    "rootCause": "Integration is defined entirely in terms of a commit. There is no channel by which a node hands a finding, a decision or a selection to its dependants, so the plan language can express a node the execution model cannot execute. The plan critic independently flagged the node's scope; the deeper problem is that the plan was expressible at all.",
    "resolution": "Not fixed. This is a design question \u2014 either the planner is constrained to emit only diff-producing nodes, or nodes gain a typed output artifact that dependants read. Recorded as a V1 limitation rather than patched under a release gate.",
    "regressionTests": []
+  },
+  {
+   "id": "P1-20",
+   "severity": "P1",
+   "title": "Doctor reported project health without probing the project's toolchain",
+   "status": "FIXED",
+   "observed": "On a real pnpm-workspace project `zeus doctor` reported healthy and the first mission failed in under a minute: the host had no pnpm, so dependency preparation could never have run. Reproduced on a fixture \u2014 doctor at 5aaceaf prints `Ready.` and exits 0 against a pnpm workspace on a host with node but no pnpm.",
+   "rootCause": "Doctor probed what Zeus needs in general and probed it honestly. Nothing probed what THIS project's mission path needs: which package manager its lockfile names, whether that manager executes, whether its declared commands resolve in the environment the supervisor builds, or whether preparation could run at all. Third occurrence of one shape \u2014 a provider reported authenticated while every call 401'd, isolation reported capabilities from configuration rather than probes, and now project health without project probes. The standing rule is never report health that was not probed.",
+   "resolution": "A project-readiness section in `src/readiness.ts`: the package manager is EXECUTED (a corepack shim that resolves but fails to run is FAIL, with the distinction stated, and the resolved path is executed rather than the bare name so the probe reports on the file it found); every declared command resolves through `resolveExecutable` against `supervisorEnv`, FAIL for the required floor and WARN otherwise in the same wording; preparation is dry-run through the engine's own `describeDependencyState`, so the predicted method is the one `materialize()` would pick. Nothing installs, fetches or writes, and that is asserted. One implementation, two callers: `zeus doctor` renders it and `zeus mission run` gates on it before the selftest spends anything. The overall verdict cannot be green while a required probe fails.",
+   "regressionTests": [
+    "RD1: a pnpm workspace on a host without pnpm FAILS the package-manager probe",
+    "RD2: the overall readiness verdict is not ready while a required probe fails",
+    "RD3: an absent REQUIRED command is FAIL",
+    "RD3b: an absent OPTIONAL command is WARN, not FAIL",
+    "RD4: a shim that resolves but does not execute is FAIL, not PASS",
+    "RD4b: the report states the distinction rather than just \"missing\"",
+    "RD5: doctor created nothing \u2014 the tree is byte-identical in shape",
+    "RD5b: no node_modules was produced",
+    "RD5c: no dependency cache was created",
+    "RD6: doctor --json exits non-zero while a required project probe fails",
+    "RD6b: and carries the typed probes, not prose only",
+    "RD7: mission run refuses while readiness fails",
+    "RD7b: it refused BEFORE the selftest \u2014 nothing was spent",
+    "RD8b: the contract line names the preparation method and the floor"
+   ]
   }
  ]
 }

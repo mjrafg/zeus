@@ -17,6 +17,7 @@ import {
 } from './config';
 import { detectProject } from './adapters';
 import { probe, summarize, Capability } from './doctor';
+import { projectReadiness, ReadinessProbe, ReadinessReport } from './readiness';
 import { describeDependencyState, cleanDependencyCache, depsCacheRoot } from './engine/dependencies';
 import { Engine, TERMINAL } from './engine/orchestrator';
 import { ProcessSupervisor } from './engine/exec';
@@ -412,10 +413,13 @@ function cmdDoctor(args: string[]): number {
   // Provider health is only meaningful against the role each one has been
   // given: an uninstalled reviewer matters, an unused one does not.
   const caps = probe(rolesFor(cfg));
+  // Probed in a project context only: readiness is a question about a project,
+  // and answering it outside one would be answering about nothing.
+  const readiness = root && cfg ? projectReadiness({ root, cfg }) : null;
   if (json) {
     out(JSON.stringify({ version: VERSION, runtime: userDataDir(), project: root, capabilities: caps,
-      configProblems: cfg ? validateConfig(cfg) : null }, null, 1));
-    return summarize(caps).ok ? 0 : 1;
+      configProblems: cfg ? validateConfig(cfg) : null, readiness }, null, 1));
+    return summarize(caps).ok && (readiness?.ok ?? true) ? 0 : 1;
   }
   out(`${C.b}zeus doctor${C.x} ${C.dim}(${VERSION})${C.x}\n`);
   for (const c of caps) {
@@ -479,9 +483,19 @@ function cmdDoctor(args: string[]): number {
     out(`  next task would use      ${dep.wouldUse}  ${C.dim}${dep.detail}${C.x}`);
   }
 
-  const { ok, blocking } = summarize(caps);
+  if (readiness) renderReadiness(readiness);
+
+  const capsOk = summarize(caps).ok;
+  const blocking = summarize(caps).blocking;
+  // The verdict cannot be softer than the probes. A required project probe
+  // that failed is the whole finding this section exists for, and letting the
+  // overall line stay green while it fails would reproduce the defect.
+  const ok = capsOk && (readiness?.ok ?? true);
   const providerGaps = caps.filter((c) => c.provider && c.level === 'missing');
-  out(`\n${ok ? `${C.g}Ready.${C.x}` : `${C.r}Not ready:${C.x} ${blocking.map((b) => b.label).join(', ')}`}`);
+  const notReady = [...blocking.map((b) => b.label),
+    ...(readiness && !readiness.ok
+      ? readiness.probes.filter((p) => p.required && p.status === 'FAIL').map((p) => p.label) : [])];
+  out(`\n${ok ? `${C.g}Ready.${C.x}` : `${C.r}Not ready:${C.x} ${notReady.join(', ')}`}`);
   if (providerGaps.length) {
     out(`${C.y}!${C.x} ${providerGaps.map((c) => c.label).join(' and ')} ${providerGaps.length > 1 ? 'are' : 'is'} not ready — run ${C.b}zeus setup providers${C.x}`);
   }
@@ -1476,6 +1490,25 @@ async function cmdMission(argv: string[]): Promise<number> {
       const mock = rest.includes('--mock');
       const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
 
+      // Project readiness comes FIRST, before the selftest, because it is free
+      // and the selftest costs money. The same probes doctor runs, from the
+      // same implementation: two health paths that decide separately will
+      // eventually disagree, and the one that disagrees quietly is the one
+      // that lets a mission start on a host that cannot run it.
+      const ready = projectReadiness({ root: ctx.root, cfg: ctx.cfg });
+      if (!ready.ok) {
+        const failed = ready.probes.filter((p) => p.required && p.status === 'FAIL');
+        err(`${C.r}✗${C.x} ${id} will not start: this project is not ready on this host`);
+        for (const p of failed) {
+          err(`  ${C.r}✗${C.x} ${p.label}: ${p.detail}`);
+          if (p.remedy) err(`      ${C.dim}→ ${p.remedy}${C.x}`);
+        }
+        err(`  ${C.dim}${ready.summary}${C.x}`);
+        err(`  ${C.dim}nothing was spent — zeus doctor shows the full readiness report${C.x}`);
+        return 1;
+      }
+      if (!json) out(`  ${C.dim}${ready.summary}${C.x}`);
+
       // The preflight runs BEFORE anything is spent. --mock skips it, and says
       // so: a mocked run has nothing to preflight, and silently passing a lane
       // that never ran would be the worst of both.
@@ -1671,6 +1704,20 @@ function providerCliVersion(providerId: string): string | null {
       .execFileSync(bin, ['--version'], { encoding: 'utf8', timeout: 20_000,
         stdio: ['ignore', 'pipe', 'pipe'] }).trim().split('\n')[0];
   } catch { return null; }
+}
+
+/** One line per probe, plus the contract line. Never softer than the probes. */
+function renderReadiness(r: ReadinessReport): void {
+  const glyph = (p: ReadinessProbe) => (p.status === 'PASS' ? `${C.g}✓${C.x}`
+    : p.status === 'FAIL' ? `${C.r}✗${C.x}`
+      : p.status === 'WARN' ? `${C.y}!${C.x}` : `${C.dim}-${C.x}`);
+  out(`\n${C.b}Project readiness${C.x} ${C.dim}(what a mission on this project needs)${C.x}`);
+  for (const p of r.probes) {
+    const status = p.status === 'SKIPPED' ? `SKIPPED (${p.reason ?? 'no reason given'})` : p.status;
+    out(`  ${glyph(p)} ${p.label.padEnd(24)} ${status.padEnd(9)} ${C.dim}${p.detail}${C.x}`);
+    if (p.remedy && (p.status === 'FAIL' || p.status === 'WARN')) out(`      ${C.dim}→ ${p.remedy}${C.x}`);
+  }
+  out(`  ${r.ok ? C.g : C.r}${r.summary}${C.x}`);
 }
 
 function cmdSelfCheck(argv: string[]): number {

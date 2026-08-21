@@ -16,7 +16,7 @@ rather than quietly dropped.
 | Severity | OPEN | ACCEPTED_RISK | PARTIALLY_FIXED | FIXED | OBSOLETE |
 |---|---|---|---|---|---|
 | **P0** | **0** | 0 | 0 | 5 | 2 |
-| **P1** | **0** | 1 | 0 | 14 | 4 |
+| **P1** | **0** | 1 | 0 | 15 | 4 |
 | P2 | **3** | 0 | 0 | 0 | 0 |
 | P3 | **0** | 0 | 0 | 3 | 0 |
 
@@ -51,6 +51,34 @@ whole-preflight constant sized for one provider tripped on a healthy
 two-provider run. The cap now scales with contacts actually made, from an
 observed per-contact price with a stated headroom factor, and an unpriced
 contact keeps the total a lower bound rather than becoming zero.
+
+## Doctor blindness, third occurrence
+
+**P1-20 — doctor reported project health without probing the project.** On a
+real pnpm workspace doctor said healthy and the first mission died in under a
+minute: no pnpm on the host, so preparation could never have run. Doctor had
+checked what Zeus needs in general, and checked it honestly. Nothing had
+checked what that project's mission path needs.
+
+That is the same shape as a provider reporting "authenticated" while every call
+returned 401, and isolation reporting capabilities from configuration rather
+than probes. Three occurrences, one rule: never report health that was not
+probed.
+
+The probes execute rather than infer. The package manager is run, not looked
+up — a corepack shim resolves to a real file and can still fail, so the
+distinction between "present" and "executes" is stated rather than collapsed,
+and the RESOLVED PATH is executed rather than the bare name so the probe cannot
+report on a different file than the one it found. Declared commands resolve
+through the same function and environment the supervisor uses. Preparation is
+dry-run through the engine's own planner rather than a second copy, because
+predicting a method the engine would not choose is worse than predicting
+nothing. Nothing writes, and the tests assert the tree is unchanged.
+
+One implementation, two callers: doctor renders it, `mission run` gates on it
+before the selftest spends anything. Two health paths that decide separately
+eventually disagree, and the one that disagrees quietly is the one that lets a
+mission start on a host that cannot run it.
 
 ## First live execution-loop contact
 

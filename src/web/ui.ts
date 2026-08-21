@@ -134,8 +134,28 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g,
 
 async function api(p) {
   const r = await fetch('/api' + p, { headers: { authorization: 'Bearer ' + TOKEN } });
-  if (r.status === 401) { $('conn').textContent = 'unauthorized'; throw new Error('401'); }
+  if (r.status === 401) { setConn('unauthorized — token changed?', 'bad'); throw new Error('401'); }
   return r.json();
+}
+
+function setConn(text, cls) {
+  $('conn').textContent = text;
+  $('conn').className = cls || 'dim';
+}
+
+/**
+ * Why the connection is down, rather than only that it is.
+ *
+ * EventSource reports failure without a status code, so "offline" covered a
+ * dead server and a stale token alike — two problems with completely different
+ * answers. One probe tells them apart.
+ */
+async function diagnoseConn() {
+  try {
+    const r = await fetch('/api/project', { headers: { authorization: 'Bearer ' + TOKEN } });
+    if (r.status === 401) { setConn('unauthorized — token changed?', 'bad'); return; }
+    setConn('reconnecting…', 'warn');
+  } catch { setConn('server unreachable', 'bad'); }
 }
 
 async function loadList() {
@@ -250,8 +270,8 @@ function connectStream() {
     + (PROJECT ? '&project=' + encodeURIComponent(PROJECT) : '');
   if (LAST) u += '&lastEventId=' + encodeURIComponent(LAST);
   ES = new EventSource(u);
-  ES.onopen = () => { $('conn').textContent = 'live'; $('conn').className = 'ok'; };
-  ES.onerror = () => { $('conn').textContent = 'reconnecting…'; $('conn').className = 'warn'; };
+  ES.onopen = () => setConn('live', 'ok');
+  ES.onerror = () => { void diagnoseConn(); };
   // The server names every frame '${SSE_CHANNEL}'. A named SSE frame does NOT
   // reach onmessage — that is the spec, and assuming otherwise meant the
   // browser received every event and displayed none of them.
@@ -497,6 +517,10 @@ $('go').onclick = async () => {
       // projects rather than whichever one the service happens to sit in.
       showHome(true);
       await loadHome();
+      // The home is a live view too. Without this the status read "offline"
+      // for as long as you stayed on it, while the server was perfectly fine —
+      // an indicator that lies in the safe-looking direction is still lying.
+      connectStream();
       return;
     }
     $('proj').textContent = p.projectId + '  ' + p.root;

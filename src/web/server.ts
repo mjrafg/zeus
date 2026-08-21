@@ -168,14 +168,27 @@ function gitDiff(from: string, to: string, cwd: string): string {
  * the truth. Running it inline would make an operator closing a laptop into a
  * cancelled mission.
  */
+/**
+ * How to invoke this CLI as a child process.
+ *
+ * Running from source means the entry point is TypeScript, which bare `node`
+ * cannot execute — it dies on the first `import` with a SyntaxError. That is
+ * not hypothetical: the project-creation path spawned `node …/cli.ts init`,
+ * every `zeus init` failed silently, and cloned projects were left on disk
+ * with no .zeus/ and no explanation. One helper now, so no caller has to
+ * remember which of the two shapes it is in.
+ */
+export function zeusCliArgv(projectRoot: string): string[] {
+  const ts = path.resolve(__dirname, '..', 'cli.ts');
+  if (fs.existsSync(ts)) {
+    return [path.resolve(projectRoot, 'node_modules/.bin/ts-node'), '--transpile-only', ts];
+  }
+  return [path.resolve(__dirname, '..', 'cli.js')];
+}
+
 export function defaultSpawnRun(projectRoot: string, missionId: string):
   { ok: boolean; pid: number | null; detail: string } {
-  const cli = path.resolve(__dirname, '..', 'cli.ts');
-  const useTs = fs.existsSync(cli);
-  const entry = useTs ? cli : path.resolve(__dirname, '..', 'cli.js');
-  const args = useTs
-    ? [path.resolve(projectRoot, 'node_modules/.bin/ts-node'), '--transpile-only', entry]
-    : [entry];
+  const args = zeusCliArgv(projectRoot);
   try {
     const child = spawn(process.execPath, [...args, 'mission', 'run', missionId], {
       cwd: projectRoot, detached: true, stdio: 'ignore',
@@ -514,14 +527,33 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       if (!run) { send(res, 503, { error: 'CREATE_RUNNER_UNAVAILABLE' }); return; }
 
       if (card.route === 'CLONE') {
-        // Through the supervisor: bounded, killable, in the run registry.
+        // Temp-and-rename, like the archive path. A clone that succeeds and an
+        // init that fails used to leave a complete checkout with no .zeus/ —
+        // an orphan that looks like a project to a human and like nothing to
+        // Zeus. Either the whole thing lands or none of it does.
+        const staging = `${target}.incoming-${process.pid}`;
+        fs.rmSync(staging, { recursive: true, force: true });
         const cloned = await run({ kind: 'clone', cwd: opts.projectsRoot,
-          args: ['clone', '--depth', '1', card.source, card.targetSlug] });
+          args: ['clone', '--depth', '1', card.source, path.basename(staging)] });
         if (!cloned.ok) {
-          fs.rmSync(target, { recursive: true, force: true });
+          fs.rmSync(staging, { recursive: true, force: true });
           send(res, 502, { error: 'CLONE_FAILED', detail: cloned.detail });
           return;
         }
+        const started = await initialise(run, staging);
+        if (!started.ok || !started.isProject) {
+          fs.rmSync(staging, { recursive: true, force: true });
+          send(res, 502, {
+            error: 'INIT_FAILED',
+            detail: `the clone succeeded but zeus init did not: ${started.detail}`,
+            cleanedUp: true,
+          });
+          return;
+        }
+        fs.renameSync(staging, target);
+        send(res, 201, { decision: 'create', route: 'CLONE', slug: card.targetSlug,
+          target, initialised: { ...started, isProject: isProject(target) } });
+        return;
       } else if (card.route === 'ZIP') {
         const raw = typeof body?.zipBase64 === 'string' ? body.zipBase64 : '';
         if (!raw) { send(res, 400, { error: 'ARCHIVE_REQUIRED' }); return; }

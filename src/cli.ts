@@ -38,7 +38,7 @@ import {
   mergeMissionBudgets, BudgetNegotiation,
 } from './mission/progress';
 import { missionStatusView, missionListView, missionReportView } from './views';
-import { startWebServer, defaultSpawnRun } from './web/server';
+import { startWebServer, defaultSpawnRun, zeusCliArgv } from './web/server';
 import { defaultProjectsRoot } from './projects';
 import { compileMissionOracle, planMissionGraph } from './mission/operations';
 import { selftestLive, SelftestReport } from './mission/selftest';
@@ -1838,9 +1838,12 @@ async function cmdWeb(argv: string[]): Promise<number> {
       const res = await engine.opts.supervisor.run({
         id: `create-${spec.kind}-${Date.now()}`,
         projectId: engine.projectId, taskId: null, cls: 'heavy',
+        // `zeus init` is THIS CLI, invoked the way this CLI can actually be
+        // invoked. Spawning bare node on a .ts entry point failed on the first
+        // import, so every created project was left without a .zeus/.
         command: spec.kind === 'init' ? process.execPath : 'git',
         args: spec.kind === 'init'
-          ? [path.resolve(__dirname, 'cli.ts'), 'init']
+          ? [...zeusCliArgv(ctx.root), 'init']
           : spec.args,
         cwd: spec.cwd, inspectArgs: false, timeoutSeconds: 600,
         policy: defaultPolicy(spec.cwd, spec.cwd),

@@ -15,7 +15,9 @@ import { execFileSync } from 'child_process';
 import { check, section } from './harness';
 import { EventStore } from '../src/engine/events';
 import { MissionRegistry } from '../src/mission/registry';
-import { startWebServer, RunningServer, routeTable, READ_ROUTES, WRITE_ROUTES } from '../src/web/server';
+import {
+  startWebServer, RunningServer, routeTable, READ_ROUTES, WRITE_ROUTES, zeusCliArgv,
+} from '../src/web/server';
 import { ensureToken, tokenMatches, tokenPath } from '../src/web/token';
 import {
   eventId, parseEventId, cursorFromLastId, since, advance, SSE_CHANNEL,
@@ -1639,5 +1641,115 @@ export async function webSuite(): Promise<void> {
       'home + scoping present');
     check('MP9b: and a way back to it once inside a project',
       UI_HTML.includes("id=\"crumb\""), 'breadcrumb present');
+  }
+  section('project creation: an init that fails leaves nothing behind');
+  {
+    const proot = path.join(TMP, `atomroot-${seq += 1}`);
+    fs.mkdirSync(proot, { recursive: true });
+    const fx = fixture();
+
+    // A runner that clones fine and then fails to initialise — exactly the
+    // shape that left two orphaned checkouts on the deployed host.
+    const ran: string[] = [];
+    const runner = async (spec: { kind: string; args: string[]; cwd: string }) => {
+      ran.push(spec.kind);
+      if (spec.args[0] === 'clone') {
+        const dest = path.join(spec.cwd, spec.args[spec.args.length - 1]);
+        fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+        fs.writeFileSync(path.join(dest, 'README.md'), '# cloned\n');
+        return { ok: true, detail: 'cloned' };
+      }
+      return { ok: false, detail: 'SyntaxError: Unexpected token (bare node on a .ts entry)' };
+    };
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        projectsRoot: proot, createRunner: runner,
+      });
+      const draft = await post(server, '/api/projects/draft',
+        { message: 'https://github.com/owner/talkbridge' });
+      const made = await post(server, '/api/projects/decide', {
+        card: draft.json.card, cardDigest: draft.json.card.digest, decision: 'create',
+      });
+
+      check('AT1: a failed init is reported, not silently swallowed',
+        made.status === 502 && made.json.error === 'INIT_FAILED',
+        JSON.stringify(made.json?.error));
+      check('AT1b: and the failure names what actually went wrong',
+        /SyntaxError/.test(made.json.detail), made.json.detail);
+      check('AT2: NOTHING is left on disk — no orphaned checkout, no staging dir',
+        fs.readdirSync(proot).length === 0, fs.readdirSync(proot).join(','));
+      check('AT2b: specifically no half-project a human would mistake for one',
+        !fs.existsSync(path.join(proot, 'talkbridge')), 'absent');
+      check('AT3: the clone did run first — this is the post-clone failure path',
+        ran.join(',') === 'clone,init', ran.join(','));
+    } finally { await server?.close(); }
+  }
+
+  section('project creation: a successful clone lands initialised or not at all');
+  {
+    const proot = path.join(TMP, `atomok-${seq += 1}`);
+    fs.mkdirSync(proot, { recursive: true });
+    const fx = fixture();
+    const runner = async (spec: { kind: string; args: string[]; cwd: string }) => {
+      if (spec.args[0] === 'clone') {
+        const dest = path.join(spec.cwd, spec.args[spec.args.length - 1]);
+        fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+        return { ok: true, detail: 'cloned' };
+      }
+      fs.mkdirSync(path.join(spec.cwd, '.zeus', 'state'), { recursive: true });
+      fs.writeFileSync(path.join(spec.cwd, '.zeus', 'config.yaml'),
+        'version: 1\nproject:\n  name: talkbridge\n  adapter: node\n');
+      return { ok: true, detail: 'init ok' };
+    };
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        projectsRoot: proot, createRunner: runner,
+      });
+      const draft = await post(server, '/api/projects/draft',
+        { message: 'https://github.com/owner/talkbridge' });
+      const made = await post(server, '/api/projects/decide', {
+        card: draft.json.card, cardDigest: draft.json.card.digest, decision: 'create',
+      });
+      check('AT4: a clone that initialises lands under its final name',
+        made.status === 201 && made.json.initialised.isProject === true
+        && fs.existsSync(path.join(proot, 'talkbridge', '.zeus', 'config.yaml')),
+        JSON.stringify(made.json?.error ?? made.status));
+      check('AT4b: no staging directory survives a success either',
+        fs.readdirSync(proot).join(',') === 'talkbridge', fs.readdirSync(proot).join(','));
+      check('AT5: and it appears on the projects home immediately',
+        (await get(`${server.url}/api/projects`,
+          { authorization: `Bearer ${server.token}` })).json.projects[0].slug === 'talkbridge');
+    } finally { await server?.close(); }
+  }
+
+  section('the CLI can actually be spawned as a child');
+  {
+    // The repository root, discovered rather than written down: PB5 refuses a
+    // machine-specific absolute path in a source file, and it is right to.
+    const argv = zeusCliArgv(path.resolve(__dirname, '..'));
+    check('CLI1: running from source, the entry goes through ts-node, not bare node',
+      argv.length === 3 && argv[0].endsWith('ts-node') && argv[1] === '--transpile-only'
+      && argv[2].endsWith('cli.ts'), argv.join(' '));
+    check('CLI2: bare node on the .ts entry is exactly what this prevents',
+      !(argv.length === 1 && argv[0].endsWith('.ts')), 'not a bare .ts invocation');
+  }
+
+  section('the connection status distinguishes a dead server from a stale token');
+  {
+    check('CS-UI1: the home opens a stream, so its status means something',
+      /await loadHome\(\);[\s\S]{0,400}connectStream\(\);/.test(UI_HTML),
+      'home connects the stream');
+    check('CS-UI2: a 401 is reported as unauthorized, not as offline',
+      UI_HTML.includes('unauthorized — token changed?'), 'auth failure named');
+    check('CS-UI3: and an unreachable server says so distinctly',
+      UI_HTML.includes('server unreachable'), 'unreachable named');
+    check('CS-UI4: the stream error handler diagnoses rather than guessing',
+      /ES\.onerror = \(\) => \{ void diagnoseConn\(\); \}/.test(UI_HTML),
+      'onerror probes');
   }
 }

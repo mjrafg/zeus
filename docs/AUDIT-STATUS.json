@@ -529,11 +529,15 @@
    "id": "P2-4",
    "severity": "P2",
    "title": "Oracle and planner spend reaches no log",
-   "status": "OPEN",
+   "status": "FIXED",
    "observed": "After a mission made several live compiler, critic and planner calls, `mission report` read `cost nothing reported`.",
    "rootCause": "P1-17 recovered mission cost by reading the logs of spawned TASKS. Oracle and planner calls are made directly by the CLI and are not tasks, so their provider-reported cost lands nowhere. The mission USD ceiling therefore still cannot see pre-execution spend, which on a large repository is where a substantial share of it happens.",
-   "resolution": "Not fixed. The fix is to record providerUsage on the ORACLE_COMPILED / ORACLE_CRITIQUED / PLAN_RECORDED / PLAN_CRITIQUED events themselves and fold it into missionUsage. Recorded rather than estimated, because an estimated cost is precisely what this cycle's change refuses to treat as an observation.",
-   "regressionTests": []
+   "resolution": "The compiler, critic, planner and plan-critic attach provider-reported usage to ORACLE_COMPILED, ORACLE_CRITIQUED, PLAN_RECORDED and PLAN_CRITIQUED. missionUsage already summed providerUsage on any event, so pre-execution spend now reaches the mission budget. An unpriced call is still unmetered, never zero.",
+   "regressionTests": [
+    "PX1: oracle, critic, planner and plan-critic spend all reach the mission budget",
+    "PX2: and it is counted without any task having been spawned",
+    "PX3: a call that reported no price is still unmetered, not zero"
+   ]
   }
  ]
 }

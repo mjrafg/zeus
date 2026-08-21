@@ -834,7 +834,8 @@ async function recompileOracle(ctx: { root: string; cfg: ProjectConfig }, missio
     acceptanceMode: proposal.mode, compiledAt: new Date().toISOString(),
     compilerProviderId: compiled.compilerProviderId, criticProviderId: critique.criticProviderId,
   };
-  missions.recordOracle(missionId, oracle, compiled.structuredHash, compiled.validation);
+  missions.recordOracle(missionId, oracle, compiled.structuredHash, compiled.validation,
+    compiled.providerUsage);
   missions.recordCritique(missionId, {
     valid: critique.valid, findings: critique.findings, modeOpinion: critique.modeOpinion,
     promptHash: critique.payload.promptHash, hashes: critique.payload.hashes,
@@ -1097,7 +1098,8 @@ async function cmdMission(argv: string[]): Promise<number> {
         acceptanceMode: proposal.mode, compiledAt: new Date().toISOString(),
         compilerProviderId: compiled.compilerProviderId, criticProviderId: critique.criticProviderId,
       };
-      missions.recordOracle(id, oracle, compiled.structuredHash, compiled.validation);
+      missions.recordOracle(id, oracle, compiled.structuredHash, compiled.validation,
+        compiled.providerUsage);
       missions.recordCritique(id, {
         valid: critique.valid, findings: critique.findings, modeOpinion: critique.modeOpinion,
         promptHash: critique.payload.promptHash, hashes: critique.payload.hashes,
@@ -1337,7 +1339,7 @@ async function cmdMission(argv: string[]): Promise<number> {
         return 1;
       }
       missions.recordPlan(id, graph, planned.validation.findings
-        .filter((f) => f.code === 'CRITERION_SCOPE_MISMATCH'));
+        .filter((f) => f.code === 'CRITERION_SCOPE_MISMATCH'), planned.providerUsage);
 
       const critique = await critiquePlan({
         missionId: id, projectId: eng.projectId, goal: rec.goal, criteria: gate.criteria,
@@ -1350,6 +1352,7 @@ async function cmdMission(argv: string[]): Promise<number> {
         version, findings: critique.findings, acceptance: acceptance.decision,
         contaminated: !critique.valid,
         contaminationDetail: critique.valid ? null : 'the critique payload was contaminated',
+        providerUsage: critique.providerUsage,
       });
 
       if (json) {

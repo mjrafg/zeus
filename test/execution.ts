@@ -1224,4 +1224,37 @@ export async function executionSuite(): Promise<void> {
     check('PS3: a non-terminal session is recorded as deferred, not as consent',
       p.deferred === true);
   }
+  section('cost: pre-execution spend is spend');
+  {
+    const missions = freshRegistry();
+    const rec = missions.create('goal', 'base0');
+    const oracle = { ...oracleOf([criterion(`${rec.missionId}/C-0001`)]), missionId: rec.missionId };
+
+    // What the CLI now passes through: the compiler, critic and planner all
+    // report cost, and none of them runs inside a task.
+    missions.recordOracle(rec.missionId, oracle, 'h', { ok: true },
+      { totalCostUsd: 0.42 });
+    missions.recordCritique(rec.missionId, {
+      valid: true, findings: [], modeOpinion: null, promptHash: 'p', hashes: {},
+      violations: [], criticProviderId: 'codex', reconciliation: {},
+      providerUsage: { totalCostUsd: 0.31 },
+    });
+    const plan = graphOf([node(`${rec.missionId}/N-0001`)]);
+    missions.recordPlan(rec.missionId, plan, [], { totalCostUsd: 0.77 });
+    missions.recordPlanCritique(rec.missionId, {
+      version: 1, findings: [], acceptance: 'FLOW', contaminated: false,
+      providerUsage: { totalCostUsd: 0.15 },
+    });
+
+    const usage = missionUsage(evs(missions, rec.missionId), 1_700_000_000_000);
+    check('PX1: oracle, critic, planner and plan-critic spend all reach the mission budget',
+      Math.abs(usage.costUsd - 1.65) < 0.000_01, String(usage.costUsd));
+    check('PX2: and it is counted without any task having been spawned',
+      usage.tasksSpawned === 0, String(usage.tasksSpawned));
+    check('PX3: a call that reported no price is still unmetered, not zero',
+      missionUsage([...evs(missions, rec.missionId),
+        { id: 'x', taskId: rec.missionId, seq: 99, ts: new Date(1_700_000_000_000).toISOString(),
+          type: 'ORACLE_CRITIQUED', prev: '', payload: { providerUsage: { inputTokens: 5 } } }],
+      1_700_000_000_000).unmeteredCalls === 1);
+  }
 }

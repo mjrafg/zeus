@@ -297,9 +297,11 @@ export class MissionRegistry {
    * LOG, and a finding that is not on the log at that moment is a finding
    * nobody re-reads at the point of decision.
    */
-  recordPlan(missionId: string, plan: PlanGraph, scopeFindings: unknown[] = []): void {
+  recordPlan(missionId: string, plan: PlanGraph, scopeFindings: unknown[] = [],
+    providerUsage?: unknown): void {
     this.append(missionId, 'PLAN_RECORDED', {
       version: plan.version, plan, nodes: plan.nodes.length, scopeFindings,
+      ...(providerUsage ? { providerUsage } : {}),
     });
   }
 
@@ -329,8 +331,13 @@ export class MissionRegistry {
 
   /** Records a compiled contract. Compiling is not accepting. */
   recordOracle(missionId: string, oracle: Oracle, structuredHash: string,
-    validation: unknown): void {
+    validation: unknown, providerUsage?: unknown): void {
+    // Pre-execution spend is spend. The compiler, the critic and the planner
+    // are real model calls made outside any task, so their cost reached no log
+    // and a mission could report $0.00 after several of them. `missionUsage`
+    // already sums providerUsage on ANY event; it simply had none to find.
     this.append(missionId, 'ORACLE_COMPILED', {
+      ...(providerUsage ? { providerUsage } : {}),
       oracle, version: oracle.version, structuredHash,
       compilerProviderId: oracle.compilerProviderId,
       criterionCount: oracle.criteria.length, validation,
@@ -360,7 +367,7 @@ export class MissionRegistry {
   recordCritique(missionId: string, critique: {
     valid: boolean; findings: unknown[]; modeOpinion: string | null;
     promptHash: string; hashes: Record<string, string>; violations: unknown[];
-    criticProviderId: string; reconciliation: unknown;
+    criticProviderId: string; reconciliation: unknown; providerUsage?: unknown;
   }): void {
     this.append(missionId, 'ORACLE_CRITIQUED', { ...critique });
   }
@@ -529,11 +536,12 @@ export class MissionRegistry {
   /** What the plan critic said, whether or not anyone acted on it. */
   recordPlanCritique(missionId: string, spec: {
     version: number; findings: unknown[]; acceptance: string;
-    contaminated: boolean; contaminationDetail?: string | null;
+    contaminated: boolean; contaminationDetail?: string | null; providerUsage?: unknown;
   }): void {
     this.append(missionId, 'PLAN_CRITIQUED', {
       version: spec.version, findings: spec.findings, acceptance: spec.acceptance,
       contaminated: spec.contaminated, contaminationDetail: spec.contaminationDetail ?? null,
+      ...(spec.providerUsage ? { providerUsage: spec.providerUsage } : {}),
     });
   }
 

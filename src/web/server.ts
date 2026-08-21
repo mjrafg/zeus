@@ -27,6 +27,10 @@ import {
   ConsentRequest, consentSubject, evaluateConsent,
 } from '../mission/consent';
 import { CompileResult, PlanOperationResult, OperationContext } from '../mission/operations';
+import {
+  answerFromLog, chatHistory, classifyMessage, draftCard, recordCardDecision,
+  recordChatMessage, wantsTightening, MissionCard,
+} from '../mission/chat';
 import { EventTailer, cursorFromLastId, eventId } from './tail';
 import { UI_HTML } from './ui';
 
@@ -75,6 +79,7 @@ export const READ_ROUTES = [
   'GET /api/tasks/:id',
   'GET /api/files/diff',
   'GET /api/missions/:id/consent',
+  'GET /api/chat',
   'GET /api/events/stream',
 ] as const;
 
@@ -86,6 +91,8 @@ export const WRITE_ROUTES = [
   'POST /api/missions/:id/cancel',
   'POST /api/missions/:id/confirm',
   'POST /api/missions/:id/evaluate',
+  'POST /api/chat',
+  'POST /api/chat/decide',
 ] as const;
 
 /**
@@ -244,6 +251,13 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/api/chat') {
+        // History IS the log. Nothing is stored anywhere else, which is what
+        // makes it survive a restart and sit beside the missions it created.
+        send(res, 200, { projectId: opts.projectId, events: chatHistory(store, opts.projectId) });
+        return;
+      }
+
       const consentMatch = /^\/api\/missions\/([^/]+)\/consent$/.exec(url.pathname);
       if (method === 'GET' && consentMatch) {
         const id = resolveId(decodeURIComponent(consentMatch[1]));
@@ -335,19 +349,108 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     }
   });
 
+  /** The one place a mission is created. Chat calls this; so does the route. */
+  function createMission(goal: string) {
+    const head = (() => {
+      try {
+        return require('child_process').execFileSync('git',
+          ['-C', opts.projectRoot, 'rev-parse', 'HEAD'],
+          { encoding: 'utf8', timeout: 15_000 }).trim();
+      } catch { return 'unknown'; }
+    })();
+    return missions.create(goal, head);
+  }
+
   async function handleWrite(url: URL, body: any, res: http.ServerResponse): Promise<void> {
     if (url.pathname === '/api/missions') {
       const goal = typeof body?.goal === 'string' ? body.goal.trim() : '';
       if (!goal) { send(res, 400, { error: 'GOAL_REQUIRED' }); return; }
-      const head = (() => {
-        try {
-          return require('child_process').execFileSync('git',
-            ['-C', opts.projectRoot, 'rev-parse', 'HEAD'],
-            { encoding: 'utf8', timeout: 15_000 }).trim();
-        } catch { return 'unknown'; }
-      })();
-      const rec = missions.create(goal, head);
+      const rec = createMission(goal);
       send(res, 201, missionStatusView(missions, opts.projectRoot, rec.missionId));
+      return;
+    }
+
+    if (url.pathname === '/api/chat') {
+      const message = typeof body?.message === 'string' ? body.message.trim() : '';
+      if (!message) { send(res, 400, { error: 'MESSAGE_REQUIRED' }); return; }
+      const classification = classifyMessage(message);
+
+      if (classification.intent === 'QUESTION') {
+        // ZERO provider calls on this path, by construction: the resolver only
+        // reads the log. A chat that quietly bills for answering "what is the
+        // status" is a chat nobody trusts to be asked twice.
+        const answer = answerFromLog(missions, message);
+        recordChatMessage(store, opts.projectId, {
+          message, classification, led: answer.answered ? 'ANSWERED' : 'UNANSWERABLE',
+        });
+        send(res, 200, { intent: classification.intent, classification, answer, card: null });
+        return;
+      }
+
+      const card = draftCard({ intent: classification.intent, message });
+      recordChatMessage(store, opts.projectId, {
+        message, classification, led: 'CARD_DRAFTED', cardDigest: card.digest,
+      });
+      // A card is a PROPOSAL. Nothing is created here, in any branch.
+      send(res, 200, {
+        intent: classification.intent, classification, card, answer: null,
+        tighteningOffered: wantsTightening(message),
+      });
+      return;
+    }
+
+    if (url.pathname === '/api/chat/decide') {
+      const card = body?.card as MissionCard | undefined;
+      const digest = String(body?.cardDigest ?? '');
+      const decision = String(body?.decision ?? '');
+      if (!card || !digest || !decision) {
+        send(res, 400, { error: 'CARD_DECISION_INCOMPLETE' }); return;
+      }
+      // The confirm-with-hash rule, third deployment. The card the user
+      // answered must be the card that exists; a re-drafted card is a
+      // different proposal and answering the old one approves nothing.
+      const fresh = draftCard({
+        intent: card.intent, message: card.originalGoal,
+        proposedGoal: card.proposedGoal, proposalCostUsd: card.proposalCostUsd,
+      });
+      if (fresh.digest !== digest || card.digest !== digest) {
+        recordCardDecision(store, opts.projectId, {
+          cardDigest: digest, decision: 'REFUSED_DIGEST_MISMATCH', missionId: null,
+          detail: 'the card changed since it was rendered',
+        });
+        send(res, 409, {
+          error: 'CARD_DIGEST_MISMATCH',
+          detail: 'the card changed since it was rendered to you — read it again before deciding',
+          current: fresh,
+        });
+        return;
+      }
+
+      if (decision === 'answer') {
+        const answer = answerFromLog(missions, card.originalGoal);
+        recordCardDecision(store, opts.projectId, {
+          cardDigest: digest, decision: 'ANSWERED_INSTEAD', missionId: null,
+        });
+        send(res, 200, { decision: 'answer', answer, missionId: null });
+        return;
+      }
+      if (decision !== 'create') {
+        recordCardDecision(store, opts.projectId, {
+          cardDigest: digest, decision: 'CANCELLED', missionId: null,
+        });
+        send(res, 200, { decision, missionId: null });
+        return;
+      }
+
+      const goal = (typeof body?.goal === 'string' && body.goal.trim())
+        ? body.goal.trim() : (card.proposedGoal ?? card.originalGoal);
+      // THE SAME create path W1b built. Chat has no private route to a mission.
+      const rec = createMission(goal);
+      recordCardDecision(store, opts.projectId, {
+        cardDigest: digest, decision: 'CREATED', missionId: rec.missionId,
+      });
+      send(res, 201, { decision: 'create', missionId: rec.missionId,
+        mission: missionStatusView(missions, opts.projectRoot, rec.missionId) });
       return;
     }
 

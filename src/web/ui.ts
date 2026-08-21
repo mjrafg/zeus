@@ -28,9 +28,21 @@ export const UI_HTML = `<!doctype html>
            gap:12px; align-items:center; flex-wrap:wrap }
   h1 { font-size:15px; margin:0; font-weight:600 }
   .dim { color:var(--dim) }
-  main { display:grid; grid-template-columns:minmax(240px,1fr) 2.4fr; gap:0;
-         height:calc(100vh - 49px) }
-  #list, #detail { overflow:auto; padding:12px 16px }
+  main { display:grid; grid-template-columns:minmax(220px,1fr) 1.9fr minmax(300px,1.2fr);
+         gap:0; height:calc(100vh - 49px) }
+  #list, #detail, #chat { overflow:auto; padding:12px 16px }
+  #chat { border-left:1px solid var(--line); display:flex; flex-direction:column }
+  #log { flex:1; overflow:auto; margin-bottom:8px }
+  .msg { margin:6px 0; padding:6px 8px; border-radius:6px; background:#161b22;
+         white-space:pre-wrap; word-break:break-word }
+  .msg.me { background:#1f2937 }
+  .card { border:1px solid var(--acc); border-radius:6px; padding:10px; margin:8px 0 }
+  .card h3 { margin:0 0 6px; font-size:13px }
+  .card ol { margin:6px 0; padding-left:18px; color:var(--dim) }
+  .card .acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px }
+  .ask { display:flex; gap:6px }
+  .ask input { flex:1; min-width:0 }
+  .ref { color:var(--acc); cursor:pointer; text-decoration:underline }
   #list { border-right:1px solid var(--line) }
   .m { padding:8px; border:1px solid var(--line); border-radius:6px;
        margin-bottom:8px; cursor:pointer }
@@ -68,6 +80,14 @@ export const UI_HTML = `<!doctype html>
 <main>
   <div id="list"><p class="dim">Enter the token to connect.</p></div>
   <div id="detail"><p class="dim">Select a mission.</p></div>
+  <div id="chat">
+    <h2>chat</h2>
+    <div id="log"><p class="dim">Ask about this project, or describe a change.</p></div>
+    <div class="ask">
+      <input id="say" placeholder="ask a question, or describe a change…">
+      <button id="send">send</button>
+    </div>
+  </div>
 </main>
 <script>
 // The token lives in memory only. Persisting it to localStorage would put a
@@ -160,6 +180,121 @@ function connectStream() {
   };
 }
 
+async function apiPost(p, body) {
+  const r = await fetch('/api' + p, {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  return { status: r.status, json: await r.json().catch(() => null) };
+}
+
+function bubble(html, mine) {
+  const d = document.createElement('div');
+  d.className = 'msg' + (mine ? ' me' : '');
+  d.innerHTML = html;
+  $('log').appendChild(d);
+  $('log').scrollTop = $('log').scrollHeight;
+  return d;
+}
+
+function renderAnswer(a) {
+  let h = esc(a.text);
+  if (a.refs && a.refs.length) {
+    h += '<br>' + a.refs.map((r) => '<span class="ref" data-id="' + esc(r.id) + '">'
+      + esc(r.kind + ' ' + r.id.split('/').pop() + (r.seq != null ? '#' + r.seq : '')) + '</span>').join(' ');
+  }
+  const d = bubble(h, false);
+  // Refs are clickable through to the views W1a built.
+  for (const el of d.querySelectorAll('.ref')) {
+    el.onclick = () => { SEL = el.getAttribute('data-id'); loadList(); loadDetail(); };
+  }
+}
+
+/**
+ * A card is a proposal. Nothing here creates anything: every button posts a
+ * decision carrying the digest of exactly what is on screen, and the server
+ * refuses any digest that no longer matches.
+ */
+function renderCard(card) {
+  const d = document.createElement('div');
+  d.className = 'card';
+  let h = '<h3>Create a mission?</h3>';
+  if (card.intent === 'AMBIGUOUS') {
+    h += '<p class="warn">I am not sure whether this was a request or a question.</p>';
+  }
+  h += '<p><b>Goal:</b> ' + esc(card.originalGoal) + '</p>';
+  if (card.proposedGoal) {
+    h += '<p><b>Proposed wording:</b> ' + esc(card.proposedGoal)
+      + ' <span class="dim">(that suggestion cost $'
+      + (card.proposalCostUsd || 0).toFixed(4) + ')</span></p>';
+  }
+  h += '<b>What happens next</b><ol>'
+    + card.whatHappensNext.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ol>';
+  h += '<p class="dim">' + esc(card.costExpectation) + '</p><div class="acts"></div>';
+  d.innerHTML = h;
+  const acts = d.querySelector('.acts');
+  for (const a of card.actions) {
+    const b = document.createElement('button');
+    b.textContent = a.label;
+    b.onclick = async () => {
+      let goal = card.originalGoal;
+      if (a.id === 'edit') {
+        const next = prompt('Goal for this mission:', card.proposedGoal || card.originalGoal);
+        if (!next) return;
+        goal = next;
+      }
+      const decision = a.id === 'edit' ? 'create' : a.id;
+      const r = await apiPost('/chat/decide',
+        { card, cardDigest: card.digest, decision, goal });
+      for (const x of d.querySelectorAll('button')) x.disabled = true;
+      if (r.status === 409) {
+        bubble('<span class="bad">' + esc(r.json.detail) + '</span>', false);
+        renderCard(r.json.current);
+      } else if (r.json && r.json.answer) {
+        renderAnswer(r.json.answer);
+      } else if (r.json && r.json.missionId) {
+        bubble('Created <b>' + esc(r.json.missionId) + '</b>.', false);
+        SEL = r.json.missionId; loadList(); loadDetail();
+      } else {
+        bubble('Nothing was created.', false);
+      }
+    };
+    acts.appendChild(b);
+  }
+  $('log').appendChild(d);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+async function send() {
+  const text = $('say').value.trim();
+  if (!text) return;
+  $('say').value = '';
+  bubble(esc(text), true);
+  const r = await apiPost('/chat', { message: text });
+  if (!r.json) { bubble('<span class="bad">no answer</span>', false); return; }
+  if (r.json.answer) renderAnswer(r.json.answer);
+  if (r.json.card) renderCard(r.json.card);
+}
+
+async function loadChat() {
+  const h = await api('/chat');
+  $('log').innerHTML = '';
+  for (const e of h.events) {
+    if (e.type === 'CHAT_MESSAGE') {
+      bubble(esc(e.payload.message), true);
+      bubble('<span class="dim">routed ' + esc(e.payload.intent) + ' — '
+        + esc(e.payload.reason) + '</span>', false);
+    } else if (e.type === 'CHAT_CARD_DECISION') {
+      bubble('<span class="dim">decision: ' + esc(e.payload.decision)
+        + (e.payload.missionId ? ' → ' + esc(e.payload.missionId) : '') + '</span>', false);
+    }
+  }
+}
+
+$('send').onclick = send;
+$('say').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
 $('go').onclick = async () => {
   TOKEN = $('tok').value.trim();
   if (!TOKEN) return;
@@ -167,6 +302,7 @@ $('go').onclick = async () => {
     const p = await api('/project');
     $('proj').textContent = p.projectId + '  ' + p.root;
     await loadList();
+    await loadChat();
     connectStream();
   } catch (e) { /* the status line already says what happened */ }
 };

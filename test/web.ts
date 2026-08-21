@@ -20,6 +20,10 @@ import { ensureToken, tokenMatches, tokenPath } from '../src/web/token';
 import { eventId, parseEventId, cursorFromLastId, since, advance } from '../src/web/tail';
 import { missionStatusView, missionReportView } from '../src/views';
 import { findingsDigest } from '../src/mission/consent';
+import {
+  classifyMessage, draftCard, wantsTightening, chatHistory,
+} from '../src/mission/chat';
+import { scopeOf } from '../src/mission/types';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-web-'));
 let seq = 0;
@@ -209,7 +213,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 9 && WRITE_ROUTES.length === 7,
+      READ_ROUTES.length === 10 && WRITE_ROUTES.length === 9,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -480,5 +484,252 @@ export async function webSuite(): Promise<void> {
       check('WX6: an operation the server was not given is 503, not a stub success',
         opless.status === 503, String(opless.status));
     } finally { await server?.close(); }
+  }
+  section('chat: routing is mechanical, and doubt never routes to work');
+  {
+    const TABLE: Array<{ text: string; want: string; why: string }> = [
+      // English questions
+      { text: 'what is the status of M-0001?', want: 'QUESTION', why: 'opener + mark' },
+      { text: 'why did the mission fail', want: 'QUESTION', why: 'opener, no mark' },
+      { text: 'how much did it cost?', want: 'QUESTION', why: 'opener' },
+      { text: 'show me the report', want: 'QUESTION', why: 'status vocabulary' },
+      { text: 'is the ratchet advanced?', want: 'QUESTION', why: 'auxiliary opener' },
+      // Persian questions
+      { text: 'وضعیت ماموریت چیست؟', want: 'QUESTION', why: 'FA status vocabulary + mark' },
+      { text: 'چرا این ماموریت شکست خورد', want: 'QUESTION', why: 'FA opener' },
+      { text: 'هزینه چقدر بود؟', want: 'QUESTION', why: 'FA cost vocabulary' },
+      // English work
+      { text: 'fix the failing unit tests', want: 'WORK', why: 'imperative' },
+      { text: 'add a retry to the uploader', want: 'WORK', why: 'imperative' },
+      { text: 'please refactor the invoice module', want: 'WORK', why: 'polite imperative' },
+      { text: 'I want you to remove the dead config option', want: 'WORK', why: 'request form' },
+      // Persian work
+      { text: 'این باگ را درست کن', want: 'WORK', why: 'FA imperative' },
+      { text: 'یک تست جدید بنویس', want: 'WORK', why: 'FA imperative' },
+      // Neither
+      { text: 'the invoice module is a mess', want: 'AMBIGUOUS', why: 'an observation, not a request' },
+      { text: 'hmm', want: 'AMBIGUOUS', why: 'nothing to go on' },
+      { text: '', want: 'AMBIGUOUS', why: 'empty' },
+      { text: 'maybe we should think about the parser', want: 'AMBIGUOUS', why: 'musing' },
+    ];
+    const wrong = TABLE.filter((t) => classifyMessage(t.text).intent !== t.want);
+    check('CH1: the classifier table holds for every English and Persian case',
+      wrong.length === 0,
+      wrong.map((t) => `"${t.text}" → ${classifyMessage(t.text).intent}, wanted ${t.want}`).join(' | '));
+
+    // THE DOUBT-DIRECTION PROPERTY: nothing reaches WORK without an explicit
+    // work pattern. Building costs money; asking does not.
+    const workish = TABLE.filter((t) => classifyMessage(t.text).intent === 'WORK');
+    check('CH2: every WORK classification names the explicit pattern that caused it',
+      workish.every((t) => classifyMessage(t.text).matched.some((m) => m.startsWith('work:'))),
+      workish.map((t) => classifyMessage(t.text).matched.join(',')).join(' | '));
+    check('CH3: a question that also names work is read as a question — the cheap reading wins',
+      classifyMessage('how do I fix the failing tests?').intent === 'QUESTION',
+      classifyMessage('how do I fix the failing tests?').reason);
+    check('CH4: every classification carries a reason a human can argue with',
+      TABLE.every((t) => classifyMessage(t.text).reason.length > 20));
+  }
+
+  section('chat: a card is a proposal, and only an accepted card creates');
+  {
+    const fx = fixture();
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const work = await post(server, '/api/chat', { message: 'fix the failing unit tests' });
+
+      check('CC1: a work message produces a card',
+        work.status === 200 && work.json.intent === 'WORK' && !!work.json.card,
+        JSON.stringify(work.json?.intent));
+      check('CC2: and creates NOTHING',
+        fx.missions.list().length === 0, String(fx.missions.list().length));
+      check('CC3: the card keeps the user’s own words, unrewritten',
+        work.json.card.originalGoal === 'fix the failing unit tests'
+        && work.json.card.proposedGoal === null, work.json.card.originalGoal);
+      check('CC4: it says what happens next, and what that is expected to cost',
+        work.json.card.whatHappensNext.length === 6
+        && /audits\/missions/.test(work.json.card.costExpectation),
+        work.json.card.costExpectation.slice(0, 60));
+      check('CC5: no silent model call — no cost is attributed to drafting it',
+        work.json.card.proposalCostUsd === null);
+
+      const digest = work.json.card.digest;
+      const stale = await post(server, '/api/chat/decide', {
+        card: { ...work.json.card, originalGoal: 'something else entirely' },
+        cardDigest: digest, decision: 'create',
+      });
+      check('CC6: a card that changed since it was rendered is REFUSED',
+        stale.status === 409 && stale.json.error === 'CARD_DIGEST_MISMATCH',
+        JSON.stringify(stale.json?.error));
+      check('CC6b: and the refusal hands back the current card to read',
+        !!stale.json.current && stale.json.current.digest !== digest);
+      check('CC6c: still nothing created',
+        fx.missions.list().length === 0, String(fx.missions.list().length));
+
+      const cancelled = await post(server, '/api/chat/decide', {
+        card: work.json.card, cardDigest: digest, decision: 'cancel',
+      });
+      check('CC7: cancelling records the decision and creates nothing',
+        cancelled.status === 200 && cancelled.json.missionId === null
+        && fx.missions.list().length === 0);
+
+      const created = await post(server, '/api/chat/decide', {
+        card: work.json.card, cardDigest: digest, decision: 'create',
+      });
+      check('CC8: an accepted card creates the mission',
+        created.status === 201 && created.json.missionId === 'p/M-0001',
+        JSON.stringify(created.json?.missionId));
+
+      // CLIENT-NOT-ENGINE, extended to chat: the same goal through the CLI
+      // registry must produce the same events.
+      const twin = fixture();
+      const cliRec = twin.missions.create('fix the failing unit tests', 'base0');
+      const norm = (e: any) => {
+        const o = { type: e.type, ...JSON.parse(JSON.stringify(e.payload)) };
+        delete o.createdAt; delete o.baseSha;
+        return o;
+      };
+      const chatEvents = fx.store.read('p/M-0001').map(norm);
+      const cliEvents = twin.store.read(cliRec.missionId).map(norm);
+      check('CC9: a chat-created mission deep-equals a CLI-created twin',
+        JSON.stringify(chatEvents) === JSON.stringify(cliEvents),
+        JSON.stringify(chatEvents));
+
+      const history = await get(`${server.url}/api/chat`, auth);
+      const types = history.json.events.map((e: any) => e.type);
+      check('CC10: the message, the routing and the decision are all on the log',
+        types.filter((t: string) => t === 'CHAT_MESSAGE').length === 1
+        && types.filter((t: string) => t === 'CHAT_CARD_DECISION').length === 3,
+        types.join(','));
+      const decisions = history.json.events
+        .filter((e: any) => e.type === 'CHAT_CARD_DECISION')
+        .map((e: any) => e.payload.decision);
+      check('CC10b: including the refusal, the cancellation and the creation',
+        decisions.join(',') === 'REFUSED_DIGEST_MISMATCH,CANCELLED,CREATED', decisions.join(','));
+    } finally { await server?.close(); }
+  }
+
+  section('chat: questions are answered from the log, for free');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal', 'base0');
+    fx.missions.escalate(rec.missionId, { kind: 'NOTE' });
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      const status = await post(server, '/api/chat', { message: 'what is the status?' });
+      const cost = await post(server, '/api/chat', { message: 'how much did it cost?' });
+      const events = await post(server, '/api/chat', { message: 'show me the last events' });
+      const unknown = await post(server, '/api/chat',
+        { message: 'what is the airspeed velocity of an unladen swallow?' });
+
+      check('CQ1: a question is answered, with no card offered',
+        status.json.intent === 'QUESTION' && status.json.card === null
+        && status.json.answer.answered === true, JSON.stringify(status.json?.intent));
+      check('CQ2: the answer cites the mission it is about',
+        status.json.answer.refs.some((r: any) => r.kind === 'mission' && r.id === rec.missionId),
+        JSON.stringify(status.json.answer.refs));
+      check('CQ3: cost answers keep unmetered calls distinct from spend',
+        /no provider-reported spend|lower bound|\$/.test(cost.json.answer.text),
+        cost.json.answer.text.slice(0, 80));
+      check('CQ4: event answers carry seq refs that resolve',
+        events.json.answer.refs.some((r: any) => r.kind === 'event' && typeof r.seq === 'number'),
+        JSON.stringify(events.json.answer.refs.slice(0, 2)));
+      check('CQ5: a question the log cannot answer says so, and says what CAN be asked',
+        unknown.json.answer.answered === false
+        && /cannot answer that from the event log/.test(unknown.json.answer.text)
+        && /I can answer questions about/.test(unknown.json.answer.text),
+        unknown.json.answer.text.slice(0, 60));
+      check('CQ6: and it does not reach for a model to improvise one',
+        /V1 does not call one to improvise/.test(unknown.json.answer.text));
+      check('CQ7: no mission was created by any question',
+        fx.missions.list().length === 1, String(fx.missions.list().length));
+    } finally { await server?.close(); }
+  }
+
+  section('chat: ambiguity is rendered, not resolved');
+  {
+    const fx = fixture();
+    fx.missions.create('an existing goal', 'base0');
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      const amb = await post(server, '/api/chat', { message: 'the invoice module is a mess' });
+      check('CA1: an ambiguous message produces a card, not a mission',
+        amb.json.intent === 'AMBIGUOUS' && !!amb.json.card
+        && fx.missions.list().length === 1, JSON.stringify(amb.json?.intent));
+      check('CA2: the card carries the "this was just a question" option',
+        amb.json.card.actions.some((a: any) => a.id === 'answer'),
+        JSON.stringify(amb.json.card.actions.map((a: any) => a.id)));
+
+      const answered = await post(server, '/api/chat/decide', {
+        card: amb.json.card, cardDigest: amb.json.card.digest, decision: 'answer',
+      });
+      check('CA3: choosing it answers from the log and creates nothing',
+        answered.status === 200 && answered.json.missionId === null
+        && !!answered.json.answer && fx.missions.list().length === 1,
+        JSON.stringify(answered.json?.missionId));
+    } finally { await server?.close(); }
+  }
+
+  section('chat: it is in the log, redacted, and survives a restart');
+  {
+    const fx = fixture();
+    const secret = 'sk-live-CHATSECRET0123456789ABCD';
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      await post(server, '/api/chat', { message: `fix the token ${secret} in the config` });
+    } finally { await server?.close(); }
+
+    const stored = JSON.stringify(chatHistory(fx.store, 'p'));
+    check('CS1: a secret in a chat message is redacted by the sink',
+      !stored.includes(secret) && /redacted/i.test(stored), stored.slice(0, 120));
+
+    // A NEW server over the same state: history is the log, so it is all there.
+    let restarted: RunningServer | null = null;
+    try {
+      restarted = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      const history = await get(`${restarted.url}/api/chat`,
+        { authorization: `Bearer ${restarted.token}` });
+      check('CS2: chat history reconstructs after a restart, because it is the log',
+        history.status === 200 && history.json.events.length === 1
+        && history.json.events[0].type === 'CHAT_MESSAGE',
+        String(history.json?.events?.length));
+      const noAuth = await get(`${restarted.url}/api/chat`);
+      check('CS3: chat routes are authenticated like everything else',
+        noAuth.status === 401, String(noAuth.status));
+    } finally { await restarted?.close(); }
+
+    check('CS4: the chat stream is not mistaken for a mission or a task',
+      scopeOf('p/CHAT') === null, String(scopeOf('p/CHAT')));
+  }
+
+  section('chat: goal tightening is offered, never taken silently');
+  {
+    check('CG1x: a single sentence is not offered a rewrite',
+      !wantsTightening('fix the failing unit tests'), 'single sentence');
+    check('CG2x: a multi-sentence message is',
+      wantsTightening('The parser is slow. Make it faster please.'), 'two sentences');
+    const card = draftCard({ intent: 'WORK', message: 'a. b.',
+      proposedGoal: 'tightened wording', proposalCostUsd: 0.0123 });
+    check('CG3x: when a model IS used, the card shows both wordings and what it cost',
+      card.originalGoal === 'a. b.' && card.proposedGoal === 'tightened wording'
+      && card.proposalCostUsd === 0.0123, JSON.stringify(card.proposalCostUsd));
+    check('CG4x: and the digest covers the proposal, so accepting it is accepting that text',
+      draftCard({ intent: 'WORK', message: 'a. b.', proposedGoal: 'other', proposalCostUsd: 0.0123 })
+        .digest !== card.digest);
   }
 }

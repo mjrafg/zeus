@@ -474,6 +474,66 @@
     "RD7b: it refused BEFORE the selftest \u2014 nothing was spent",
     "RD8b: the contract line names the preparation method and the floor"
    ]
+  },
+  {
+   "id": "P1-21",
+   "severity": "P1",
+   "title": "Coverage was nominal, so a plan that could not move a criterion passed validation",
+   "status": "FIXED",
+   "observed": "A criterion read over a whole source tree (126 errors); the accepted plan's single node wrote one file (7 errors). CRITERION_UNCOVERED was satisfied and the mission reported an honest FAILED after $4.87, for a mismatch visible in the plan before any task ran.",
+   "rootCause": "Coverage asks whether SOME node names the criterion. That is not the same question as whether the plan's write surface is large enough to move it, and nothing asked the second question.",
+   "resolution": "validatePlan compares each required criterion's evaluator scope against the union of its covering nodes' writes, and raises a NON-BLOCKING CRITERION_SCOPE_MISMATCH. The plan critic is asked the same question in words. Non-blocking because a plan may legitimately intend partial progress; what must not happen is paying for it unknowingly.",
+   "regressionTests": [
+    "SM1: a criterion read over src/ and a plan that writes one file inside it is flagged",
+    "SM1c: it is NON-BLOCKING \u2014 the plan may intend partial progress",
+    "SM1d: coverage is satisfied and the plan still validates",
+    "SM2: a plan whose glob covers the scope raises nothing",
+    "SM2c: an evaluator with no extractable path raises nothing \u2014 no guessing",
+    "SM3: the critic prompt asks, per required criterion, whether the writes can move it"
+   ]
+  },
+  {
+   "id": "P1-22",
+   "severity": "P1",
+   "title": "The scope extractor parsed inline program source as filesystem paths",
+   "status": "FIXED",
+   "observed": "The first real plan the new check ever saw produced NINE findings quoting fragments of minified JavaScript as if they were directories \u2014 'TS(\\\\d+)/);return', 'm=l.match(/error', 'r=spawnSync(process.execPath,[tsc,...'. The criteria used inline `node -e '<program>'` probes.",
+   "rootCause": "Any token containing a slash was treated as a path. Source code is dense with slashes that are not paths: regex literals, division, path fragments inside string literals. Self-inflicted, and the exact failure the design was supposed to refuse \u2014 a false signal here teaches the reader to skip the section, which is worse than having no section.",
+   "resolution": "An evaluator whose text looks like a program yields NO scope at all, and a token carrying punctuation a shell path does not carry is rejected outright. Verified against the real plan that produced the nine findings: re-planned, zero scope findings, while the genuine argument-vector case still extracts.",
+   "regressionTests": [
+    "SM2f2: an inline program yields no scope at all",
+    "SM2f3: a regex literal is not a directory",
+    "SM2f4: a path inside code punctuation is not extracted",
+    "SM2f5: and a genuine argument vector still yields its scope"
+   ]
+  },
+  {
+   "id": "P1-23",
+   "severity": "P1",
+   "title": "A mission budget sized for one repository killed plans at task five",
+   "status": "FIXED",
+   "observed": "maxTasks defaulted to a figure sized for small goals. A large repository's honest plan needs many more nodes \u2014 the real one needed 11, then 14, roughly one per error cluster \u2014 and would have died mid-flight having spent the money to get there.",
+   "rootCause": "Nothing compared the plan against the budget before acceptance, so the budget was discovered by exhausting it.",
+   "resolution": "negotiateBudget compares node count plus one repair against maxTasks, and the planner's summed estimate against the ceiling, before acceptance. The planner prompt now states estimatedCost is in dollars, since a number with no unit cannot be compared. Estimates are labelled ESTIMATES and never counted as spend; absent estimates raise no cost stop and zero is treated as absent rather than free. A raise is a MISSION_BUDGET_REVISED event so it survives the recomputation-from-log that makes budgets restart-safe, and --raise-budget is a separate decision from --yes.",
+   "regressionTests": [
+    "BN2: seven nodes against a budget of five does not fit",
+    "BN2b: the rendering states both numbers and the three options",
+    "BN3b: and it is labelled an ESTIMATE, never observed spend",
+    "BN4: with no estimates there is no cost-based stop \u2014 numbers are never invented",
+    "BR2x: the revision is replayed from the log, not held in memory",
+    "BR6x: after the raise, the plan that forced it now fits",
+    "PS1: the stop records the RENDERING, not only the finding codes"
+   ]
+  },
+  {
+   "id": "P2-4",
+   "severity": "P2",
+   "title": "Oracle and planner spend reaches no log",
+   "status": "OPEN",
+   "observed": "After a mission made several live compiler, critic and planner calls, `mission report` read `cost nothing reported`.",
+   "rootCause": "P1-17 recovered mission cost by reading the logs of spawned TASKS. Oracle and planner calls are made directly by the CLI and are not tasks, so their provider-reported cost lands nowhere. The mission USD ceiling therefore still cannot see pre-execution spend, which on a large repository is where a substantial share of it happens.",
+   "resolution": "Not fixed. The fix is to record providerUsage on the ORACLE_COMPILED / ORACLE_CRITIQUED / PLAN_RECORDED / PLAN_CRITIQUED events themselves and fold it into missionUsage. Recorded rather than estimated, because an estimated cost is precisely what this cycle's change refuses to treat as an observation.",
+   "regressionTests": []
   }
  ]
 }

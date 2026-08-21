@@ -16,8 +16,8 @@ rather than quietly dropped.
 | Severity | OPEN | ACCEPTED_RISK | PARTIALLY_FIXED | FIXED | OBSOLETE |
 |---|---|---|---|---|---|
 | **P0** | **0** | 0 | 0 | 5 | 2 |
-| **P1** | **0** | 1 | 0 | 15 | 4 |
-| P2 | **3** | 0 | 0 | 0 | 0 |
+| **P1** | **0** | 1 | 0 | 18 | 4 |
+| P2 | **4** | 0 | 0 | 0 | 0 |
 | P3 | **0** | 0 | 0 | 3 | 0 |
 
 ## v1.0.0-rc.1 closure review
@@ -51,6 +51,35 @@ whole-preflight constant sized for one provider tripped on a healthy
 two-provider run. The cap now scales with contacts actually made, from an
 observed per-contact price with a stated headroom factor, and an unpriced
 contact keeps the total a lower bound rather than becoming zero.
+
+## Plan-scope honesty
+
+**P1-21 — coverage is nominal; scope is not.** A criterion read over a whole
+source tree, a plan whose single node wrote one file inside it, and coverage
+satisfied because coverage asks whether SOME node names the criterion. The
+mission reported an honest FAILED after $4.87 for a mismatch that was legible
+in the plan. `CRITERION_SCOPE_MISMATCH` compares evaluator scope against the
+union of covering nodes' writes, non-blocking, so a person sees the intention
+to make partial progress before paying for it.
+
+**P1-22 — and then the new check guessed.** The first real plan it saw used
+inline `node -e` probes, and it reported nine findings quoting minified
+JavaScript as if it were directories. Any token with a slash had been treated
+as a path; source code is full of slashes that are not paths. Self-inflicted,
+and the precise failure the design existed to refuse — a false signal teaches
+the reader to skip the section. An evaluator that looks like a program now
+yields no scope at all. Verified against the plan that produced the nine.
+
+**P1-23 — the budget was discovered by exhausting it.** A plan that needs more
+nodes than the budget allows is a conversation, and it now happens before
+acceptance: node count plus one repair against maxTasks, and the planner's
+summed ESTIMATE against the ceiling. Estimates are labelled as estimates
+everywhere and never counted as spend; absent estimates raise no cost stop,
+because a stop built on invented numbers is worse than none.
+
+**P2-4 — but pre-execution spend still reaches no log.** Oracle and planner
+calls are not tasks, so the cost recovery added in P1-17 cannot see them, and
+on a large repository that is where much of the money goes. Open.
 
 ## Doctor blindness, third occurrence
 

@@ -237,6 +237,26 @@ export interface CriterionScopeInput {
   texts: string[];
 }
 
+/**
+ * Text that is a PROGRAM rather than an argument vector.
+ *
+ * An evaluator may be `node -e '<a whole script>'`. Source code is dense with
+ * slashes — regex literals, division, path fragments inside string literals —
+ * and none of them is an argument naming a scope. The first real plan this
+ * check ever saw was exactly this shape, and it produced nine findings quoting
+ * fragments of minified JavaScript as if they were directories. A false signal
+ * here is worse than no signal: it teaches the reader to skip the section.
+ *
+ * So an inline program yields NO scope at all. That is the conservatism
+ * boundary working, not a gap in it.
+ */
+function looksLikeProgram(text: string): boolean {
+  return /\brequire\s*\(|=>|\bconst\s|\blet\s|\bfunction\b|spawnSync|execFileSync|;\s*const|\$\{/.test(text);
+}
+
+/** Path-shaped, in the way a shell argument is. */
+const PATH_TOKEN = /^[A-Za-z0-9._@+-]+(?:\/[A-Za-z0-9._@+-]*)+\/?$/;
+
 /** A trailing-slash-normalised directory prefix, or null if not a scope. */
 function asPrefix(token: string): string | null {
   let t = token.trim().replace(/^['"]|['"]$/g, '');
@@ -244,13 +264,12 @@ function asPrefix(token: string): string | null {
   // A glob collapses to the fixed text before its first wildcard.
   const star = t.indexOf('*');
   if (star !== -1) t = t.slice(0, star);
-  if (!t.includes('/')) return null;                  // a bare word is not a path
-  if (t.startsWith('http://') || t.startsWith('https://')) return null;
   t = t.replace(/^\.\//, '');
-  if (!t) return null;
-  // A path that names a file is a scope of exactly that file; a path that ends
-  // in a separator, or has no extension after its last separator, is a
-  // directory scope. Both are usable; only the second is ever "broader".
+  if (!t || !t.includes('/')) return null;            // a bare word is not a path
+  if (/^https?:\/\//.test(t)) return null;
+  // Anything carrying punctuation a path does not carry is code, not a path.
+  if (/[()[\]{}<>;=,|&$!`\\"']/.test(t)) return null;
+  if (!PATH_TOKEN.test(t)) return null;
   return t;
 }
 
@@ -269,6 +288,9 @@ export function extractScopes(texts: string[]): string[] {
   const out = new Set<string>();
   for (const raw of texts) {
     if (typeof raw !== 'string') continue;
+    // An inline program's scope is a property of what the code DOES, which is
+    // not a question this or any tokeniser can answer.
+    if (looksLikeProgram(raw)) continue;
     for (const token of raw.split(/\s+/)) {
       const p = asPrefix(token);
       if (p) out.add(p);

@@ -1083,6 +1083,25 @@ export async function executionSuite(): Promise<void> {
     check('SM2f: a glob collapses to the fixed text before its wildcard',
       extractScopes(['rg x modules/api/src/**/*.ts']).join(',') === 'modules/api/src/',
       JSON.stringify(extractScopes(['rg x modules/api/src/**/*.ts'])));
+    // Verbatim fragments from the first real plan this check ever saw. It
+    // produced nine findings quoting minified JavaScript as if it were
+    // directories — the exact false signal that teaches a reader to stop
+    // reading the section.
+    const inlineProbe = 'node -e const r=spawnSync(process.execPath,[tsc,"-p","tsconfig.json",'
+      + '"--noEmit"],{cwd:"packages/x",encoding:"utf8"});const m=l.match(/error TS(\\d+)/);return';
+    check('SM2f2: an inline program yields no scope at all',
+      extractScopes([inlineProbe]).length === 0,
+      JSON.stringify(extractScopes([inlineProbe])));
+    check('SM2f3: a regex literal is not a directory',
+      extractScopes(['node -e const RE=/@ts-nocheck|@ts-ignore/;const x=1']).length === 0,
+      JSON.stringify(extractScopes(['node -e const RE=/@ts-nocheck|@ts-ignore/;const x=1'])));
+    check('SM2f4: a path inside code punctuation is not extracted',
+      extractScopes(['p.resolve("modules/api/src");const']).length === 0,
+      JSON.stringify(extractScopes(['p.resolve("modules/api/src");const'])));
+    check('SM2f5: and a genuine argument vector still yields its scope',
+      extractScopes(['rg --files modules/api/src/']).join(',') === 'modules/api/src/',
+      JSON.stringify(extractScopes(['rg --files modules/api/src/'])));
+
     check('SM2g: a file scope is not a directory scope',
       isDirectoryScope('src/') && isDirectoryScope('src/engine')
       && !isDirectoryScope('src/a.ts'));

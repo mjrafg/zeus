@@ -75,6 +75,13 @@ export const UI_HTML = `<!doctype html>
        text-transform:uppercase; letter-spacing:.06em }
   .phase { display:inline-block; padding:1px 7px; border:1px solid var(--line);
            border-radius:999px; font-size:12px }
+  .waiting { border-color:var(--warn); color:var(--warn) }
+  .m.waits { border-color:var(--warn) }
+  .pending { border:1px solid var(--warn); border-radius:6px; padding:12px;
+             margin:10px 0; background:#1b1710 }
+  .pending h3 { margin:0 0 8px; font-size:13px; color:var(--warn) }
+  .pending .f { border-left:2px solid var(--line); padding:4px 0 4px 8px; margin:6px 0 }
+  .pending .acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px }
 </style>
 </head>
 <body>
@@ -122,8 +129,10 @@ async function loadList() {
     const d = document.createElement('div');
     d.className = 'm' + (m.missionId === SEL ? ' sel' : '');
     const state = m.terminated ? m.achievement + ' / ' + m.terminationReason : m.phase;
+    if (m.awaitingHuman) d.className += ' waits';
     d.innerHTML = '<b>' + esc(m.missionId.split('/').pop()) + '</b> '
-      + '<span class="phase">' + esc(state) + '</span>'
+      + '<span class="phase' + (m.awaitingHuman ? ' waiting' : '') + '">' + esc(state) + '</span>'
+      + (m.awaitingHuman ? ' <span class="phase waiting">waiting on you</span>' : '')
       + '<span class="goal">' + esc(m.goal) + '</span>';
     d.onclick = () => { SEL = m.missionId; loadList(); loadDetail(); };
     $('list').appendChild(d);
@@ -146,7 +155,8 @@ async function loadDetail() {
     + '<br><span class="dim">' + esc(JSON.stringify(m.cost.byPhase)) + '</span></td></tr></table>';
 
   if (o) {
-    h += '<h2>criteria</h2><table>';
+    h += '<div id="pendingslot"></div>';
+  h += '<h2>criteria</h2><table>';
     for (const c of o.criteria) {
       const out = m.criterionOutcomes[c.criterionId] || 'UNEVALUATED';
       h += '<tr><td>' + esc(c.criterionId.split('/').pop()) + '</td>'
@@ -166,6 +176,54 @@ async function loadDetail() {
     h += '</table>';
   }
   $('detail').innerHTML = h;
+  if (m.pendingDecision) renderPending(m, m.pendingDecision);
+}
+
+/**
+ * What this mission is waiting on, rebuilt from the log.
+ *
+ * Findings FIRST and in full, then the buttons — the same order every consent
+ * surface in this product uses. A decision carries the digest of exactly what
+ * is on screen, and the server refuses any digest that no longer matches, so
+ * this is pure exposure of a boundary that already existed rather than a new
+ * way in.
+ */
+function renderPending(m, p) {
+  const slot = $('pendingslot');
+  if (!slot) return;
+  const d = document.createElement('div');
+  d.className = 'pending';
+  let h = '<h3>This mission is waiting on you — ' + esc(p.layer) + ' v' + p.version + '</h3>';
+  h += '<p class="dim">' + esc(p.detail) + '<br>' + esc(p.source) + '</p>';
+  h += '<b>' + p.findings.length + ' finding(s), as they were rendered</b>';
+  for (const f of p.findings) {
+    h += '<div class="f"><b>' + esc(f.code || f.severity || 'finding') + '</b> '
+      + esc(f.criterionId ? f.criterionId.split('/').pop() : (f.nodeId || ''))
+      + '<br><span class="dim">' + esc(f.detail || JSON.stringify(f)) + '</span></div>';
+  }
+  h += '<div class="acts"></div>';
+  d.innerHTML = h;
+  const acts = d.querySelector('.acts');
+  const MAP = { accept: 'ACCEPT', abort: 'ABORT', recompile: 'REFUSE', replan: 'REFUSE' };
+  for (const o of p.options) {
+    const b = document.createElement('button');
+    b.textContent = o.label;
+    b.title = o.detail;
+    b.onclick = async () => {
+      if (o.id === 'abort' && !confirm('Cancel ' + m.missionId + '? This terminates it.')) return;
+      for (const x of d.querySelectorAll('button')) x.disabled = true;
+      const r = await apiPost('/missions/' + encodeURIComponent(m.missionId.split('/').pop()) + '/confirm',
+        { kind: p.layer, version: p.version, findingsDigest: p.digest, decision: MAP[o.id] || 'REFUSE' });
+      if (r.status === 409) {
+        bubble('<span class="bad">' + esc(r.json.detail) + '</span>', false);
+      } else {
+        bubble('Recorded: <b>' + esc(o.label) + '</b> on ' + esc(m.missionId) + '.', false);
+      }
+      loadList(); loadDetail();
+    };
+    acts.appendChild(b);
+  }
+  slot.appendChild(d);
 }
 
 function connectStream() {

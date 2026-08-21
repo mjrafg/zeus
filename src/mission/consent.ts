@@ -62,7 +62,7 @@ export function consentSubject(missions: MissionRegistry, missionId: string,
     const findings = (critique?.payload as any)?.findings ?? [];
     return {
       kind, version, findings, digest: findingsDigest(findings),
-      decidable: !!critique && !!rec.oracle && !rec.oracleAccepted,
+      decidable: !rec.terminated && !!critique && !!rec.oracle && !rec.oracleAccepted,
       detail: !rec.oracle ? 'no oracle has been compiled'
         : rec.oracleAccepted ? 'this oracle is already accepted'
           : !critique ? 'no critique on the log — there is no second opinion to consent over'
@@ -79,7 +79,7 @@ export function consentSubject(missions: MissionRegistry, missionId: string,
   const findings = [...((cp.findings ?? []) as unknown[]), ...scope];
   return {
     kind, version, findings, digest: findingsDigest(findings),
-    decidable: !!recorded && !!critique && !cp.contaminated
+    decidable: !rec.terminated && !!recorded && !!critique && !cp.contaminated
       && cp.acceptance !== 'REJECT' && rec.acceptedPlanVersion !== version,
     detail: !recorded ? 'no plan has been recorded'
       : !critique ? `plan v${version} has no critique on the log; there is no second opinion to consent over`
@@ -94,7 +94,8 @@ export interface ConsentRequest {
   kind: ConsentKind;
   version: number;
   findingsDigest: string;
-  decision: 'ACCEPT' | 'REFUSE';
+  /** ABORT cancels the mission — a decision, recorded like any other. */
+  decision: 'ACCEPT' | 'REFUSE' | 'ABORT';
 }
 
 export type ConsentVerdict =
@@ -121,8 +122,9 @@ export function evaluateConsent(missions: MissionRegistry, missionId: string,
   if (req.kind !== 'oracle' && req.kind !== 'plan') {
     return { ok: false, code: 'BAD_REQUEST', message: 'kind must be oracle or plan', current: null };
   }
-  if (req.decision !== 'ACCEPT' && req.decision !== 'REFUSE') {
-    return { ok: false, code: 'BAD_REQUEST', message: 'decision must be ACCEPT or REFUSE', current: null };
+  if (!['ACCEPT', 'REFUSE', 'ABORT'].includes(req.decision)) {
+    return { ok: false, code: 'BAD_REQUEST',
+      message: 'decision must be ACCEPT, REFUSE or ABORT', current: null };
   }
   const current = consentSubject(missions, missionId, req.kind);
   if (!current) {
@@ -147,4 +149,99 @@ export function evaluateConsent(missions: MissionRegistry, missionId: string,
     };
   }
   return { ok: true, subject: current };
+}
+
+/* ------------------------------------------------------------------------ *
+ * What is waiting for a human, reconstructed
+ * ------------------------------------------------------------------------ */
+
+export interface PendingDecisionOption {
+  id: string;
+  label: string;
+  detail: string;
+}
+
+export interface PendingDecision {
+  layer: ConsentKind;
+  version: number;
+  /** The findings AS RENDERED when the stop happened. Not a summary. */
+  findings: unknown[];
+  digest: string;
+  options: PendingDecisionOption[];
+  /**
+   * How this stop came about — a CLI run with no terminal, a web stop, or an
+   * inference from the log's shape. Recorded so a reader knows whether anyone
+   * has ever actually seen these findings.
+   */
+  source: string;
+  detail: string;
+}
+
+/**
+ * The decision a mission is waiting on, derived from the LOG.
+ *
+ * PRINCIPLE A, at the last place that was still ignoring it. Everything else
+ * in this system decides from the reconstruction; consent rendering leaned on
+ * the live event instead, so a refresh, a reconnect, or simply arriving later
+ * showed a mission that needed a human with no way to answer it. The stop was
+ * always in the log — nothing was lost, it just was not being read.
+ *
+ * Pending means: the layer is decidable and nobody has decided. For the plan
+ * layer a stop is an explicit event; for the oracle layer it is the ABSENCE of
+ * an acceptance after a critique, because the CLI's oracle stop writes no event
+ * of its own. Both are facts about the log, and neither is a session.
+ *
+ * The oracle comes first when both are open: a plan cannot be answered while
+ * the contract it was built against is still unagreed.
+ */
+export function pendingDecision(missions: MissionRegistry,
+  missionId: string): PendingDecision | null {
+  const rec = missions.mission(missionId);
+  if (!rec || rec.terminated) return null;
+
+  for (const layer of ['oracle', 'plan'] as ConsentKind[]) {
+    const subject = consentSubject(missions, missionId, layer);
+    if (!subject || !subject.decidable) continue;
+
+    const log = missions.events.read(missionId);
+    // A recorded stop tells us a human was shown this. Its absence means the
+    // stop happened somewhere that writes no event — worth saying, not hiding.
+    const stop = [...log].reverse().find((e) => e.type === 'PLAN_STOP_DECISION'
+      && (e.payload as any)?.version === subject.version);
+    const stopped = stop && String((stop.payload as any)?.decision ?? '').startsWith('STOPPED');
+    const source = stopped
+      ? ((stop!.payload as any)?.deferred
+        ? 'DEFERRED_NON_TTY — the run had no terminal to ask, so it stopped and recorded'
+        : 'stopped for consent and recorded')
+      : 'inferred from the log: a critique exists and nothing accepted it';
+
+    const options: PendingDecisionOption[] = layer === 'oracle'
+      ? [
+        { id: 'accept', label: 'Accept the contract',
+          detail: 'record these findings as accepted-despite and proceed to planning' },
+        { id: 'recompile', label: 'Send the findings back',
+          detail: 'ask the compiler to answer them and produce a new contract' },
+        { id: 'abort', label: 'Cancel the mission',
+          detail: 'stop here; the mission terminates CANCELLED and nothing is accepted' },
+      ]
+      : [
+        { id: 'accept', label: 'Accept the plan',
+          detail: 'record these findings as accepted-despite and allow the nodes to spawn' },
+        { id: 'replan', label: 'Ask for a new plan',
+          detail: 'invalidate this plan and have the planner produce another' },
+        { id: 'abort', label: 'Cancel the mission',
+          detail: 'stop here; the mission terminates CANCELLED and nothing is accepted' },
+      ];
+
+    return {
+      layer, version: subject.version, findings: subject.findings,
+      digest: subject.digest, options, source, detail: subject.detail,
+    };
+  }
+  return null;
+}
+
+/** Whether a mission is waiting on a person. Same predicate, one line. */
+export function awaitingHuman(missions: MissionRegistry, missionId: string): boolean {
+  return pendingDecision(missions, missionId) !== null;
 }

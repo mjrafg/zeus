@@ -22,11 +22,16 @@ import {
 } from '../src/web/tail';
 import { UI_HTML } from '../src/web/ui';
 import { missionStatusView, missionReportView } from '../src/views';
-import { findingsDigest } from '../src/mission/consent';
+import {
+  findingsDigest, pendingDecision, awaitingHuman, consentSubject,
+} from '../src/mission/consent';
 import {
   classifyMessage, draftCard, wantsTightening, chatHistory,
 } from '../src/mission/chat';
-import { scopeOf } from '../src/mission/types';
+import { scopeOf, TaskNode } from '../src/mission/types';
+const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsOn: [],
+  preconditions: [], reads: [], writes: [], affectedCriteria: [], predictedEffects: [],
+  estimatedTier: 'FAST', estimatedCost: 1, risk: 'LOW' });
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import {
@@ -194,7 +199,7 @@ export async function webSuite(): Promise<void> {
       // SERIALIZER REUSE: the API must not have grown its own shape.
       const view = missionStatusView(fx.missions, fx.root, rec.missionId)!;
       const apiCore = { ...one.json };
-      delete apiCore.phase; delete apiCore.cost;
+      delete apiCore.phase; delete apiCore.cost; delete apiCore.pendingDecision;
       check('WS1: the API mission record deep-equals the CLI view — one serializer',
         JSON.stringify(apiCore) === JSON.stringify(JSON.parse(JSON.stringify(view))),
         'shapes identical');
@@ -1275,5 +1280,239 @@ export async function webSuite(): Promise<void> {
       'feed lives outside #detail');
     check('SC-UI9: loadDetail no longer renders the feed at all',
       !/h \+= '<h2>live events<\/h2>/.test(UI_HTML), 'loadDetail does not emit #feed');
+  }
+  section('consent: what is waiting for a human is reconstructed, not remembered');
+  {
+    const fx = fixture();
+    const armOracle = (goal: string) => {
+      const rec = fx.missions.create(goal, 'base0');
+      const oracle = {
+        missionId: rec.missionId, version: 1, acceptanceMode: 'REQUIRED_CONSENT',
+        compiledAt: 'now', compilerProviderId: 'mock', criticProviderId: 'mock',
+        criteria: [{ criterionId: `${rec.missionId}/C-0001`, type: 'EXECUTABLE', statement: 's',
+          evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' },
+          affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'] }],
+      };
+      fx.missions.recordOracle(rec.missionId, oracle as any, 'h', { ok: true });
+      fx.missions.recordCritique(rec.missionId, {
+        valid: true, findings: [{ code: 'BEYOND_GOAL', criterionId: `${rec.missionId}/C-0001`,
+          detail: 'this criterion reaches past the goal' }],
+        modeOpinion: null, promptHash: 'p', hashes: {}, violations: [],
+        criticProviderId: 'mock', reconciliation: {},
+      });
+      return rec.missionId;
+    };
+
+    const waiting = armOracle('a goal awaiting consent');
+    const pend = pendingDecision(fx.missions, waiting);
+    check('PD1: an unanswered oracle stop is pending, derived from the log alone',
+      !!pend && pend.layer === 'oracle' && pend.version === 1, JSON.stringify(pend?.layer));
+    check('PD1b: it carries the FULL findings as rendered, not a count',
+      pend!.findings.length === 1
+      && (pend!.findings[0] as any).detail === 'this criterion reaches past the goal',
+      JSON.stringify(pend!.findings));
+    check('PD1c: and the digest confirm will demand',
+      pend!.digest === consentSubject(fx.missions, waiting, 'oracle')!.digest, pend!.digest);
+    check('PD1d: it offers accept, send-back and cancel — the layer’s real options',
+      pend!.options.map((o) => o.id).join(',') === 'accept,recompile,abort',
+      pend!.options.map((o) => o.id).join(','));
+    check('PD1e: and says how the stop arose rather than implying someone saw it',
+      /inferred from the log/.test(pend!.source), pend!.source);
+    check('PD2: awaitingHuman is the same predicate, not a second one',
+      awaitingHuman(fx.missions, waiting) === (pendingDecision(fx.missions, waiting) !== null));
+
+    // Answering clears it — both ways derived from the log.
+    fx.missions.acceptOracle(waiting, {
+      acceptanceMode: 'REQUIRED_CONSENT', acceptedBy: 'user-confirmed',
+      modeInputs: {}, modeReasons: [], escalatedByCritic: false, acceptedDespite: [],
+    } as any);
+    check('PD3: a decided stop is never pending again — no double consent',
+      pendingDecision(fx.missions, waiting) === null
+      && !awaitingHuman(fx.missions, waiting));
+
+    // A terminated mission waits for nobody.
+    const dead = armOracle('a goal that got cancelled');
+    fx.missions.cancel(dead, 'operator changed their mind');
+    check('PD4: a terminated mission is not pending, whatever its oracle says',
+      pendingDecision(fx.missions, dead) === null, 'terminated');
+
+    // Plan layer.
+    const planned = armOracle('a goal with a plan');
+    fx.missions.acceptOracle(planned, {
+      acceptanceMode: 'AUTO', acceptedBy: 'auto', modeInputs: {}, modeReasons: [],
+      escalatedByCritic: false,
+    } as any);
+    const graph = { version: 1, nodes: [node(`${planned}/N-0001`)] };
+    fx.missions.recordPlan(planned, graph as any);
+    fx.missions.recordPlanCritique(planned, {
+      version: 1, findings: [{ code: 'RISK_UNDERSTATED', severity: 'ADVISORY', detail: 'watch this' }],
+      acceptance: 'STOP', contaminated: false,
+    });
+    fx.missions.recordPlanStopDecision(planned, {
+      version: 1, rendered: ['ADVISORY RISK_UNDERSTATED: watch this'],
+      decision: 'STOPPED_FINDINGS', decidedBy: 'nobody yet', deferred: true,
+    });
+    const pp = pendingDecision(fx.missions, planned);
+    check('PD5: an unanswered PLAN stop is pending too',
+      !!pp && pp.layer === 'plan' && pp.findings.length === 1, JSON.stringify(pp?.layer));
+    check('PD5b: its options are the plan layer’s, not the oracle’s',
+      pp!.options.map((o) => o.id).join(',') === 'accept,replan,abort',
+      pp!.options.map((o) => o.id).join(','));
+    check('PD5c: a recorded DEFERRED_NON_TTY stop is named as such',
+      /DEFERRED_NON_TTY/.test(pp!.source), pp!.source);
+  }
+
+  section('consent: the reconstruction survives a restart and round-trips');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal awaiting consent', 'base0');
+    const oracle = {
+      missionId: rec.missionId, version: 1, acceptanceMode: 'REQUIRED_CONSENT',
+      compiledAt: 'now', compilerProviderId: 'mock', criticProviderId: 'mock',
+      criteria: [{ criterionId: `${rec.missionId}/C-0001`, type: 'EXECUTABLE', statement: 's',
+        evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' },
+        affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'] }],
+    };
+    fx.missions.recordOracle(rec.missionId, oracle as any, 'h', { ok: true });
+    fx.missions.recordCritique(rec.missionId, {
+      valid: true, findings: [{ code: 'WEAK_RUBRIC', detail: 'no threshold given' }],
+      modeOpinion: null, promptHash: 'p', hashes: {}, violations: [],
+      criticProviderId: 'mock', reconciliation: {},
+    });
+
+    let a: RunningServer | null = null;
+    let digest = '';
+    try {
+      a = await startWebServer({ projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${a.token}` };
+      const view = await get(`${a.url}/api/missions/M-0001`, auth);
+      check('PD6: the mission VIEW carries the pending block, not just the stream',
+        view.status === 200 && !!view.json.pendingDecision
+        && view.json.pendingDecision.findings.length === 1,
+        JSON.stringify(view.json?.pendingDecision?.layer));
+      digest = view.json.pendingDecision.digest;
+
+      const list = await get(`${a.url}/api/missions`, auth);
+      check('PD7: and the LIST marks it, so a returning operator sees it at a glance',
+        list.json[0].awaitingHuman === true, JSON.stringify(list.json[0]?.awaitingHuman));
+    } finally { await a?.close(); }
+
+    // A DIFFERENT server over the same state: the log is the source, so the
+    // block comes back identically. This is the whole point of the fix.
+    let b: RunningServer | null = null;
+    try {
+      b = await startWebServer({ projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${b.token}` };
+      const after = await get(`${b.url}/api/missions/M-0001`, auth);
+      check('PD8: after a restart the pending decision is still there, same digest',
+        after.json.pendingDecision?.digest === digest, after.json?.pendingDecision?.digest);
+
+      // And it round-trips: the digest the block hands you is the one confirm wants.
+      const ok = await post(b, '/api/missions/M-0001/confirm',
+        { kind: 'oracle', version: 1, findingsDigest: digest, decision: 'ACCEPT' });
+      check('PD9: answering through the reconstructed block is accepted',
+        ok.status === 200 && ok.json.decision === 'ACCEPT', JSON.stringify(ok.json?.error ?? ok.status));
+      const gone = await get(`${b.url}/api/missions/M-0001`, auth);
+      check('PD9b: and the block is gone afterwards, derived both ways from the log',
+        gone.json.pendingDecision === null, JSON.stringify(gone.json?.pendingDecision));
+      const list = await get(`${b.url}/api/missions`, auth);
+      check('PD9c: the list marker clears with it',
+        list.json[0].awaitingHuman === false, JSON.stringify(list.json[0]?.awaitingHuman));
+    } finally { await b?.close(); }
+  }
+
+  section('consent: cancelling is a decision, and it is recorded');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal to abandon', 'base0');
+    const oracle = {
+      missionId: rec.missionId, version: 1, acceptanceMode: 'REQUIRED_CONSENT',
+      compiledAt: 'now', compilerProviderId: 'mock', criticProviderId: 'mock',
+      criteria: [{ criterionId: `${rec.missionId}/C-0001`, type: 'EXECUTABLE', statement: 's',
+        evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' },
+        affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'] }],
+    };
+    fx.missions.recordOracle(rec.missionId, oracle as any, 'h', { ok: true });
+    fx.missions.recordCritique(rec.missionId, {
+      valid: true, findings: [{ code: 'BEYOND_GOAL', detail: 'too wide' }], modeOpinion: null,
+      promptHash: 'p', hashes: {}, violations: [], criticProviderId: 'mock', reconciliation: {},
+    });
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({ projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const view = await get(`${server.url}/api/missions/M-0001`, auth);
+      const digest = view.json.pendingDecision.digest;
+
+      const stale = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'oracle', version: 1, findingsDigest: 'deadbeefdeadbeefdeadbeefdeadbeef', decision: 'ABORT' });
+      check('PD10: aborting still goes through the digest — no bypass on the way out',
+        stale.status === 409 && stale.json.error === 'DIGEST_MISMATCH',
+        JSON.stringify(stale.json?.error));
+      check('PD10b: and nothing was cancelled by the refused abort',
+        !fx.missions.mission(rec.missionId)!.terminated);
+
+      const aborted = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'oracle', version: 1, findingsDigest: digest, decision: 'ABORT' });
+      const after = fx.missions.mission(rec.missionId)!;
+      check('PD11: a correct abort cancels the mission',
+        aborted.status === 200 && after.terminated
+        && after.terminationReason === 'CANCELLED', `${after.terminationReason}`);
+      const stops = fx.store.read(rec.missionId).filter((e) => e.type === 'PLAN_STOP_DECISION');
+      check('PD11b: the decision and what was on screen are both on the log',
+        stops.some((e) => (e.payload as any).decision === 'ABORTED'
+          && (e.payload as any).rendered.length === 1),
+        JSON.stringify(stops.map((e) => (e.payload as any).decision)));
+      check('PD11c: and it is no longer pending',
+        pendingDecision(fx.missions, rec.missionId) === null);
+    } finally { await server?.close(); }
+  }
+
+  section('chat: the most obvious question is answerable now');
+  {
+    const fx = fixture();
+    fx.missions.create('make the tests deterministic', 'base0');
+    fx.missions.create('fix the README typo', 'base0');
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({ projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const asked = await post(server, '/api/chat', { message: 'what missions exist in this project?' });
+      check('RQ1: the exact question from the screenshot is answered',
+        asked.json.intent === 'QUESTION' && asked.json.answer.answered === true,
+        JSON.stringify(asked.json?.answer?.answered));
+      check('RQ1b: with both missions named',
+        /M-0001/.test(asked.json.answer.text) && /M-0002/.test(asked.json.answer.text),
+        asked.json.answer.text.slice(0, 90));
+      check('RQ1c: and refs that resolve to the missions',
+        asked.json.answer.refs.length === 2
+        && asked.json.answer.refs.every((r: any) => r.kind === 'mission'),
+        JSON.stringify(asked.json.answer.refs));
+
+      const variants: Array<[string, string]> = [
+        ['RQ2a', 'list missions'],
+        ['RQ2b', 'چه ماموریت‌هایی هست؟'],
+        ['RQ2c', 'how many missions are there?'],
+      ];
+      for (const [id, q] of variants) {
+        const r = await post(server, '/api/chat', { message: q });
+        check(`${id}: the same question phrased differently is also answered`,
+          r.json.answer?.answered === true, `"${q}" -> ${r.json?.answer?.answered}`);
+      }
+
+      const waiting = await post(server, '/api/chat', { message: 'is anything waiting on me?' });
+      check('RQ3: "waiting on me" is answerable too',
+        waiting.json.answer.answered === true
+        && /Nothing is waiting on you/.test(waiting.json.answer.text),
+        waiting.json.answer.text.slice(0, 60));
+
+      const nope = await post(server, '/api/chat',
+        { message: 'what is the airspeed velocity of an unladen swallow?' });
+      check('RQ4: the honest refusal still fires for what the log cannot answer',
+        nope.json.answer.answered === false, JSON.stringify(nope.json?.answer?.answered));
+      check('RQ5: and the help text is TRUE — every capability it lists is answerable',
+        /which missions exist/.test(nope.json.answer.text)
+        && /whether anything is waiting on you/.test(nope.json.answer.text),
+        nope.json.answer.text.slice(0, 120));
+    } finally { await server?.close(); }
   }
 }

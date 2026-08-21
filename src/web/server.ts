@@ -24,7 +24,7 @@ import {
 } from '../views';
 import { ensureToken, offeredToken, tokenMatches } from './token';
 import {
-  ConsentRequest, consentSubject, evaluateConsent,
+  ConsentRequest, consentSubject, evaluateConsent, pendingDecision, awaitingHuman,
 } from '../mission/consent';
 import { CompileResult, PlanOperationResult, OperationContext } from '../mission/operations';
 import {
@@ -234,6 +234,10 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         const recs = missionListView(missions);
         send(res, 200, recs.map((r) => ({
           ...r, phase: missionPhase(store.read(r.missionId)),
+          // Same predicate the detail view uses. One implementation, two views:
+          // a list that disagreed with the page it links to would be worse
+          // than a list with no marker at all.
+          awaitingHuman: awaitingHuman(missions, r.missionId),
         })));
         return;
       }
@@ -266,6 +270,10 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           ...view,
           phase: missionPhase(store.read(id)),
           cost: costBreakdown(missions, id),
+          // Reconstructed, not remembered. A refresh, a reconnect or arriving
+          // an hour later all show the same thing, because it comes from the
+          // log rather than from the moment the stop happened.
+          pendingDecision: pendingDecision(missions, id),
         });
         return;
       }
@@ -647,6 +655,19 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     const subject = verdict.subject;
     const rendered = subject.findings.map((f: any) =>
       `${f?.severity ?? f?.code ?? 'finding'}: ${f?.detail ?? JSON.stringify(f)}`);
+
+    if (req.decision === 'ABORT') {
+      // Cancelling is a decision, and it goes through the same cross-process
+      // path `zeus cancel` uses so a live run is actually reached.
+      const outcome = missions.cancel(id, `cancelled at the ${subject.kind} consent stop`);
+      missions.recordPlanStopDecision(id, {
+        version: subject.version, rendered,
+        decision: 'ABORTED', decidedBy: 'user-confirmed', deferred: false,
+      });
+      send(res, 200, { missionId: id, decision: 'ABORT', kind: subject.kind,
+        version: subject.version, ...outcome });
+      return;
+    }
 
     if (req.decision === 'REFUSE') {
       missions.recordPlanStopDecision(id, {

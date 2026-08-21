@@ -256,15 +256,56 @@ const latestMission = (missions: MissionRegistry): MissionRecord | null => {
 export function answerFromLog(missions: MissionRegistry, message: string): Answer {
   const text = message.toLowerCase();
   const rec = latestMission(missions);
+  // The refusal lists what CAN be asked, which makes it a CLAIM — the same
+  // rule doctor output follows. Every item below is answered by a branch in
+  // this function, and adding a branch means adding it here.
   const cannot = (): Answer => ({
     answered: false,
     text: 'I cannot answer that from the event log. I can answer questions about: '
+      + 'which missions exist in this project, '
       + 'mission status and per-criterion outcomes, what a mission cost '
       + '(observed, estimated and unmetered kept apart), progress and findings, '
-      + 'the tasks a mission spawned, and the most recent events. '
+      + 'the tasks a mission spawned, whether anything is waiting on you, '
+      + 'and the most recent events. '
       + 'Anything else needs a model, and V1 does not call one to improvise an answer.',
     refs: [],
   });
+
+  // The most obvious question a person can ask, and the resolver used to
+  // decline it. The data was already on screen in the left column; the gap was
+  // vocabulary, not capability.
+  if (/(what|which|list|show|how many)?.*(missions|mission list)|میشن|مأموریت|ماموریت/.test(text)
+    && /(missions|list|چه|چند|لیست|کدام)/.test(text)) {
+    const all = missions.list().map((id) => missions.mission(id))
+      .filter((m): m is MissionRecord => !!m);
+    if (!all.length) {
+      return { answered: true, refs: [], text: 'There are no missions in this project yet.' };
+    }
+    const lines = all.map((m) => {
+      const state = m.terminated ? `${m.achievement} / ${m.terminationReason}` : 'active';
+      const waiting = !m.terminated && !!m.oracle && !m.oracleAccepted ? '  ← waiting on you' : '';
+      return `  ${m.missionId.split('/').pop()}  ${state}${waiting}\n      ${m.goal.slice(0, 72)}`;
+    });
+    return {
+      answered: true,
+      refs: all.map((m) => ({ kind: 'mission' as const, id: m.missionId })),
+      text: `${all.length} mission(s) in this project:\n${lines.join('\n')}`,
+    };
+  }
+
+  if (/(waiting|pending|blocked on me|needs? me|consent|منتظر|در انتظار)/.test(text)) {
+    const all = missions.list().map((id) => missions.mission(id))
+      .filter((m): m is MissionRecord => !!m)
+      .filter((m) => !m.terminated && !!m.oracle && !m.oracleAccepted);
+    return {
+      answered: true,
+      refs: all.map((m) => ({ kind: 'mission' as const, id: m.missionId })),
+      text: all.length
+        ? `${all.length} mission(s) waiting on a decision from you:\n`
+          + all.map((m) => `  ${m.missionId.split('/').pop()}  ${m.goal.slice(0, 66)}`).join('\n')
+        : 'Nothing is waiting on you right now.',
+    };
+  }
 
   if (!rec) {
     return { answered: true, refs: [],

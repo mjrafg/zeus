@@ -101,7 +101,9 @@ ${C.b}Usage${C.x}
   zeus mission confirm <id>                   accept an oracle, with any findings on the record
   zeus mission recompile <id> [--mock]        send the critique back to the compiler and retry
   zeus mission evaluate <id> [--full]         prove the criteria; --criteria a,b for a subset
-  zeus mission plan <id> [--mock] [--yes]     plan the accepted contract, critique it, accept it
+  zeus mission plan <id> [--mock]             plan the accepted contract and critique it
+  zeus mission accept-plan <id> [--version N] --yes
+                                              accept the plan on the log, findings recorded
   zeus mission selftest --live                real provider contact before anything is spent
   zeus mission run <id> [--mock] [--yes]      execute the accepted plan, one node at a time
   zeus mission report <id> [--json]           the full account, derived from the log
@@ -1355,16 +1357,14 @@ async function cmdMission(argv: string[]): Promise<number> {
         // A findings-bearing plan needs a person. A --yes supplied before the
         // findings existed cannot answer them, so it is refused here rather
         // than honoured as consent.
-        if (!process.stdin.isTTY) {
-          err(`${C.r}✗${C.x} ${acceptance.advisory.length} finding(s) need a decision and this is not a terminal`);
-          err(`  ${C.dim}run it interactively, or read the findings and re-run once they are addressed${C.x}`);
-          return 1;
-        }
-        if (!rest.includes('--yes')) {
-          err(`${C.y}!${C.x} ${acceptance.reasons.join('; ')}`);
-          err(`  ${C.dim}re-run with --yes to accept the plan with those findings on the record${C.x}`);
-          return 1;
-        }
+        // NOT `--yes` on this command. Re-running would call the planner
+        // again and accept a DIFFERENT plan from the one just reviewed, which
+        // is consent to something nobody read. `accept-plan` accepts the plan
+        // that is on the log, by version.
+        err(`${C.y}!${C.x} ${acceptance.reasons.join('; ')}`);
+        err(`  ${C.dim}zeus mission accept-plan ${missionLabel(id)} --version ${version} --yes${C.x}`
+          + `  ${C.dim}accepts THIS plan with those findings recorded${C.x}`);
+        return 1;
         missions.acceptPlan(id, graph, {
           acceptedBy: 'user-confirmed',
           acceptedDespite: acceptance.advisory.map((f) => `${f.code}: ${f.detail}`),
@@ -1374,6 +1374,69 @@ async function cmdMission(argv: string[]): Promise<number> {
       }
       missions.acceptPlan(id, graph, { acceptedBy: 'auto' });
       out(`${C.g}✓${C.x} plan v${version} accepted ${C.dim}(the critique raised nothing)${C.x}`);
+      return 0;
+    }
+
+    case 'accept-plan': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission accept-plan <id> [--version N]'); return 2; }
+      const id = resolve(raw);
+      const rec = guard(() => missions.mission(id));
+      if (rec === null) return 2;
+      if (!rec) { err(`unknown mission ${id}`); return 2; }
+      if (rec.terminated) { err(`${id} is terminated`); return 1; }
+
+      const vIdx = rest.indexOf('--version');
+      const wantVersion = vIdx >= 0 ? Number(rest[vIdx + 1]) : null;
+      const log = missions.events.read(id);
+      const recorded = [...log].reverse().find((e) => e.type === 'PLAN_RECORDED'
+        && (wantVersion === null || (e.payload as any).version === wantVersion));
+      if (!recorded) {
+        err(`${C.r}✗${C.x} ${id} has no recorded plan${wantVersion === null ? '' : ` at v${wantVersion}`}`);
+        err(`  ${C.dim}zeus mission plan ${missionLabel(id)} first${C.x}`);
+        return 1;
+      }
+      const version = (recorded.payload as any).version as number;
+      const graph = (recorded.payload as any).plan as PlanGraph;
+
+      // A plan with no independent critique on the log has no second opinion,
+      // and consent to it would be consent to nothing having been checked.
+      const critique = [...log].reverse().find((e) => e.type === 'PLAN_CRITIQUED'
+        && (e.payload as any).version === version);
+      if (!critique) {
+        err(`${C.r}✗${C.x} plan v${version} has no critique on the log; there is no second opinion to consent over`);
+        return 1;
+      }
+      const cp = critique.payload as any;
+      if (cp.contaminated) {
+        err(`${C.r}✗${C.x} the critique of plan v${version} was contaminated, so it is not a second opinion`);
+        return 1;
+      }
+      if (cp.acceptance === 'REJECT') {
+        err(`${C.r}✗${C.x} the critique REJECTED plan v${version}; it cannot be accepted by consent`);
+        return 1;
+      }
+      const findings = (cp.findings ?? []) as Array<{ code: string; severity: string; nodeId?: string; detail: string }>;
+
+      out(`${C.b}${id}${C.x} plan v${version} ${C.dim}(${graph.nodes.length} node(s), critiqued ${critique.ts})${C.x}`);
+      for (const n of graph.nodes) {
+        out(`  ${missionLabel(n.nodeId).padEnd(8)} ${(n.slug ?? '').padEnd(20).slice(0, 20)} `
+          + `${C.dim}${n.description.slice(0, 46)}${C.x}`);
+        if (n.writes.length) out(`           ${C.dim}writes ${n.writes.join(', ').slice(0, 60)}${C.x}`);
+      }
+      renderPlanFindings(findings);
+
+      if (!rest.includes('--yes')) {
+        err(`${C.y}!${C.x} ${findings.length} finding(s) stand against plan v${version}`);
+        err(`  ${C.dim}re-run with --yes to accept THIS plan with those findings on the record${C.x}`);
+        return 1;
+      }
+      missions.acceptPlan(id, graph, {
+        acceptedBy: 'user-confirmed',
+        acceptedDespite: findings.map((f) => `${f.severity} ${f.code}${f.nodeId ? ` ${missionLabel(f.nodeId)}` : ''}: ${f.detail}`),
+      });
+      out(`${C.g}✓${C.x} plan v${version} accepted by you`
+        + (findings.length ? ` ${C.y}despite ${findings.length} finding(s)${C.x}` : ''));
       return 0;
     }
 
@@ -1543,7 +1606,7 @@ async function cmdMission(argv: string[]): Promise<number> {
 
     default:
       err('usage: zeus mission <create|status|list|compile|confirm|plan|run|report|'
-        + 'recompile|evaluate|selftest|cancel|reconstruct-ratchet>');
+        + 'accept-plan|recompile|evaluate|selftest|cancel|reconstruct-ratchet>');
       return 2;
   }
 }

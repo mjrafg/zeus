@@ -905,4 +905,49 @@ export async function executionSuite(): Promise<void> {
     check('PR4: a refused plan is not an accepted one',
       missions.mission(rec.missionId)!.acceptedPlan === null);
   }
+  section('mission stage 3: consent applies to the plan that was reviewed');
+  {
+    const missions = freshRegistry();
+    const rec = missions.create('goal', 'base0');
+    const oracle = { ...oracleOf([criterion('p/M-0001/C-0001')]), missionId: rec.missionId };
+    missions.recordOracle(rec.missionId, oracle, 'hash', { ok: true });
+    missions.acceptOracle(rec.missionId, {
+      acceptanceMode: 'AUTO', acceptedBy: 'auto', modeInputs: {}, modeReasons: [],
+      escalatedByCritic: false,
+    } as any);
+    const v1 = graphOf([node(`${rec.missionId}/N-0001`, { slug: 'first' })], 1);
+    const v2 = graphOf([node(`${rec.missionId}/N-0002`, { slug: 'second' })], 2);
+    missions.recordPlan(rec.missionId, v1);
+    missions.recordPlanCritique(rec.missionId, {
+      version: 1, findings: [{ code: 'RISK', severity: 'ADVISORY', detail: 'watch this' }],
+      acceptance: 'STOP', contaminated: false,
+    });
+    missions.recordPlan(rec.missionId, v2);
+    missions.recordPlanCritique(rec.missionId, {
+      version: 2, findings: [], acceptance: 'FLOW', contaminated: false,
+    });
+
+    // Accepting by version accepts the graph that version recorded, not the
+    // newest one and not a freshly generated one.
+    missions.acceptPlan(rec.missionId, v1, {
+      acceptedBy: 'user-confirmed', acceptedDespite: ['ADVISORY RISK: watch this'],
+    });
+    const after = missions.mission(rec.missionId)!;
+    const accepted = missions.events.read(rec.missionId)
+      .filter((e) => e.type === 'PLAN_ACCEPTED').map((e) => e.payload as any);
+
+    check('AP1: the accepted plan is the one that was reviewed, by version',
+      after.acceptedPlanVersion === 1
+      && after.acceptedPlan!.nodes[0].nodeId === `${rec.missionId}/N-0001`,
+      `v${after.acceptedPlanVersion}`);
+    check('AP2: the findings consented over are on the record, in full',
+      accepted[0].acceptedDespite.length === 1
+      && String(accepted[0].acceptedDespite[0]).includes('watch this'),
+      JSON.stringify(accepted[0].acceptedDespite));
+    check('AP3: consent names who gave it',
+      accepted[0].acceptedBy === 'user-confirmed', accepted[0].acceptedBy);
+    check('AP4: and only the accepted node may spawn — the newer plan is not a mandate',
+      missions.authoriseNode(rec.missionId, `${rec.missionId}/N-0001`).ok
+      && !missions.authoriseNode(rec.missionId, `${rec.missionId}/N-0002`).ok);
+  }
 }

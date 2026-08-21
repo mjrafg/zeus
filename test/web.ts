@@ -1752,4 +1752,109 @@ export async function webSuite(): Promise<void> {
       /ES\.onerror = \(\) => \{ void diagnoseConn\(\); \}/.test(UI_HTML),
       'onerror probes');
   }
+  section('projects: a write lands in the project the view is showing');
+  {
+    const root = path.join(TMP, `wsroot-${seq += 1}`);
+    fs.mkdirSync(root, { recursive: true });
+    const mk = (slug: string) => {
+      const dir = path.join(root, slug);
+      const st = path.join(dir, '.zeus', 'state');
+      fs.mkdirSync(st, { recursive: true });
+      fs.writeFileSync(path.join(dir, '.zeus', 'config.yaml'),
+        `version: 1\nproject:\n  name: ${slug}\n  adapter: node\n`);
+      return new MissionRegistry({ events: new EventStore(st), projectId: slug, stateRoot: st });
+    };
+    const alphaReg = mk('alpha');
+    const betaReg = mk('beta');
+
+    const fx = fixture();
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0, projectsRoot: root,
+      });
+
+      // The exact shape of the bug: viewing one project, creating from its chat.
+      const made = await post(server, '/api/missions?project=beta', { goal: 'improve the readme' });
+      check('WS-P1: a mission created while scoped to beta belongs to BETA',
+        made.status === 201 && made.json.missionId === 'beta/M-0001',
+        JSON.stringify(made.json?.missionId));
+      check('WS-P1b: and the server’s own project gained nothing',
+        fx.missions.list().length === 0, fx.missions.list().join(','));
+      check('WS-P1c: nor did the other project',
+        alphaReg.list().length === 0, alphaReg.list().join(','));
+      check('WS-P1d: beta’s own log holds it',
+        betaReg.list().join(',') === 'beta/M-0001', betaReg.list().join(','));
+
+      // The same through the chat card, which is how the operator hit it.
+      const chat = await post(server, '/api/chat?project=alpha',
+        { message: 'fix the flaky test' });
+      const card = chat.json.card;
+      const created = await post(server, '/api/chat/decide?project=alpha',
+        { card, cardDigest: card.digest, decision: 'create' });
+      check('WS-P2: a mission created from a scoped CHAT card belongs to that project',
+        created.status === 201 && created.json.missionId === 'alpha/M-0001',
+        JSON.stringify(created.json?.missionId));
+      check('WS-P2b: and the chat message was recorded in that project’s log, not the server’s',
+        alphaReg.events.read('alpha/CHAT').length >= 1
+        && fx.store.listTasks().every((t) => !t.endsWith('/CHAT')),
+        String(alphaReg.events.read('alpha/CHAT').length));
+
+      const list = await get(`${server.url}/api/missions?project=alpha`,
+        { authorization: `Bearer ${server.token}` });
+      check('WS-P3: the view that asked for it now shows it — no empty page after a create',
+        list.json.length === 1 && list.json[0].goal === 'fix the flaky test',
+        JSON.stringify(list.json.map((m: any) => m.goal)));
+
+      const nowhere = await post(server, '/api/missions?project=ghost', { goal: 'x' });
+      check('WS-P4: a write to an unknown project is refused, never redirected somewhere real',
+        nowhere.status === 404 && nowhere.json.error === 'NO_SUCH_PROJECT',
+        JSON.stringify(nowhere.json?.error));
+    } finally { await server?.close(); }
+  }
+
+  section('projects: a created project is named after where it lands');
+  {
+    const proot = path.join(TMP, `nameroot-${seq += 1}`);
+    fs.mkdirSync(proot, { recursive: true });
+    const fx = fixture();
+    // `zeus init` derives the project name from the directory it runs in, and
+    // it runs in the staging directory — so without a correction every project
+    // is called "<slug>.incoming-<pid>" forever.
+    const runner = async (spec: { kind: string; args: string[]; cwd: string }) => {
+      if (spec.args[0] === 'clone') {
+        const dest = path.join(spec.cwd, spec.args[spec.args.length - 1]);
+        fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+        return { ok: true, detail: 'cloned' };
+      }
+      fs.mkdirSync(path.join(spec.cwd, '.zeus', 'state'), { recursive: true });
+      fs.writeFileSync(path.join(spec.cwd, '.zeus', 'config.yaml'),
+        `version: 1\nproject:\n  name: ${path.basename(spec.cwd)}\n  adapter: node\n`);
+      return { ok: true, detail: 'init ok' };
+    };
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        projectsRoot: proot, createRunner: runner,
+      });
+      const draft = await post(server, '/api/projects/draft',
+        { message: 'https://github.com/owner/talkbridge' });
+      await post(server, '/api/projects/decide',
+        { card: draft.json.card, cardDigest: draft.json.card.digest, decision: 'create' });
+
+      const cfg = fs.readFileSync(path.join(proot, 'talkbridge', '.zeus', 'config.yaml'), 'utf8');
+      check('NM1: the project is named for its final directory, not the staging one',
+        /name: talkbridge\b/.test(cfg) && !/incoming/.test(cfg),
+        cfg.split('\n').find((l) => l.includes('name:')) ?? '');
+      const home = await get(`${server.url}/api/projects`,
+        { authorization: `Bearer ${server.token}` });
+      check('NM1b: and the home shows that name, not a staging artefact',
+        home.json.projects[0].projectId === 'talkbridge'
+        && home.json.projects[0].slug === 'talkbridge',
+        JSON.stringify(home.json.projects[0]?.projectId));
+      check('NM1c: no staging directory survived',
+        fs.readdirSync(proot).join(',') === 'talkbridge', fs.readdirSync(proot).join(','));
+    } finally { await server?.close(); }
+  }
 }

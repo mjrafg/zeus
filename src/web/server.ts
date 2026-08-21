@@ -16,6 +16,7 @@ import * as path from 'path';
 import { AddressInfo } from 'net';
 import { spawn } from 'child_process';
 import { EventStore, StoredEvent } from '../engine/events';
+import { readConfig, writeConfig } from '../config';
 import { MissionRegistry } from '../mission/registry';
 import { isMissionId, isTaskId, scopeOf } from '../mission/types';
 import {
@@ -449,23 +450,32 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
   }
 
   /** The one place a mission is created. Chat calls this; so does the route. */
-  function createMission(goal: string) {
+  function createMission(goal: string,
+    sc: { missions: MissionRegistry; root: string }) {
     const head = (() => {
       try {
         return require('child_process').execFileSync('git',
-          ['-C', opts.projectRoot, 'rev-parse', 'HEAD'],
+          ['-C', sc.root, 'rev-parse', 'HEAD'],
           { encoding: 'utf8', timeout: 15_000 }).trim();
       } catch { return 'unknown'; }
     })();
-    return missions.create(goal, head);
+    return sc.missions.create(goal, head);
   }
 
   async function handleWrite(url: URL, body: any, res: http.ServerResponse): Promise<void> {
+    // The project a write is about, exactly like a read. Scoping only the read
+    // routes meant the console showed one project and wrote to another: a
+    // mission created from a freshly cloned project's chat landed in the
+    // project the SERVER happened to sit in, and the page that asked for it
+    // stayed empty. A view and a write that disagree about their subject is
+    // the worst kind of working.
+    const wsc = scoped(url);
+    if (!wsc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
     if (url.pathname === '/api/missions') {
       const goal = typeof body?.goal === 'string' ? body.goal.trim() : '';
       if (!goal) { send(res, 400, { error: 'GOAL_REQUIRED' }); return; }
-      const rec = createMission(goal);
-      send(res, 201, missionStatusView(missions, opts.projectRoot, rec.missionId));
+      const rec = createMission(goal, wsc);
+      send(res, 201, missionStatusView(wsc.missions, wsc.root, rec.missionId));
       return;
     }
 
@@ -550,6 +560,17 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           });
           return;
         }
+        // `zeus init` derived the project name from the directory it ran in,
+        // which was the staging name — so every project created this way was
+        // called "<slug>.incoming-<pid>" for the rest of its life. Correct it
+        // to the name the operator was shown on the card, before it lands.
+        try {
+          const cfg = readConfig(staging);
+          if (cfg && cfg.project && cfg.project.name !== card.targetSlug) {
+            cfg.project.name = card.targetSlug;
+            writeConfig(staging, cfg);
+          }
+        } catch { /* a config we cannot read is caught by isProject below */ }
         fs.renameSync(staging, target);
         send(res, 201, { decision: 'create', route: 'CLONE', slug: card.targetSlug,
           target, initialised: { ...started, isProject: isProject(target) } });
@@ -588,11 +609,12 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       const classification = classifyMessage(message);
 
       if (classification.intent === 'QUESTION') {
+        // eslint-disable-next-line no-unused-vars
         // ZERO provider calls on this path, by construction: the resolver only
         // reads the log. A chat that quietly bills for answering "what is the
         // status" is a chat nobody trusts to be asked twice.
-        const answer = answerFromLog(missions, message);
-        recordChatMessage(store, opts.projectId, {
+        const answer = answerFromLog(wsc.missions, message);
+        recordChatMessage(wsc.store, wsc.projectId, {
           message, classification, led: answer.answered ? 'ANSWERED' : 'UNANSWERABLE',
         });
         send(res, 200, { intent: classification.intent, classification, answer, card: null });
@@ -600,7 +622,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       }
 
       const card = draftCard({ intent: classification.intent, message });
-      recordChatMessage(store, opts.projectId, {
+      recordChatMessage(wsc.store, wsc.projectId, {
         message, classification, led: 'CARD_DRAFTED', cardDigest: card.digest,
       });
       // A card is a PROPOSAL. Nothing is created here, in any branch.
@@ -626,7 +648,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         proposedGoal: card.proposedGoal, proposalCostUsd: card.proposalCostUsd,
       });
       if (fresh.digest !== digest || card.digest !== digest) {
-        recordCardDecision(store, opts.projectId, {
+        recordCardDecision(wsc.store, wsc.projectId, {
           cardDigest: digest, decision: 'REFUSED_DIGEST_MISMATCH', missionId: null,
           detail: 'the card changed since it was rendered',
         });
@@ -639,15 +661,15 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       }
 
       if (decision === 'answer') {
-        const answer = answerFromLog(missions, card.originalGoal);
-        recordCardDecision(store, opts.projectId, {
+        const answer = answerFromLog(wsc.missions, card.originalGoal);
+        recordCardDecision(wsc.store, wsc.projectId, {
           cardDigest: digest, decision: 'ANSWERED_INSTEAD', missionId: null,
         });
         send(res, 200, { decision: 'answer', answer, missionId: null });
         return;
       }
       if (decision !== 'create') {
-        recordCardDecision(store, opts.projectId, {
+        recordCardDecision(wsc.store, wsc.projectId, {
           cardDigest: digest, decision: 'CANCELLED', missionId: null,
         });
         send(res, 200, { decision, missionId: null });
@@ -657,21 +679,21 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       const goal = (typeof body?.goal === 'string' && body.goal.trim())
         ? body.goal.trim() : (card.proposedGoal ?? card.originalGoal);
       // THE SAME create path W1b built. Chat has no private route to a mission.
-      const rec = createMission(goal);
-      recordCardDecision(store, opts.projectId, {
+      const rec = createMission(goal, wsc);
+      recordCardDecision(wsc.store, wsc.projectId, {
         cardDigest: digest, decision: 'CREATED', missionId: rec.missionId,
       });
       send(res, 201, { decision: 'create', missionId: rec.missionId,
-        mission: missionStatusView(missions, opts.projectRoot, rec.missionId) });
+        mission: missionStatusView(wsc.missions, wsc.root, rec.missionId) });
       return;
     }
 
     const m = /^\/api\/missions\/([^/]+)\/(compile|plan|run|cancel|confirm|evaluate)$/
       .exec(url.pathname);
     if (!m) { send(res, 404, { error: 'NO_SUCH_ROUTE', path: url.pathname }); return; }
-    const id = resolveId(decodeURIComponent(m[1]), opts.projectId);
+    const id = resolveId(decodeURIComponent(m[1]), wsc.projectId);
     if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
-    if (!missions.mission(id)) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
+    if (!wsc.missions.mission(id)) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
     const action = m[2];
 
     if (action === 'compile' || action === 'plan' || action === 'evaluate') {
@@ -704,7 +726,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         ? body.reason.trim() : 'cancelled from the control center';
       // The same cross-process path `zeus cancel` uses: the spawned mission is
       // a different OS process, and the run registry is how it is reached.
-      const outcome = missions.cancel(id, reason);
+      const outcome = wsc.missions.cancel(id, reason);
       send(res, 200, { missionId: id, ...outcome });
       return;
     }
@@ -715,7 +737,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       findingsDigest: String(body?.findingsDigest ?? ''),
       decision: body?.decision,
     };
-    const verdict = evaluateConsent(missions, id, req);
+    const verdict = evaluateConsent(wsc.missions, id, req);
     if (!verdict.ok) {
       // 409, and the CURRENT findings come back: a refusal that does not say
       // what to read next just makes the operator guess.
@@ -731,8 +753,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     if (req.decision === 'ABORT') {
       // Cancelling is a decision, and it goes through the same cross-process
       // path `zeus cancel` uses so a live run is actually reached.
-      const outcome = missions.cancel(id, `cancelled at the ${subject.kind} consent stop`);
-      missions.recordPlanStopDecision(id, {
+      const outcome = wsc.missions.cancel(id, `cancelled at the ${subject.kind} consent stop`);
+      wsc.missions.recordPlanStopDecision(id, {
         version: subject.version, rendered,
         decision: 'ABORTED', decidedBy: 'user-confirmed', deferred: false,
       });
@@ -742,7 +764,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     }
 
     if (req.decision === 'REFUSE') {
-      missions.recordPlanStopDecision(id, {
+      wsc.missions.recordPlanStopDecision(id, {
         version: subject.version, rendered,
         decision: subject.kind === 'plan' ? 'REFUSED_NO_CONSENT' : 'ORACLE_REFUSED',
         decidedBy: 'user-confirmed', deferred: false,
@@ -753,9 +775,9 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     }
 
     if (subject.kind === 'oracle') {
-      const rec = missions.mission(id)!;
+      const rec = wsc.missions.mission(id)!;
       const oracle = rec.oracle as any;
-      missions.acceptOracle(id, {
+      wsc.missions.acceptOracle(id, {
         acceptanceMode: oracle?.acceptanceMode ?? 'REQUIRED_CONSENT',
         acceptedBy: 'user-confirmed',
         modeInputs: { confirmedFromWeb: true, findingsDigest: subject.digest },
@@ -764,15 +786,15 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         acceptedDespite: subject.findings as Array<{ code: string; criterionId?: string }>,
       });
     } else {
-      const recorded = [...missions.events.read(id)].reverse()
+      const recorded = [...wsc.missions.events.read(id)].reverse()
         .find((e) => e.type === 'PLAN_RECORDED'
           && (e.payload as any)?.version === subject.version)!;
       const graph = (recorded.payload as any).plan;
-      missions.acceptPlan(id, graph, {
+      wsc.missions.acceptPlan(id, graph, {
         acceptedBy: 'user-confirmed', acceptedDespite: rendered,
       });
     }
-    missions.recordPlanStopDecision(id, {
+    wsc.missions.recordPlanStopDecision(id, {
       version: subject.version, rendered, decision: 'ACCEPTED',
       decidedBy: 'user-confirmed', deferred: false,
     });

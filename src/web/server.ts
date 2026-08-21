@@ -31,7 +31,7 @@ import {
   answerFromLog, chatHistory, classifyMessage, draftCard, recordCardDecision,
   recordChatMessage, wantsTightening, MissionCard,
 } from '../mission/chat';
-import { EventTailer, cursorFromLastId, eventId } from './tail';
+import { EventTailer, cursorFromLastId, eventId, SSE_CHANNEL } from './tail';
 import { UI_HTML } from './ui';
 import { listProjects, freeSlug, slugForUrl, slugify, isProject } from '../projects';
 import { routeFor, carriesCredentials, draftCreationCard, CreationCard } from '../create';
@@ -345,7 +345,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         });
         const write = (events: StoredEvent[]) => {
           for (const e of events) {
-            res.write(`id: ${eventId(e)}\nevent: ${e.type}\n`
+            // One channel name for every frame; the type is in the payload.
+            res.write(`id: ${eventId(e)}\nevent: ${SSE_CHANNEL}\n`
               + `data: ${JSON.stringify(e)}\n\n`);
           }
         };

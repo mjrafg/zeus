@@ -11,6 +11,26 @@
 import * as fs from 'fs';
 import { EventStore, StoredEvent } from '../engine/events';
 
+/**
+ * The SSE event name every frame carries.
+ *
+ * ONE channel, always the same name — and the real event type travels inside
+ * `data.type`, where it already was. The first version named each frame after
+ * its own type (`event: TASK_SPAWNED`), which is expressive and was silently
+ * fatal: per the SSE spec a named frame does NOT dispatch to `onmessage`, so a
+ * client written the obvious way received nothing at all. Every frame crossed
+ * the wire correctly and the browser discarded all of them.
+ *
+ * A single name also means the client cannot fall behind the vocabulary. With
+ * per-type names, every new event type needs a new `addEventListener` or it is
+ * invisible — a listener list that has to be kept in sync with an enum is a
+ * listener list that will not be.
+ *
+ * Exported so the server and the UI cannot disagree about it: they both read
+ * this constant, and a test asserts the frames actually dispatch here.
+ */
+export const SSE_CHANNEL = 'zeus';
+
 /** `<taskId>#<seq>` — an id a client can hand back verbatim. */
 export function eventId(e: StoredEvent): string { return `${e.taskId}#${e.seq}`; }
 

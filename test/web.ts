@@ -17,7 +17,10 @@ import { EventStore } from '../src/engine/events';
 import { MissionRegistry } from '../src/mission/registry';
 import { startWebServer, RunningServer, routeTable, READ_ROUTES, WRITE_ROUTES } from '../src/web/server';
 import { ensureToken, tokenMatches, tokenPath } from '../src/web/token';
-import { eventId, parseEventId, cursorFromLastId, since, advance } from '../src/web/tail';
+import {
+  eventId, parseEventId, cursorFromLastId, since, advance, SSE_CHANNEL,
+} from '../src/web/tail';
+import { UI_HTML } from '../src/web/ui';
 import { missionStatusView, missionReportView } from '../src/views';
 import { findingsDigest } from '../src/mission/consent';
 import {
@@ -295,8 +298,13 @@ export async function webSuite(): Promise<void> {
         got.ids.length >= 3 && new Set(got.ids).size === got.ids.length
         && got.ids.length === got.ids.filter(Boolean).length,
         got.ids.join(' '));
-      check('WV3: each frame carries the event type, so a client can filter without parsing',
-        got.types.includes('MISSION_ESCALATED'), got.types.join(','));
+      // This assertion used to require `event: MISSION_ESCALATED` — it asserted
+      // the defect. A frame named after its own type never reaches onmessage,
+      // so the browser received every event and rendered none. The contract is
+      // one stable channel; the type travels in the payload.
+      check('WV3: every frame is on the one channel a client can subscribe to',
+        got.types.length > 0 && got.types.every((t) => t === SSE_CHANNEL),
+        [...new Set(got.types)].join(','));
     } finally { await server?.close(); }
   }
 
@@ -1160,5 +1168,112 @@ export async function webSuite(): Promise<void> {
         && !fs.existsSync(path.join(proot, 'escaped.txt'))
         && !fs.existsSync(path.join(TMP, 'escaped.txt')));
     } finally { await server?.close(); }
+  }
+  section('control center: the stream reaches a spec-faithful client');
+  {
+    /**
+     * A minimal EventSource, implementing the dispatch rule that matters.
+     *
+     * The earlier tests parsed `id:` and `event:` out of the raw bytes and
+     * asserted the SERVER emits correct SSE. It does — and the browser still
+     * showed nothing, because a frame carrying `event: X` does not dispatch to
+     * `onmessage`. The producer was tested and the consumer was not, so the
+     * defect lived exactly in the gap between them.
+     *
+     * This client honours the spec: an absent `event:` field means type
+     * "message", and any other value means a listener for THAT name must be
+     * registered or the frame is dropped on the floor.
+     */
+    class TinySource {
+      readonly received: Array<{ type: string; data: any; lastEventId: string }> = [];
+      private buf = '';
+      feed(chunk: string): void {
+        this.buf += chunk;
+        let i;
+        while ((i = this.buf.indexOf('\n\n')) !== -1) {
+          const frame = this.buf.slice(0, i);
+          this.buf = this.buf.slice(i + 2);
+          if (!frame.trim() || frame.startsWith(':')) continue;
+          let type = 'message';
+          let data = '';
+          let id = '';
+          for (const line of frame.split('\n')) {
+            const c = line.indexOf(':');
+            const field = c === -1 ? line : line.slice(0, c);
+            const value = c === -1 ? '' : line.slice(c + 1).replace(/^ /, '');
+            if (field === 'event') type = value;
+            else if (field === 'data') data += (data ? '\n' : '') + value;
+            else if (field === 'id') id = value;
+          }
+          let parsed: any = null;
+          try { parsed = JSON.parse(data); } catch { parsed = data; }
+          this.received.push({ type, data: parsed, lastEventId: id });
+        }
+      }
+      /** Exactly what `addEventListener(name, …)` would see. */
+      on(name: string) { return this.received.filter((e) => e.type === name); }
+    }
+
+    const fx = fixture();
+    const rec = fx.missions.create('goal', 'base0');
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      const src = new TinySource();
+      const done = new Promise<void>((resolve) => {
+        const req = http.get(
+          `${server!.url}/api/events/stream?token=${encodeURIComponent(server!.token)}`,
+          (res) => {
+            res.on('data', (c) => {
+              src.feed(String(c));
+              if (src.on(SSE_CHANNEL).length >= 2) { req.destroy(); resolve(); }
+            });
+            res.on('end', () => resolve());
+          });
+        req.on('error', () => resolve());
+        setTimeout(() => { try { req.destroy(); } catch { /* gone */ } resolve(); }, 8_000);
+      });
+      await new Promise((r) => setTimeout(r, 250));
+      fx.missions.escalate(rec.missionId, { kind: 'one' });
+      fx.missions.escalate(rec.missionId, { kind: 'two' });
+      await done;
+
+      const onChannel = src.on(SSE_CHANNEL);
+      check('SC-UI1: frames dispatch to the channel the client subscribes to',
+        onChannel.length >= 2, `${onChannel.length} on "${SSE_CHANNEL}"`);
+      check('SC-UI2: and NOT to "message" — a named frame never reaches onmessage',
+        src.on('message').length === 0,
+        `${src.on('message').length} would have reached onmessage`);
+      check('SC-UI3: the regression itself — no frame is named after its own type',
+        src.on('MISSION_ESCALATED').length === 0 && src.received.every((e) => e.type === SSE_CHANNEL),
+        [...new Set(src.received.map((e) => e.type))].join(','));
+      check('SC-UI4: the real event type still arrives, inside the payload',
+        onChannel.every((e) => typeof e.data?.type === 'string')
+        && onChannel.some((e) => e.data.type === 'MISSION_ESCALATED'),
+        onChannel.map((e) => e.data?.type).join(','));
+      check('SC-UI5: each frame carries the id a client resumes from',
+        onChannel.every((e) => /#\d+$/.test(e.lastEventId)),
+        onChannel.map((e) => e.lastEventId).join(' '));
+    } finally { await server?.close(); }
+  }
+
+  section('control center: the UI and the server agree, structurally');
+  {
+    check('SC-UI6: the UI subscribes to the same constant the server emits',
+      UI_HTML.includes(`addEventListener('${SSE_CHANNEL}'`),
+      `looking for addEventListener('${SSE_CHANNEL}'`);
+    check('SC-UI7: and no longer relies on onmessage, which named frames bypass',
+      !/ES\.onmessage/.test(UI_HTML), 'no ES.onmessage');
+    // Bug two: the feed used to live inside the element loadDetail() replaces,
+    // so appended rows were destroyed on the next refresh. Made impossible by
+    // structure rather than by remembering — the feed is a sibling now.
+    check('SC-UI8: the live feed is not inside the pane that gets rebuilt',
+      UI_HTML.includes('<div id="feedwrap">')
+      && !/\$\('detail'\)\.innerHTML[\s\S]{0,400}id="feed"/.test(UI_HTML),
+      'feed lives outside #detail');
+    check('SC-UI9: loadDetail no longer renders the feed at all',
+      !/h \+= '<h2>live events<\/h2>/.test(UI_HTML), 'loadDetail does not emit #feed');
   }
 }

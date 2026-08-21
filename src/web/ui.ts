@@ -12,6 +12,8 @@
  * meaning what they meant.
  */
 
+import { SSE_CHANNEL } from './tail';
+
 export const UI_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -30,7 +32,14 @@ export const UI_HTML = `<!doctype html>
   .dim { color:var(--dim) }
   main { display:grid; grid-template-columns:minmax(220px,1fr) 1.9fr minmax(300px,1.2fr);
          gap:0; height:calc(100vh - 49px) }
-  #list, #detail, #chat { overflow:auto; padding:12px 16px }
+  #list, #chat { overflow:auto; padding:12px 16px }
+  #centre { display:flex; flex-direction:column; overflow:hidden }
+  #detail { overflow:auto; padding:12px 16px; flex:1 }
+  /* The feed lives OUTSIDE #detail on purpose: loadDetail() replaces
+     #detail.innerHTML, and anything appended inside it would be destroyed on
+     the next refresh. Structure, not discipline, keeps it alive. */
+  #feedwrap { border-top:1px solid var(--line); padding:8px 16px 12px;
+              max-height:38%; overflow:auto; flex:0 0 auto }
   #chat { border-left:1px solid var(--line); display:flex; flex-direction:column }
   #log { flex:1; overflow:auto; margin-bottom:8px }
   .msg { margin:6px 0; padding:6px 8px; border-radius:6px; background:#161b22;
@@ -79,7 +88,10 @@ export const UI_HTML = `<!doctype html>
 </header>
 <main>
   <div id="list"><p class="dim">Enter the token to connect.</p></div>
-  <div id="detail"><p class="dim">Select a mission.</p></div>
+  <div id="centre">
+    <div id="detail"><p class="dim">Select a mission.</p></div>
+    <div id="feedwrap"><h2>live events</h2><div id="feed"></div></div>
+  </div>
   <div id="chat">
     <h2>chat</h2>
     <div id="log"><p class="dim">Ask about this project, or describe a change.</p></div>
@@ -153,7 +165,6 @@ async function loadDetail() {
     }
     h += '</table>';
   }
-  h += '<h2>live events</h2><div id="feed"></div>';
   $('detail').innerHTML = h;
 }
 
@@ -166,18 +177,25 @@ function connectStream() {
   ES = new EventSource(u);
   ES.onopen = () => { $('conn').textContent = 'live'; $('conn').className = 'ok'; };
   ES.onerror = () => { $('conn').textContent = 'reconnecting…'; $('conn').className = 'warn'; };
-  ES.onmessage = (ev) => {
+  // The server names every frame '${SSE_CHANNEL}'. A named SSE frame does NOT
+  // reach onmessage — that is the spec, and assuming otherwise meant the
+  // browser received every event and displayed none of them.
+  ES.addEventListener('${SSE_CHANNEL}', (ev) => {
     LAST = ev.lastEventId || LAST;
     let e; try { e = JSON.parse(ev.data); } catch { return; }
     const feed = $('feed');
-    if (feed && SEL && (e.taskId === SEL || String(e.taskId).startsWith(SEL))) {
+    if (feed) {
+      const mine = SEL && (e.taskId === SEL || String(e.taskId).startsWith(SEL));
       const row = document.createElement('div');
-      row.innerHTML = '<span class="dim">' + esc(e.ts.slice(11,19)) + '</span> ' + esc(e.type);
+      row.innerHTML = '<span class="dim">' + esc(e.ts.slice(11,19)) + '</span> '
+        + (mine ? '' : '<span class="dim">' + esc(String(e.taskId).split('/').pop()) + '</span> ')
+        + esc(e.type);
       feed.prepend(row);
+      while (feed.childElementCount > 200) feed.lastElementChild.remove();
     }
     loadList();
     if (SEL) loadDetail();
-  };
+  });
 }
 
 async function apiPost(p, body) {

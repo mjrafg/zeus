@@ -86,7 +86,18 @@ export function listProjects(root: string): ProjectSummary[] {
   let names: string[] = [];
   try {
     names = fs.readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+      .filter((e) => !e.name.startsWith('.'))
+      // A SYMLINK to a project is a project. `withFileTypes` reports a
+      // symlink as not-a-directory, so filtering on isDirectory() alone made
+      // every symlinked project invisible — which is exactly how a projects
+      // root gets assembled without moving anything, and it silently listed
+      // nothing. Resolve the target instead of trusting the entry type.
+      .filter((e) => {
+        if (e.isDirectory()) return true;
+        if (!e.isSymbolicLink()) return false;
+        try { return fs.statSync(path.join(root, e.name)).isDirectory(); }
+        catch { return false; }          // a dangling link is not a project
+      })
       .map((e) => e.name);
   } catch { return []; }
   return names
@@ -126,4 +137,31 @@ export function freeSlug(root: string, desired: string): string {
     if (!fs.existsSync(path.join(root, candidate))) return candidate;
   }
   return `${base}-${Date.now()}`;
+}
+
+/**
+ * Everything needed to serve ONE project: where its log lives and what it is
+ * called.
+ *
+ * Resolved from the filesystem on demand rather than cached, for the same
+ * reason the listing is: a project that moved or was removed must stop
+ * resolving, not keep answering from memory.
+ */
+export interface ProjectScope {
+  slug: string;
+  projectId: string;
+  root: string;
+  stateRoot: string;
+}
+
+export function scopeFor(projectsRoot: string, slug: string): ProjectScope | null {
+  const summary = projectBySlug(projectsRoot, slug);
+  if (!summary) return null;
+  let cfg: ProjectConfig | null = null;
+  try { cfg = readConfig(summary.root); } catch { cfg = null; }
+  if (!cfg) return null;
+  return {
+    slug, projectId: summary.projectId, root: summary.root,
+    stateRoot: path.resolve(summary.root, cfg.paths?.state ?? `${PROJECT_DIR}/state`),
+  };
 }

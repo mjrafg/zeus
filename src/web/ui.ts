@@ -52,6 +52,15 @@ export const UI_HTML = `<!doctype html>
   .ask { display:flex; gap:6px }
   .ask input { flex:1; min-width:0 }
   .ref { color:var(--acc); cursor:pointer; text-decoration:underline }
+  #home { padding:20px 24px; overflow:auto; grid-column:1 / -1 }
+  #home h2 { margin-top:0 }
+  .p { border:1px solid var(--line); border-radius:6px; padding:10px 12px;
+       margin-bottom:8px; cursor:pointer; display:flex; gap:14px; align-items:baseline }
+  .p:hover { border-color:var(--acc) }
+  .p b { min-width:170px }
+  .newp { border:1px solid var(--acc); border-radius:6px; padding:12px; margin-top:18px }
+  .newp .ask { margin-top:8px }
+  #crumb { cursor:pointer; color:var(--acc) }
   #list { border-right:1px solid var(--line) }
   .m { padding:8px; border:1px solid var(--line); border-radius:6px;
        margin-bottom:8px; cursor:pointer }
@@ -88,12 +97,14 @@ export const UI_HTML = `<!doctype html>
 <header>
   <h1>Zeus Control Center</h1>
   <span class="dim" id="proj">—</span>
+  <span id="crumb" style="display:none">← all projects</span>
   <span style="flex:1"></span>
   <input id="tok" type="password" placeholder="bearer token (printed once at startup)">
   <button id="go">connect</button>
   <span id="conn" class="dim">offline</span>
 </header>
 <main>
+  <div id="home" style="display:none"></div>
   <div id="list"><p class="dim">Enter the token to connect.</p></div>
   <div id="centre">
     <div id="detail"><p class="dim">Select a mission.</p></div>
@@ -112,6 +123,11 @@ export const UI_HTML = `<!doctype html>
 // The token lives in memory only. Persisting it to localStorage would put a
 // credential that can spend money into the most-read storage in the browser.
 let TOKEN = '', SEL = null, ES = null, LAST = null;
+// Which project every per-project call is about. null = the project the
+// server was started in, which is what the API assumes without ?project=.
+let PROJECT = null;
+const scope = (p) => p + (PROJECT ? (p.includes('?') ? '&' : '?') + 'project='
+  + encodeURIComponent(PROJECT) : '');
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g,
   (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;' }[c]));
@@ -123,7 +139,7 @@ async function api(p) {
 }
 
 async function loadList() {
-  const ms = await api('/missions');
+  const ms = await api(scope('/missions'));
   $('list').innerHTML = ms.length ? '' : '<p class="dim">No missions yet.</p>';
   for (const m of ms) {
     const d = document.createElement('div');
@@ -141,8 +157,8 @@ async function loadList() {
 
 async function loadDetail() {
   if (!SEL) return;
-  const m = await api('/missions/' + encodeURIComponent(SEL.split('/').pop()));
-  const rep = await api('/missions/' + encodeURIComponent(SEL.split('/').pop()) + '/report');
+  const m = await api(scope('/missions/' + encodeURIComponent(SEL.split('/').pop())));
+  const rep = await api(scope('/missions/' + encodeURIComponent(SEL.split('/').pop()) + '/report'));
   const o = m.oracle;
   let h = '<h2>' + esc(m.missionId) + '</h2><p>' + esc(m.goal) + '</p>';
   h += '<table><tr><th>phase</th><td><span class="phase">' + esc(m.phase) + '</span></td></tr>'
@@ -230,7 +246,8 @@ function connectStream() {
   if (ES) ES.close();
   // EventSource cannot set headers, so the stream takes the same token in the
   // query string — same secret, same check.
-  let u = '/api/events/stream?token=' + encodeURIComponent(TOKEN);
+  let u = '/api/events/stream?token=' + encodeURIComponent(TOKEN)
+    + (PROJECT ? '&project=' + encodeURIComponent(PROJECT) : '');
   if (LAST) u += '&lastEventId=' + encodeURIComponent(LAST);
   ES = new EventSource(u);
   ES.onopen = () => { $('conn').textContent = 'live'; $('conn').className = 'ok'; };
@@ -321,7 +338,7 @@ function renderCard(card) {
         goal = next;
       }
       const decision = a.id === 'edit' ? 'create' : a.id;
-      const r = await apiPost('/chat/decide',
+      const r = await apiPost(scope('/chat/decide'),
         { card, cardDigest: card.digest, decision, goal });
       for (const x of d.querySelectorAll('button')) x.disabled = true;
       if (r.status === 409) {
@@ -347,14 +364,14 @@ async function send() {
   if (!text) return;
   $('say').value = '';
   bubble(esc(text), true);
-  const r = await apiPost('/chat', { message: text });
+  const r = await apiPost(scope('/chat'), { message: text });
   if (!r.json) { bubble('<span class="bad">no answer</span>', false); return; }
   if (r.json.answer) renderAnswer(r.json.answer);
   if (r.json.card) renderCard(r.json.card);
 }
 
 async function loadChat() {
-  const h = await api('/chat');
+  const h = await api(scope('/chat'));
   $('log').innerHTML = '';
   for (const e of h.events) {
     if (e.type === 'CHAT_MESSAGE') {
@@ -371,12 +388,119 @@ async function loadChat() {
 $('send').onclick = send;
 $('say').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
 
+function showHome(on) {
+  $('home').style.display = on ? 'block' : 'none';
+  for (const id of ['list', 'centre', 'chat']) $(id).style.display = on ? 'none' : '';
+  $('crumb').style.display = on ? 'none' : '';
+}
+
+/**
+ * The Projects home.
+ *
+ * Rendered only when the server was given a projects root. Without one it has
+ * nothing true to show, so it says so rather than presenting an empty list as
+ * if it were an answer.
+ */
+async function loadHome() {
+  const d = await api('/projects');
+  let h = '<h2>Projects</h2>';
+  if (!d.projectsRoot) {
+    h += '<p class="dim">This server was started inside a single project, so there is '
+      + 'no projects root to list. Start it with <b>--projects &lt;dir&gt;</b> to enable '
+      + 'this page.</p>';
+    $('home').innerHTML = h;
+    return;
+  }
+  h += '<p class="dim">' + esc(d.projectsRoot) + '</p><div id="plist"></div>';
+  h += '<div class="newp"><b>New project</b>'
+    + '<p class="dim">Paste a git URL to clone, or describe what to build. '
+    + 'Nothing is created until you approve a card.</p>'
+    + '<div class="ask"><input id="newmsg" placeholder="https://github.com/owner/repo — or describe what to build…">'
+    + '<button id="newgo">continue</button></div><div id="newcard"></div></div>';
+  $('home').innerHTML = h;
+
+  const list = $('plist');
+  if (!d.projects.length) {
+    list.innerHTML = '<p class="dim">No initialised projects under this root yet.</p>';
+  }
+  for (const p of d.projects) {
+    const el = document.createElement('div');
+    el.className = 'p';
+    el.innerHTML = '<b>' + esc(p.slug) + '</b>'
+      + '<span class="dim">' + esc(p.adapter) + '</span>'
+      + '<span>' + p.missions + ' mission(s)</span>'
+      + '<span class="dim">' + esc(p.lastActivity ? p.lastActivity.slice(0, 16).replace('T', ' ') : 'no activity') + '</span>';
+    el.onclick = () => openProject(p.slug, p.projectId, p.root);
+    list.appendChild(el);
+  }
+  $('newgo').onclick = draftProject;
+  $('newmsg').addEventListener('keydown', (e) => { if (e.key === 'Enter') draftProject(); });
+}
+
+async function draftProject() {
+  const msg = $('newmsg').value.trim();
+  if (!msg) return;
+  const r = await apiPost('/projects/draft', { message: msg });
+  const c = r.json && r.json.card;
+  if (!c) { $('newcard').innerHTML = '<p class="bad">' + esc(JSON.stringify(r.json)) + '</p>'; return; }
+  const d = document.createElement('div');
+  d.className = 'card';
+  let h = '<h3>' + esc(r.json.route) + '</h3>'
+    + '<p class="dim">' + esc(r.json.decision.reason) + '</p>'
+    + '<p><b>Source:</b> ' + esc(c.source) + '<br><b>Target:</b> ' + esc(c.targetPath) + '</p>'
+    + '<b>What happens next</b><ol>'
+    + c.whatHappensNext.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ol>';
+  for (const w of c.warnings) h += '<p class="warn">' + esc(w) + '</p>';
+  h += '<p class="dim">' + esc(c.costExpectation) + '</p><div class="acts"></div>';
+  d.innerHTML = h;
+  const acts = d.querySelector('.acts');
+  for (const a of c.actions) {
+    const b = document.createElement('button');
+    b.textContent = a.label;
+    b.onclick = async () => {
+      for (const x of d.querySelectorAll('button')) x.disabled = true;
+      const res = await apiPost('/projects/decide',
+        { card: c, cardDigest: c.digest, decision: a.id === 'rename' ? 'cancel' : a.id });
+      $('newcard').innerHTML = '<p class="dim">' + esc(JSON.stringify(res.json).slice(0, 300)) + '</p>';
+      await loadHome();
+    };
+    acts.appendChild(b);
+  }
+  $('newcard').innerHTML = '';
+  $('newcard').appendChild(d);
+}
+
+function openProject(slug, projectId, root) {
+  PROJECT = slug;
+  SEL = null;
+  $('proj').textContent = projectId + '  ' + root;
+  showHome(false);
+  $('detail').innerHTML = '<p class="dim">Select a mission.</p>';
+  loadList(); loadChat(); connectStream();
+}
+
+$('crumb').onclick = () => {
+  PROJECT = null; SEL = null;
+  if (ES) { ES.close(); ES = null; }
+  $('proj').textContent = '';
+  showHome(true); loadHome();
+};
+
 $('go').onclick = async () => {
   TOKEN = $('tok').value.trim();
   if (!TOKEN) return;
   try {
     const p = await api('/project');
+    const projects = await api('/projects');
+    if (projects.projectsRoot) {
+      // A projects root exists, so the honest landing page is the list of
+      // projects rather than whichever one the service happens to sit in.
+      showHome(true);
+      await loadHome();
+      return;
+    }
     $('proj').textContent = p.projectId + '  ' + p.root;
+    showHome(false);
     await loadList();
     await loadChat();
     connectStream();

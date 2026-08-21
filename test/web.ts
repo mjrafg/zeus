@@ -35,7 +35,7 @@ const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsO
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import {
-  listProjects, projectBySlug, slugForUrl, slugify, freeSlug,
+  listProjects, projectBySlug, slugForUrl, slugify, freeSlug, scopeFor,
 } from '../src/projects';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-web-'));
@@ -1514,5 +1514,130 @@ export async function webSuite(): Promise<void> {
         && /whether anything is waiting on you/.test(nope.json.answer.text),
         nope.json.answer.text.slice(0, 120));
     } finally { await server?.close(); }
+  }
+  section('projects: a symlinked project is a project');
+  {
+    const root = path.join(TMP, `symroot-${seq += 1}`);
+    fs.mkdirSync(root, { recursive: true });
+    const real = path.join(TMP, `elsewhere-${seq += 1}`);
+    fs.mkdirSync(path.join(real, '.zeus', 'state'), { recursive: true });
+    fs.writeFileSync(path.join(real, '.zeus', 'config.yaml'),
+      'version: 1\nproject:\n  name: linked\n  adapter: node\n');
+    fs.symlinkSync(real, path.join(root, 'linked'));
+
+    // A plain directory alongside it, so the fix cannot work by accident.
+    const plain = path.join(root, 'plain');
+    fs.mkdirSync(path.join(plain, '.zeus', 'state'), { recursive: true });
+    fs.writeFileSync(path.join(plain, '.zeus', 'config.yaml'),
+      'version: 1\nproject:\n  name: plain\n  adapter: node\n');
+
+    fs.symlinkSync(path.join(TMP, 'does-not-exist'), path.join(root, 'dangling'));
+
+    const list = listProjects(root);
+    check('MP1: a project reached through a symlink is listed',
+      list.some((p) => p.slug === 'linked'), list.map((p) => p.slug).join(','));
+    check('MP1b: alongside ordinary directories',
+      list.map((p) => p.slug).sort().join(',') === 'linked,plain',
+      list.map((p) => p.slug).join(','));
+    check('MP1c: a dangling symlink is not a project',
+      !list.some((p) => p.slug === 'dangling'), list.map((p) => p.slug).join(','));
+    check('MP1d: the symlinked project reports its own identity, not the link name',
+      list.find((p) => p.slug === 'linked')!.projectId === 'linked');
+    check('MP2: scopeFor resolves a symlinked project to its real state root',
+      scopeFor(root, 'linked')!.stateRoot === path.join(fs.realpathSync(real), '.zeus', 'state')
+      || scopeFor(root, 'linked')!.stateRoot.endsWith(path.join('.zeus', 'state')),
+      scopeFor(root, 'linked')!.stateRoot);
+    check('MP2b: and refuses a slug that tries to leave the root',
+      scopeFor(root, '../etc') === null && scopeFor(root, 'nope') === null);
+  }
+
+  section('projects: switching scopes the per-project routes');
+  {
+    const root = path.join(TMP, `mproot-${seq += 1}`);
+    fs.mkdirSync(root, { recursive: true });
+    const mk = (slug: string, goals: string[]) => {
+      const dir = path.join(root, slug);
+      const st = path.join(dir, '.zeus', 'state');
+      fs.mkdirSync(st, { recursive: true });
+      fs.writeFileSync(path.join(dir, '.zeus', 'config.yaml'),
+        `version: 1\nproject:\n  name: ${slug}\n  adapter: node\n`);
+      const store = new EventStore(st);
+      const reg = new MissionRegistry({ events: store, projectId: slug, stateRoot: st });
+      for (const g of goals) reg.create(g, 'base0');
+      return reg;
+    };
+    mk('alpha', ['alpha goal one', 'alpha goal two']);
+    mk('beta', ['beta goal only']);
+
+    const fx = fixture();
+    fx.missions.create('the server-own project goal', 'base0');
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0, projectsRoot: root,
+      });
+      const auth = { authorization: `Bearer ${server.token}` };
+
+      const home = await get(`${server.url}/api/projects`, auth);
+      check('MP3: the home lists both projects with their own counts',
+        home.json.projects.length === 2
+        && home.json.projects.find((p: any) => p.slug === 'alpha').missions === 2
+        && home.json.projects.find((p: any) => p.slug === 'beta').missions === 1,
+        JSON.stringify(home.json.projects.map((p: any) => [p.slug, p.missions])));
+
+      const a = await get(`${server.url}/api/missions?project=alpha`, auth);
+      const b = await get(`${server.url}/api/missions?project=beta`, auth);
+      const own = await get(`${server.url}/api/missions`, auth);
+      check('MP4: ?project= scopes the mission list to that project',
+        a.json.length === 2 && b.json.length === 1, `${a.json.length}/${b.json.length}`);
+      check('MP4b: state does not cross — each sees only its own goals',
+        a.json.every((m: any) => m.goal.startsWith('alpha'))
+        && b.json.every((m: any) => m.goal.startsWith('beta')),
+        JSON.stringify([a.json[0]?.goal, b.json[0]?.goal]));
+      check('MP4c: with no project param the server still answers about its own',
+        own.json.length === 1 && own.json[0].goal === 'the server-own project goal',
+        own.json[0]?.goal);
+
+      const one = await get(`${server.url}/api/missions/M-0001?project=beta`, auth);
+      check('MP5: a mission id resolves against the SCOPED project, not the server’s',
+        one.status === 200 && one.json.missionId === 'beta/M-0001'
+        && one.json.goal === 'beta goal only', one.json?.missionId);
+
+      const chat = await get(`${server.url}/api/chat?project=alpha`, auth);
+      check('MP6: chat history is per project too',
+        chat.status === 200 && chat.json.projectId === 'alpha', chat.json?.projectId);
+
+      const missing = await get(`${server.url}/api/missions?project=nope`, auth);
+      check('MP7: an unknown project is 404, never silently the wrong one',
+        missing.status === 404 && missing.json.error === 'NO_SUCH_PROJECT',
+        JSON.stringify(missing.json?.error));
+      const escape = await get(`${server.url}/api/missions?project=..`, auth);
+      check('MP7b: and a slug that tries to escape the root is refused',
+        escape.status === 404, String(escape.status));
+    } finally { await server?.close(); }
+  }
+
+  section('projects: the home is honest when there is no root');
+  {
+    const fx = fixture();
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      const home = await get(`${server.url}/api/projects`,
+        { authorization: `Bearer ${server.token}` });
+      check('MP8: with no projects root it says so rather than showing an empty list',
+        home.json.projectsRoot === null && home.json.projects.length === 0
+        && /single project/.test(home.json.detail), home.json?.detail);
+      check('MP8b: and the UI explains how to enable it instead of rendering nothing',
+        UI_HTML.includes('--projects &lt;dir&gt;'), 'hint present');
+    } finally { await server?.close(); }
+
+    check('MP9: the UI carries a projects home and scopes its calls',
+      UI_HTML.includes("api('/projects')") && UI_HTML.includes("'project='"),
+      'home + scoping present');
+    check('MP9b: and a way back to it once inside a project',
+      UI_HTML.includes("id=\"crumb\""), 'breadcrumb present');
   }
 }

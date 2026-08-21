@@ -33,7 +33,9 @@ import {
 } from '../mission/chat';
 import { EventTailer, cursorFromLastId, eventId, SSE_CHANNEL } from './tail';
 import { UI_HTML } from './ui';
-import { listProjects, freeSlug, slugForUrl, slugify, isProject } from '../projects';
+import {
+  listProjects, freeSlug, slugForUrl, slugify, isProject, scopeFor, ProjectScope,
+} from '../projects';
 import { routeFor, carriesCredentials, draftCreationCard, CreationCard } from '../create';
 import { extractZip, DEFAULT_ZIP_LIMITS } from '../zip';
 
@@ -196,8 +198,32 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
   const say = opts.onLog ?? (() => {});
   const streams = new Set<{ res: http.ServerResponse; tailer: EventTailer }>();
 
-  const resolveId = (raw: string): string =>
-    (raw.includes('/') ? raw : `${opts.projectId}/${raw}`);
+  /**
+   * The project a request is about.
+   *
+   * `?project=<slug>` selects one from the projects root; without it the
+   * server answers about the project it was started in, which is what every
+   * caller did before switching existed. Resolved per request from the
+   * filesystem — a server that cached this would keep serving a project that
+   * had been removed.
+   */
+  const scoped = (url: URL): { store: EventStore; missions: MissionRegistry;
+    projectId: string; root: string } | null => {
+    const slug = url.searchParams.get('project');
+    if (!slug) return { store, missions, projectId: opts.projectId, root: opts.projectRoot };
+    if (!opts.projectsRoot) return null;
+    const sc: ProjectScope | null = scopeFor(opts.projectsRoot, slug);
+    if (!sc) return null;
+    const s2 = new EventStore(sc.stateRoot);
+    return {
+      store: s2,
+      missions: new MissionRegistry({ events: s2, projectId: sc.projectId, stateRoot: sc.stateRoot }),
+      projectId: sc.projectId, root: sc.root,
+    };
+  };
+
+  const resolveId = (raw: string, projectId: string): string =>
+    (raw.includes('/') ? raw : `${projectId}/${raw}`);
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
@@ -231,25 +257,30 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       }
 
       if (method === 'GET' && url.pathname === '/api/missions') {
-        const recs = missionListView(missions);
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const recs = missionListView(sc.missions);
         send(res, 200, recs.map((r) => ({
-          ...r, phase: missionPhase(store.read(r.missionId)),
+          ...r, projectSlug: url.searchParams.get('project') ?? null,
+          phase: missionPhase(sc.store.read(r.missionId)),
           // Same predicate the detail view uses. One implementation, two views:
           // a list that disagreed with the page it links to would be worse
           // than a list with no marker at all.
-          awaitingHuman: awaitingHuman(missions, r.missionId),
+          awaitingHuman: awaitingHuman(sc.missions, r.missionId),
         })));
         return;
       }
 
       const missionMatch = /^\/api\/missions\/([^/]+)(\/(events|report))?$/.exec(url.pathname);
       if (method === 'GET' && missionMatch) {
-        const id = resolveId(decodeURIComponent(missionMatch[1]));
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const id = resolveId(decodeURIComponent(missionMatch[1]), sc.projectId);
         if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
         const sub = missionMatch[3];
 
         if (sub === 'events') {
-          const events = store.read(id);
+          const events = sc.store.read(id);
           const offset = Number(url.searchParams.get('offset') ?? '0') || 0;
           const limit = Math.min(Number(url.searchParams.get('limit') ?? '200') || 200, 1000);
           // Served exactly as stored: the redacting sink already ran at append
@@ -259,21 +290,21 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           return;
         }
         if (sub === 'report') {
-          const view = missionReportView(missions, id);
+          const view = missionReportView(sc.missions, id);
           if (!view) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
           send(res, 200, view);
           return;
         }
-        const view = missionStatusView(missions, opts.projectRoot, id);
+        const view = missionStatusView(sc.missions, sc.root, id);
         if (!view) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
         send(res, 200, {
           ...view,
-          phase: missionPhase(store.read(id)),
-          cost: costBreakdown(missions, id),
+          phase: missionPhase(sc.store.read(id)),
+          cost: costBreakdown(sc.missions, id),
           // Reconstructed, not remembered. A refresh, a reconnect or arriving
           // an hour later all show the same thing, because it comes from the
           // log rather than from the moment the stop happened.
-          pendingDecision: pendingDecision(missions, id),
+          pendingDecision: pendingDecision(sc.missions, id),
         });
         return;
       }
@@ -291,16 +322,20 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       if (method === 'GET' && url.pathname === '/api/chat') {
         // History IS the log. Nothing is stored anywhere else, which is what
         // makes it survive a restart and sit beside the missions it created.
-        send(res, 200, { projectId: opts.projectId, events: chatHistory(store, opts.projectId) });
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        send(res, 200, { projectId: sc.projectId, events: chatHistory(sc.store, sc.projectId) });
         return;
       }
 
       const consentMatch = /^\/api\/missions\/([^/]+)\/consent$/.exec(url.pathname);
       if (method === 'GET' && consentMatch) {
-        const id = resolveId(decodeURIComponent(consentMatch[1]));
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const id = resolveId(decodeURIComponent(consentMatch[1]), sc.projectId);
         if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
-        const oracle = consentSubject(missions, id, 'oracle');
-        const plan = consentSubject(missions, id, 'plan');
+        const oracle = consentSubject(sc.missions, id, 'oracle');
+        const plan = consentSubject(sc.missions, id, 'plan');
         if (!oracle) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
         send(res, 200, { missionId: id, oracle, plan });
         return;
@@ -308,35 +343,39 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
 
       const taskMatch = /^\/api\/tasks\/([^/]+)$/.exec(url.pathname);
       if (method === 'GET' && taskMatch) {
-        const id = resolveId(decodeURIComponent(taskMatch[1]));
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const id = resolveId(decodeURIComponent(taskMatch[1]), sc.projectId);
         if (!isTaskId(id)) { send(res, 400, { error: 'NOT_A_TASK_ID', id }); return; }
         let events: StoredEvent[] = [];
-        try { events = store.read(id); } catch { events = []; }
+        try { events = sc.store.read(id); } catch { events = []; }
         if (!events.length) { send(res, 404, { error: 'NO_SUCH_TASK', id }); return; }
         send(res, 200, { taskId: id, events });
         return;
       }
 
       if (method === 'GET' && url.pathname === '/api/files/diff') {
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
         const task = url.searchParams.get('task');
         const mission = url.searchParams.get('mission');
         if (task) {
-          const id = resolveId(task);
+          const id = resolveId(task, sc.projectId);
           if (!isTaskId(id)) { send(res, 400, { error: 'NOT_A_TASK_ID', id }); return; }
-          const created = store.read(id).find((e) => e.type === 'TASK_CREATED');
-          const worktree = (created?.payload as any)?.worktree ?? opts.projectRoot;
+          const created = sc.store.read(id).find((e) => e.type === 'TASK_CREATED');
+          const worktree = (created?.payload as any)?.worktree ?? sc.root;
           const base = (created?.payload as any)?.baseSha ?? 'HEAD';
           send(res, 200, { taskId: id, from: base, to: 'HEAD',
             diff: diff(base, 'HEAD', worktree) });
           return;
         }
         if (mission) {
-          const id = resolveId(mission);
-          const rec = missions.mission(id);
+          const id = resolveId(mission, sc.projectId);
+          const rec = sc.missions.mission(id);
           if (!rec) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
           const line = integrationLine(rec);
           send(res, 200, { missionId: id, ...line,
-            diff: diff(line.from, line.to, opts.projectRoot) });
+            diff: diff(line.from, line.to, sc.root) });
           return;
         }
         send(res, 400, { error: 'TASK_OR_MISSION_REQUIRED' });
@@ -358,10 +397,11 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
               + `data: ${JSON.stringify(e)}\n\n`);
           }
         };
-        const tailer = new EventTailer({ store, onEvents: write });
+        const sc = scoped(url) ?? { store, missions, projectId: opts.projectId, root: opts.projectRoot };
+        const tailer = new EventTailer({ store: sc.store, onEvents: write });
         // Replay from the LOG at the client's cursor, then stream. A resuming
         // client misses nothing, because the socket was never the record.
-        if (lastId) tailer.seek(cursorFromLastId(store, lastId));
+        if (lastId) tailer.seek(cursorFromLastId(sc.store, lastId));
         else tailer.seekToEnd();
         write(tailer.drain());
         res.write(': connected\n\n');
@@ -597,7 +637,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     const m = /^\/api\/missions\/([^/]+)\/(compile|plan|run|cancel|confirm|evaluate)$/
       .exec(url.pathname);
     if (!m) { send(res, 404, { error: 'NO_SUCH_ROUTE', path: url.pathname }); return; }
-    const id = resolveId(decodeURIComponent(m[1]));
+    const id = resolveId(decodeURIComponent(m[1]), opts.projectId);
     if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
     if (!missions.mission(id)) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
     const action = m[2];

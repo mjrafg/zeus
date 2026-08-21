@@ -19,6 +19,7 @@ import { startWebServer, RunningServer, routeTable, READ_ROUTES, WRITE_ROUTES } 
 import { ensureToken, tokenMatches, tokenPath } from '../src/web/token';
 import { eventId, parseEventId, cursorFromLastId, since, advance } from '../src/web/tail';
 import { missionStatusView, missionReportView } from '../src/views';
+import { findingsDigest } from '../src/mission/consent';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-web-'));
 let seq = 0;
@@ -50,6 +51,29 @@ function get(url: string, headers: Record<string, string> = {}):
         resolve({ status: res.statusCode ?? 0, body, json });
       });
     }).on('error', reject);
+  });
+}
+
+function post(server: RunningServer, p: string, body: unknown):
+  Promise<{ status: number; json: any }> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body ?? {});
+    const u = new URL(server.url + p);
+    const req = http.request({
+      hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: 'POST',
+      headers: { authorization: `Bearer ${server.token}`,
+        'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) },
+    }, (res) => {
+      let raw = '';
+      res.on('data', (c) => { raw += c; });
+      res.on('end', () => {
+        let json: any = null;
+        try { json = JSON.parse(raw); } catch { /* not json */ }
+        resolve({ status: res.statusCode ?? 0, json });
+      });
+    });
+    req.on('error', reject);
+    req.end(payload);
   });
 }
 
@@ -185,7 +209,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 8 && WRITE_ROUTES.length === 7,
+      READ_ROUTES.length === 9 && WRITE_ROUTES.length === 7,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -267,7 +291,7 @@ export async function webSuite(): Promise<void> {
     } finally { await server?.close(); }
   }
 
-  section('control center: write routes do not exist yet');
+  section('control center: the route table is closed');
   {
     const fx = fixture();
     let server: RunningServer | null = null;
@@ -275,14 +299,186 @@ export async function webSuite(): Promise<void> {
       server = await startWebServer({
         projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
       });
-      const post = await new Promise<number>((resolve) => {
-        const req = http.request(`${server!.url}/api/missions`, {
-          method: 'POST', headers: { authorization: `Bearer ${server!.token}` },
-        }, (res) => { res.resume(); resolve(res.statusCode ?? 0); });
-        req.end('{}');
+      const unknownWrite = await post(server, '/api/missions/M-0001/deploy', {});
+      const unknownRead = await get(`${server.url}/api/anything`,
+        { authorization: `Bearer ${server.token}` });
+      check('WW1: a POST outside the route table is 404, never a default action',
+        unknownWrite.status === 404, String(unknownWrite.status));
+      check('WW2: and so is an unknown GET',
+        unknownRead.status === 404, String(unknownRead.status));
+      check('WW3: an unauthenticated write is refused before it is routed',
+        (await new Promise<number>((resolve) => {
+          const req = http.request(`${server!.url}/api/missions`, { method: 'POST' },
+            (res) => { res.resume(); resolve(res.statusCode ?? 0); });
+          req.end('{"goal":"x"}');
+        })) === 401);
+      check('WW4: and nothing was created by it',
+        fx.missions.list().length === 0, String(fx.missions.list().length));
+    } finally { await server?.close(); }
+  }
+  section('control center: the API is a client, not a second engine');
+  {
+    // TWIN FIXTURES. The same operation is driven once by the CLI and once by
+    // the API, and the resulting event logs must agree. This is the test that
+    // stops the web quietly growing its own opinion about when a contract is
+    // accepted — the most important assertion in this file.
+    const cliFx = fixture();
+    const apiFx = fixture();
+    const goal = 'a goal for the twins';
+
+    const cliRec = cliFx.missions.create(goal, 'base0');
+
+    let server: RunningServer | null = null;
+    let created: any = null;
+    try {
+      server = await startWebServer({
+        projectRoot: apiFx.root, stateRoot: apiFx.state, projectId: 'p', port: 0,
       });
-      check('WW1: W1a ships read-only — a write route answers 501, not silently succeeds',
-        post === 501, String(post));
+      created = await post(server, '/api/missions', { goal });
+    } finally { await server?.close(); }
+
+    const cliEvents = cliFx.store.read(cliRec.missionId);
+    const apiEvents = apiFx.store.read(created.json.missionId);
+    const strip = (e: any) => ({ type: e.type, ...JSON.parse(JSON.stringify(e.payload)) });
+    const norm = (e: any) => {
+      const o = strip(e);
+      delete o.createdAt; delete o.baseSha;   // clock and repo head differ by construction
+      return o;
+    };
+
+    check('WC1: create through the API produces the same event types as the CLI',
+      cliEvents.map((e) => e.type).join(',') === apiEvents.map((e) => e.type).join(','),
+      `${cliEvents.map((e) => e.type)} vs ${apiEvents.map((e) => e.type)}`);
+    check('WC2: and the same payloads, modulo the clock and the repository head',
+      JSON.stringify(cliEvents.map(norm)) === JSON.stringify(apiEvents.map(norm)),
+      JSON.stringify(apiEvents.map(norm)));
+    check('WC3: the API returns the same record shape the CLI would print',
+      created.status === 201 && created.json.missionId === 'p/M-0001'
+      && created.json.goal === goal, JSON.stringify(created.json?.missionId));
+    check('WC4: a create with no goal is refused rather than inventing one',
+      true, 'checked below');
+  }
+
+  section('control center: consent over HTTP refuses what it cannot verify');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('goal', 'base0');
+    const oracle = {
+      missionId: rec.missionId, version: 1, acceptanceMode: 'REQUIRED_CONSENT',
+      compiledAt: 'now', compilerProviderId: 'mock', criticProviderId: 'mock',
+      criteria: [{ criterionId: `${rec.missionId}/C-0001`, type: 'EXECUTABLE', statement: 's',
+        evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' },
+        affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'] }],
+    };
+    fx.missions.recordOracle(rec.missionId, oracle as any, 'h', { ok: true });
+    const findings = [{ code: 'BEYOND_GOAL', criterionId: `${rec.missionId}/C-0001`, detail: 'too broad' }];
+    fx.missions.recordCritique(rec.missionId, {
+      valid: true, findings, modeOpinion: null, promptHash: 'p', hashes: {},
+      violations: [], criticProviderId: 'mock', reconciliation: {},
+    });
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+      });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const subject = await get(`${server.url}/api/missions/M-0001/consent`, auth);
+      const digest = subject.json.oracle.digest;
+
+      check('WD1: the consent route renders what a human must read, with a digest',
+        subject.status === 200 && subject.json.oracle.findings.length === 1
+        && typeof digest === 'string' && digest.length >= 16, JSON.stringify(digest));
+      check('WD1b: the digest is stable across recomputation',
+        digest === findingsDigest(findings), digest);
+      check('WD1c: and changes when the findings change',
+        findingsDigest(findings) !== findingsDigest([...findings, { code: 'X', detail: 'y' }]));
+
+      const stale = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'oracle', version: 1, findingsDigest: 'deadbeefdeadbeefdeadbeefdeadbeef', decision: 'ACCEPT' });
+      check('WD2: a stale digest is REFUSED',
+        stale.status === 409 && stale.json.error === 'DIGEST_MISMATCH', JSON.stringify(stale.json?.error));
+      check('WD2b: and the refusal returns the CURRENT findings to render',
+        stale.json.current.findings.length === 1
+        && stale.json.current.digest === digest, JSON.stringify(stale.json?.current?.digest));
+      check('WD2c: nothing was accepted by the refused confirm',
+        !fx.missions.mission(rec.missionId)!.oracleAccepted);
+
+      const drifted = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'oracle', version: 7, findingsDigest: digest, decision: 'ACCEPT' });
+      check('WD3: a version the log does not hold is refused as drift, distinctly',
+        drifted.status === 409 && drifted.json.error === 'VERSION_DRIFT',
+        JSON.stringify(drifted.json?.error));
+
+      const ok = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'oracle', version: 1, findingsDigest: digest, decision: 'ACCEPT' });
+      check('WD4: the correct digest is accepted',
+        ok.status === 200 && ok.json.decision === 'ACCEPT', JSON.stringify(ok.json));
+      const after = fx.missions.mission(rec.missionId)!;
+      check('WD4b: and it is recorded as user-confirmed, with the findings it stood despite',
+        after.oracleAccepted && after.acceptedBy === 'user-confirmed'
+        && after.acceptedDespite.length === 1, JSON.stringify(after.acceptedDespite));
+      const stops = fx.store.read(rec.missionId).filter((e) => e.type === 'PLAN_STOP_DECISION');
+      check('WD4c: the rendering the human saw is on the log, in the CLI shape',
+        stops.length === 1 && (stops[0].payload as any).decision === 'ACCEPTED'
+        && (stops[0].payload as any).rendered.length === 1,
+        JSON.stringify((stops[0]?.payload as any)?.rendered));
+
+      const again = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'oracle', version: 1, findingsDigest: digest, decision: 'ACCEPT' });
+      check('WD5: confirming an already-accepted oracle is refused, not repeated',
+        again.status === 409 && again.json.error === 'NOTHING_TO_CONFIRM',
+        JSON.stringify(again.json?.error));
+
+      const noPlan = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'plan', version: 1, findingsDigest: digest, decision: 'ACCEPT' });
+      check('WD6: a plan with no critique on the log cannot be consented to',
+        noPlan.status === 409 && noPlan.json.error === 'NOTHING_TO_CONFIRM',
+        JSON.stringify(noPlan.json?.detail));
+
+      const bad = await post(server, '/api/missions/M-0001/confirm',
+        { kind: 'nonsense', version: 1, findingsDigest: digest, decision: 'ACCEPT' });
+      check('WD7: a malformed consent request is a 400, never a shrug',
+        bad.status === 400 && bad.json.error === 'BAD_REQUEST', JSON.stringify(bad.json?.error));
+
+      const noGoal = await post(server, '/api/missions', {});
+      check('WC4b: a create with no goal is refused rather than inventing one',
+        noGoal.status === 400 && noGoal.json.error === 'GOAL_REQUIRED', JSON.stringify(noGoal.json));
+    } finally { await server?.close(); }
+  }
+
+  section('control center: run is detached, cancel is the cross-process path');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('goal', 'base0');
+    let server: RunningServer | null = null;
+    const spawned: string[] = [];
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        spawnRun: (missionId) => { spawned.push(missionId); return { ok: true, pid: 4242, detail: 'spawned' }; },
+      });
+      const run = await post(server, '/api/missions/M-0001/run', {});
+      check('WX1: run answers 202 — accepted for execution elsewhere, not completed here',
+        run.status === 202 && run.json.pid === 4242, JSON.stringify(run.json));
+      check('WX2: it spawned the mission rather than running it in the server process',
+        spawned.join(',') === rec.missionId, spawned.join(','));
+
+      const cancel = await post(server, '/api/missions/M-0001/cancel', { reason: 'from the console' });
+      check('WX3: cancel goes through the registry path the CLI uses',
+        cancel.status === 200 && cancel.json.cancelled === true, JSON.stringify(cancel.json));
+      const after = fx.missions.mission(rec.missionId)!;
+      check('WX4: and classifies CANCELLED, never a resource limit',
+        after.terminated && after.terminationReason === 'CANCELLED',
+        `${after.terminationReason}`);
+      const types = fx.store.read(rec.missionId).map((e) => e.type);
+      check('WX5: the cancel produced the same events the CLI cancel does',
+        types.includes('CANCEL_REQUESTED') && types.includes('MISSION_TERMINATED'),
+        types.join(','));
+
+      const opless = await post(server, '/api/missions/M-0001/compile', {});
+      check('WX6: an operation the server was not given is 503, not a stub success',
+        opless.status === 503, String(opless.status));
     } finally { await server?.close(); }
   }
 }

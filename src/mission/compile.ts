@@ -237,6 +237,14 @@ export interface CritiqueResult {
   reconciliation: { consistent: boolean; unsupportedClaims: string[] };
   criticProviderId: string;
   infrastructureFailure: string | null;
+  /**
+   * What the critic's provider reported it cost.
+   *
+   * Attached at runtime since the transport work, but absent from this
+   * interface — so a caller wanting to record the spend could not see it
+   * without an `any`. Declared now: pre-execution spend is spend.
+   */
+  providerUsage?: unknown;
 }
 
 const CRITIQUE_HEADER = [

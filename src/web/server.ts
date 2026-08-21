@@ -23,6 +23,10 @@ import {
   costBreakdown, integrationLine,
 } from '../views';
 import { ensureToken, offeredToken, tokenMatches } from './token';
+import {
+  ConsentRequest, consentSubject, evaluateConsent,
+} from '../mission/consent';
+import { CompileResult, PlanOperationResult, OperationContext } from '../mission/operations';
 import { EventTailer, cursorFromLastId, eventId } from './tail';
 import { UI_HTML } from './ui';
 
@@ -36,6 +40,17 @@ export interface WebServerOptions {
   spawnRun?: (missionId: string) => { ok: boolean; pid: number | null; detail: string };
   /** Injected reader for git diffs, so the route is testable and read-only. */
   diff?: (from: string, to: string, cwd: string) => string;
+  /**
+   * The engine operations the write routes call.
+   *
+   * Injected rather than constructed here so the server cannot grow its own
+   * copy: whatever is passed is the same function the CLI invokes.
+   */
+  operations?: {
+    compile(missionId: string): Promise<CompileResult>;
+    plan(missionId: string): Promise<PlanOperationResult>;
+    evaluate(missionId: string, opts: { full: boolean }): Promise<unknown>;
+  };
   onLog?: (line: string) => void;
 }
 
@@ -59,6 +74,7 @@ export const READ_ROUTES = [
   'GET /api/missions/:id/report',
   'GET /api/tasks/:id',
   'GET /api/files/diff',
+  'GET /api/missions/:id/consent',
   'GET /api/events/stream',
 ] as const;
 
@@ -81,6 +97,23 @@ export const WRITE_ROUTES = [
  */
 export function routeTable(): string[] {
   return [...READ_ROUTES, ...WRITE_ROUTES];
+}
+
+/** Reads a JSON body, bounded. An unbounded body is a denial of service. */
+function readBody(req: http.IncomingMessage): Promise<any> {
+  return new Promise((resolve) => {
+    let raw = '';
+    let tooBig = false;
+    req.on('data', (c) => {
+      raw += c;
+      if (raw.length > 1_000_000) { tooBig = true; req.destroy(); }
+    });
+    req.on('end', () => {
+      if (tooBig) { resolve({}); return; }
+      try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); }
+    });
+    req.on('error', () => resolve({}));
+  });
 }
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
@@ -211,6 +244,17 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         return;
       }
 
+      const consentMatch = /^\/api\/missions\/([^/]+)\/consent$/.exec(url.pathname);
+      if (method === 'GET' && consentMatch) {
+        const id = resolveId(decodeURIComponent(consentMatch[1]));
+        if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
+        const oracle = consentSubject(missions, id, 'oracle');
+        const plan = consentSubject(missions, id, 'plan');
+        if (!oracle) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
+        send(res, 200, { missionId: id, oracle, plan });
+        return;
+      }
+
       const taskMatch = /^\/api\/tasks\/([^/]+)$/.exec(url.pathname);
       if (method === 'GET' && taskMatch) {
         const id = resolveId(decodeURIComponent(taskMatch[1]));
@@ -277,8 +321,10 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       }
 
       if (method === 'POST' && url.pathname.startsWith('/api/')) {
-        send(res, 501, { error: 'NOT_IMPLEMENTED',
-          detail: 'write routes arrive with W1b; this build is read-only' });
+        void readBody(req).then(async (body) => {
+          try { await handleWrite(url, body, res); }
+          catch (e: any) { send(res, 500, { error: 'INTERNAL', detail: String(e?.message ?? e) }); }
+        });
         return;
       }
 
@@ -288,6 +334,125 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       send(res, 500, { error: 'INTERNAL', detail: String(e?.message ?? e) });
     }
   });
+
+  async function handleWrite(url: URL, body: any, res: http.ServerResponse): Promise<void> {
+    if (url.pathname === '/api/missions') {
+      const goal = typeof body?.goal === 'string' ? body.goal.trim() : '';
+      if (!goal) { send(res, 400, { error: 'GOAL_REQUIRED' }); return; }
+      const head = (() => {
+        try {
+          return require('child_process').execFileSync('git',
+            ['-C', opts.projectRoot, 'rev-parse', 'HEAD'],
+            { encoding: 'utf8', timeout: 15_000 }).trim();
+        } catch { return 'unknown'; }
+      })();
+      const rec = missions.create(goal, head);
+      send(res, 201, missionStatusView(missions, opts.projectRoot, rec.missionId));
+      return;
+    }
+
+    const m = /^\/api\/missions\/([^/]+)\/(compile|plan|run|cancel|confirm|evaluate)$/
+      .exec(url.pathname);
+    if (!m) { send(res, 404, { error: 'NO_SUCH_ROUTE', path: url.pathname }); return; }
+    const id = resolveId(decodeURIComponent(m[1]));
+    if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
+    if (!missions.mission(id)) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
+    const action = m[2];
+
+    if (action === 'compile' || action === 'plan' || action === 'evaluate') {
+      if (!opts.operations) {
+        send(res, 503, { error: 'OPERATIONS_UNAVAILABLE',
+          detail: 'this server was started without engine operations' });
+        return;
+      }
+      const result = action === 'compile' ? await opts.operations.compile(id)
+        : action === 'plan' ? await opts.operations.plan(id)
+          : await opts.operations.evaluate(id, { full: body?.full === true });
+      // Whatever the operation decided, decided. The route reports it and adds
+      // nothing: an HTTP layer that could turn a stop into an acceptance would
+      // be a second engine with a different opinion.
+      send(res, 200, result);
+      return;
+    }
+
+    if (action === 'run') {
+      const spawnRun = opts.spawnRun;
+      if (!spawnRun) { send(res, 503, { error: 'SPAWN_UNAVAILABLE' }); return; }
+      // DETACHED, always. A mission outlives the console by design.
+      const spawned = spawnRun(id);
+      send(res, spawned.ok ? 202 : 500, { missionId: id, ...spawned });
+      return;
+    }
+
+    if (action === 'cancel') {
+      const reason = typeof body?.reason === 'string' && body.reason.trim()
+        ? body.reason.trim() : 'cancelled from the control center';
+      // The same cross-process path `zeus cancel` uses: the spawned mission is
+      // a different OS process, and the run registry is how it is reached.
+      const outcome = missions.cancel(id, reason);
+      send(res, 200, { missionId: id, ...outcome });
+      return;
+    }
+
+    // ---- confirm: the consent boundary ------------------------------------
+    const req: ConsentRequest = {
+      kind: body?.kind, version: Number(body?.version),
+      findingsDigest: String(body?.findingsDigest ?? ''),
+      decision: body?.decision,
+    };
+    const verdict = evaluateConsent(missions, id, req);
+    if (!verdict.ok) {
+      // 409, and the CURRENT findings come back: a refusal that does not say
+      // what to read next just makes the operator guess.
+      send(res, verdict.code === 'BAD_REQUEST' ? 400 : 409, {
+        error: verdict.code, detail: verdict.message, current: verdict.current,
+      });
+      return;
+    }
+    const subject = verdict.subject;
+    const rendered = subject.findings.map((f: any) =>
+      `${f?.severity ?? f?.code ?? 'finding'}: ${f?.detail ?? JSON.stringify(f)}`);
+
+    if (req.decision === 'REFUSE') {
+      missions.recordPlanStopDecision(id, {
+        version: subject.version, rendered,
+        decision: subject.kind === 'plan' ? 'REFUSED_NO_CONSENT' : 'ORACLE_REFUSED',
+        decidedBy: 'user-confirmed', deferred: false,
+      });
+      send(res, 200, { missionId: id, decision: 'REFUSE', kind: subject.kind,
+        version: subject.version });
+      return;
+    }
+
+    if (subject.kind === 'oracle') {
+      const rec = missions.mission(id)!;
+      const oracle = rec.oracle as any;
+      missions.acceptOracle(id, {
+        acceptanceMode: oracle?.acceptanceMode ?? 'REQUIRED_CONSENT',
+        acceptedBy: 'user-confirmed',
+        modeInputs: { confirmedFromWeb: true, findingsDigest: subject.digest },
+        modeReasons: [`a human confirmed this oracle with ${subject.findings.length} finding(s) standing`],
+        escalatedByCritic: false,
+        acceptedDespite: subject.findings as Array<{ code: string; criterionId?: string }>,
+      });
+    } else {
+      const recorded = [...missions.events.read(id)].reverse()
+        .find((e) => e.type === 'PLAN_RECORDED'
+          && (e.payload as any)?.version === subject.version)!;
+      const graph = (recorded.payload as any).plan;
+      missions.acceptPlan(id, graph, {
+        acceptedBy: 'user-confirmed', acceptedDespite: rendered,
+      });
+    }
+    missions.recordPlanStopDecision(id, {
+      version: subject.version, rendered, decision: 'ACCEPTED',
+      decidedBy: 'user-confirmed', deferred: false,
+    });
+    send(res, 200, {
+      missionId: id, decision: 'ACCEPT', kind: subject.kind, version: subject.version,
+      findingsDigest: subject.digest, acceptedDespite: subject.findings.length,
+    });
+  }
 
   await new Promise<void>((resolve) => server.listen(opts.port ?? 0, host, resolve));
   const addr = server.address() as AddressInfo;

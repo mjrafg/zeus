@@ -39,6 +39,7 @@ import {
 } from './mission/progress';
 import { missionStatusView, missionListView, missionReportView } from './views';
 import { startWebServer, defaultSpawnRun } from './web/server';
+import { compileMissionOracle, planMissionGraph } from './mission/operations';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -1049,88 +1050,41 @@ async function cmdMission(argv: string[]): Promise<number> {
       const raw = rest.find((a) => !a.startsWith('--'));
       if (!raw) { err('usage: zeus mission compile <id> [--mock]'); return 2; }
       const id = resolve(raw);
-      const rec = guard(() => missions.mission(id));
-      if (rec === null) return 2;
-      if (!rec) { err(`unknown mission ${id}`); return 2; }
-      if (rec.terminated) { err(`${id} is terminated`); return 1; }
-
       const mock = rest.includes('--mock');
       const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
-      const context = projectContextFor(ctx.root, ctx.cfg);
-      const policy = defaultPolicy(ctx.root, ctx.root);
 
-      const compiled = await compileOracle({
-        missionId: id, projectId: eng.projectId, goal: rec.goal, context,
-        provider: eng.opts.providers.planner, supervisor: eng.opts.supervisor,
-        policy, baseSha: rec.baseSha,
-      });
-      if (!compiled.ok) {
-        // A provider that could not answer is infrastructure. The mission has
-        // not moved and the command can simply be run again.
-        err(`${C.r}✗${C.x} compiler unavailable: ${compiled.infrastructureFailure}`);
-        err(`  ${C.dim}the mission is unchanged; retry when the provider is back${C.x}`);
-        return 3;
+      // THE SAME OPERATION THE WEB CALLS. The CLI renders it; it does not
+      // decide it. Two callers with two copies of this sequence would be two
+      // engines with two opinions about when a contract is accepted.
+      const result = await compileMissionOracle({
+        missions, engine: eng, projectRoot: ctx.root,
+        context: projectContextFor(ctx.root, ctx.cfg),
+        policy: defaultPolicy(ctx.root, ctx.root),
+      }, id, { wantsReview: rest.includes('--review-oracle') });
+
+      if (!result.ok && result.kind !== 'REJECTED') {
+        if (result.kind === 'INFRASTRUCTURE') {
+          err(`${C.r}✗${C.x} compiler unavailable: ${result.detail}`);
+          err(`  ${C.dim}the mission is unchanged; retry when the provider is back${C.x}`);
+          return 3;
+        }
+        err(result.kind === 'TERMINATED' ? `${id} is terminated` : `unknown mission ${id}`);
+        return result.kind === 'TERMINATED' ? 1 : 2;
       }
-      if (!compiled.validation.valid) {
-        // The attempt is evidence even though the mission has not moved.
-        missions.recordCompileRejected(id, {
-          findings: compiled.validation.findings, criteria: compiled.criteria,
-          compilerProviderId: compiled.compilerProviderId,
-          structuredHash: compiled.structuredHash,
-          ...(compiled.providerUsage ? { providerUsage: compiled.providerUsage } : {}),
-        });
+      if (!result.ok) {
         out(`${C.r}✗${C.x} the compiled criteria are not a contract:`);
-        for (const f of compiled.validation.findings) {
-          out(`  ${C.r}${f.code}${C.x} ${f.criterionId ?? ''} ${C.dim}${f.detail}${C.x}`);
+        for (const f of result.findings) {
+          out(`  ${C.r}${f.code}${C.x} ${(f as any).criterionId ?? ''} ${C.dim}${f.detail}${C.x}`);
         }
         out(`  ${C.dim}recorded as ORACLE_COMPILE_REJECTED; the mission is unchanged and can be recompiled${C.x}`);
         return 1;
       }
 
-      const critique = await critiqueOracle({
-        missionId: id, projectId: eng.projectId, goal: rec.goal, criteria: compiled.criteria,
-        context, provider: eng.opts.providers.reviewer, supervisor: eng.opts.supervisor,
-        policy, baseSha: rec.baseSha,
-      });
-      const criticFindings: CriticFindingRef[] = critique.valid ? critique.findings : [];
-      const proposal = proposeAcceptance(compiled.criteria, context,
-        critique.valid ? critique.modeOpinion : null, criticFindings);
-
-      const oracle: Oracle = {
-        missionId: id, version: (rec.oracleVersion ?? 0) + 1, criteria: compiled.criteria,
-        acceptanceMode: proposal.mode, compiledAt: new Date().toISOString(),
-        compilerProviderId: compiled.compilerProviderId, criticProviderId: critique.criticProviderId,
-      };
-      missions.recordOracle(id, oracle, compiled.structuredHash, compiled.validation,
-        compiled.providerUsage);
-      missions.recordCritique(id, {
-        valid: critique.valid, findings: critique.findings, modeOpinion: critique.modeOpinion,
-        promptHash: critique.payload.promptHash, hashes: critique.payload.hashes,
-        violations: critique.payload.violations, criticProviderId: critique.criticProviderId,
-        reconciliation: critique.reconciliation,
-      });
-
-      const wantsReview = rest.includes('--review-oracle');
-      // The fast path exists for a critique that objected to NOTHING. Any
-      // finding means a human looks; the mode alone is no longer enough.
-      const mayProceed = proposal.autoAcceptable
-        && (proposal.mode === 'AUTO' || (proposal.mode === 'OPTIONAL_CONFIRMATION' && !wantsReview));
-      const acceptedBy: 'auto' | 'default-policy' | null = mayProceed
-        ? (proposal.mode === 'AUTO' ? 'auto' : 'default-policy') : null;
-      if (acceptedBy) {
-        missions.acceptOracle(id, {
-          acceptanceMode: proposal.mode, acceptedBy,
-          modeInputs: proposal.computed.inputs, modeReasons: proposal.computed.reasons,
-          escalatedByCritic: proposal.escalatedByCritic,
-          escalatedByFindings: proposal.escalatedByFindings,
-          acceptedDespite: [], findingsFloor: proposal.floor,
-        });
-      }
-
+      const { oracle, proposal, critique, acceptedBy } = result;
       if (json) {
-        out(JSON.stringify({ oracle, validation: compiled.validation,
+        out(JSON.stringify({ oracle, validation: result.validation,
           critique: { valid: critique.valid, findings: critique.findings,
-            modeOpinion: critique.modeOpinion, violations: critique.payload.violations },
+            modeOpinion: critique.modeOpinion },
           mode: proposal, accepted: acceptedBy }, null, 1));
         return acceptedBy ? 0 : 4;
       }
@@ -1146,7 +1100,7 @@ async function cmdMission(argv: string[]): Promise<number> {
         out(`  ${C.r}critique INVALID${C.x} — the payload was refused, so there is no second opinion`);
       }
       // Findings BEFORE the verdict, always.
-      renderFindings(criticFindings);
+      renderFindings(critique.findings);
       out(`  ${C.b}acceptance mode${C.x} ${proposal.mode}`
         + `${proposal.escalatedByCritic ? ` ${C.y}(critic escalated)${C.x}` : ''}`
         + `${proposal.escalatedByFindings ? ` ${C.y}(findings escalated)${C.x}` : ''}`);
@@ -1170,7 +1124,7 @@ async function cmdMission(argv: string[]): Promise<number> {
           { id: 'recompile', label: 'send the findings back to the compiler and try again' },
           { id: 'accept', label: 'accept it anyway, with the findings on the record' },
         ], 'abort');
-        if (choice === 'accept') return acceptDespite(missions, id, proposal, criticFindings, json);
+        if (choice === 'accept') return acceptDespite(missions, id, proposal, critique.findings, json);
         if (choice === 'recompile') {
           return recompileOracle(ctx, missions, engineFor(ctx.root, ctx.cfg, { mock }), id, json);
         }
@@ -1857,10 +1811,30 @@ async function cmdWeb(argv: string[]): Promise<number> {
   }
   const engine = engineFor(ctx.root, ctx.cfg);
 
+  // The SAME operations the CLI's own subcommands call. Handed in rather than
+  // constructed inside the server, so the server cannot acquire its own copy.
+  const opCtx = () => ({
+    missions: new MissionRegistry({
+      events: engine.events, projectId: engine.projectId, stateRoot: engine.stateRoot,
+    }),
+    engine, projectRoot: ctx.root,
+    context: projectContextFor(ctx.root, ctx.cfg),
+    policy: defaultPolicy(ctx.root, ctx.root),
+  });
+
   const server = await startWebServer({
     projectRoot: ctx.root, stateRoot: engine.stateRoot, projectId: engine.projectId,
     port, host,
     spawnRun: (missionId) => defaultSpawnRun(ctx.root, missionId),
+    operations: {
+      compile: (missionId) => compileMissionOracle(opCtx(), missionId),
+      plan: (missionId) => planMissionGraph(opCtx(), missionId),
+      evaluate: async (missionId) => ({
+        error: 'NOT_WIRED',
+        detail: 'evaluate over HTTP arrives with the CLI evaluate rewire; use zeus mission evaluate',
+        missionId,
+      }),
+    },
   });
 
   out(`${C.b}zeus web${C.x} ${C.dim}${engine.projectId}${C.x}`);

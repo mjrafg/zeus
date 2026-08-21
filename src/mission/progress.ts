@@ -43,6 +43,27 @@ export function mergeMissionBudgets(over: Partial<MissionBudgets> = {}): Mission
   return { ...DEFAULT_MISSION_BUDGETS, ...over };
 }
 
+/**
+ * Budget revisions, replayed from the log in order.
+ *
+ * A raise is an event, not a flag and not a field someone edited: budgets are
+ * recomputed from the log on every cycle precisely so a restart cannot reset
+ * them, and a revision that lived anywhere else would be undone by the same
+ * mechanism that makes the rest of the budget trustworthy.
+ */
+export function applyBudgetRevisions(base: MissionBudgets, events: StoredEvent[]): MissionBudgets {
+  let out = { ...base };
+  for (const e of events) {
+    if (e.type !== 'MISSION_BUDGET_REVISED') continue;
+    const p = (e.payload ?? {}) as any;
+    const limit = String(p.limit ?? '') as keyof MissionBudgets;
+    const to = p.to;
+    if (!(limit in out) || typeof to !== 'number' || !Number.isFinite(to)) continue;
+    out = { ...out, [limit]: to };
+  }
+  return out;
+}
+
 /** The planned/reserve split. Planned work may not touch the reserve. */
 export function plannedAllowance(b: MissionBudgets): number {
   return Math.max(1, Math.floor(b.maxTasks * (1 - b.reserveFraction)));
@@ -207,6 +228,72 @@ export function clampAchievement(claimed: Achievement, derived: Achievement):
     return { achievement: derived, downgraded: true, reason: `claimed ${claimed}, the criteria derive ${derived}` };
   }
   return { achievement: claimed, downgraded: false, reason: null };
+}
+
+/* ------------------------------------------------------------------------ *
+ * Budget negotiation, at plan time
+ * ------------------------------------------------------------------------ */
+
+export interface BudgetNegotiation {
+  fits: boolean;
+  nodeCount: number;
+  /** Nodes plus one repair's headroom, which the reserve exists to fund. */
+  tasksNeeded: number;
+  maxTasks: number;
+  /**
+   * The planner's own summed estimate, in the dollars the prompt asks for.
+   * Null when no node offered one — an absent estimate is not a zero estimate,
+   * and a cost stop on invented numbers would be worse than no stop.
+   */
+  estimatedCostUsd: number | null;
+  costCeilingUsd: number;
+  reasons: string[];
+  rendered: string;
+}
+
+/**
+ * Whether the plan the planner produced can be paid for.
+ *
+ * Asked BEFORE acceptance, because the alternative is what already happened
+ * once: a budget sized for a small repository, a goal that genuinely needed
+ * more nodes, and a mission that died at task five having spent the money to
+ * get there. A plan that does not fit is a conversation, not a failure — the
+ * budget may be the wrong size, or the plan may be, and only a person can say
+ * which.
+ */
+export function negotiateBudget(nodes: Array<{ estimatedCost?: number }>,
+  budgets: MissionBudgets): BudgetNegotiation {
+  const nodeCount = nodes.length;
+  const tasksNeeded = nodeCount + 1;                  // one repair, from reserve
+  const reasons: string[] = [];
+
+  const estimates = nodes
+    .map((n) => n.estimatedCost)
+    .filter((c): c is number => typeof c === 'number' && Number.isFinite(c) && c > 0);
+  const estimatedCostUsd = estimates.length
+    ? Number(estimates.reduce((a, b) => a + b, 0).toFixed(2))
+    : null;
+
+  if (tasksNeeded > budgets.maxTasks) {
+    reasons.push(`this plan needs ${nodeCount} task(s) plus one repair = ${tasksNeeded}, `
+      + `and the budget is ${budgets.maxTasks}`);
+  }
+  if (estimatedCostUsd !== null && estimatedCostUsd > budgets.costCeilingUsd) {
+    reasons.push(`the planner ESTIMATES ~$${estimatedCostUsd.toFixed(2)} across ${estimates.length} `
+      + `node(s), and the ceiling is $${budgets.costCeilingUsd.toFixed(2)}`);
+  }
+
+  const fits = reasons.length === 0;
+  const rendered = fits
+    ? `${nodeCount} task(s) within a budget of ${budgets.maxTasks}`
+      + (estimatedCostUsd === null
+        ? '; the planner gave no cost estimate'
+        : `; estimated ~$${estimatedCostUsd.toFixed(2)} of a $${budgets.costCeilingUsd.toFixed(2)} ceiling`)
+    : `${reasons.join('; ')}. Options: raise the budget for this mission, `
+      + 'ask the planner to re-scope smaller, or abort.';
+
+  return { fits, nodeCount, tasksNeeded, maxTasks: budgets.maxTasks,
+    estimatedCostUsd, costCeilingUsd: budgets.costCeilingUsd, reasons, rendered };
 }
 
 /* ------------------------------------------------------------------------ *

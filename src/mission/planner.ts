@@ -19,7 +19,9 @@ import {
   PLAN_CRITIQUE_POLICY,
 } from '../engine/reviewcontext';
 import { MissionRecord, PlanGraph, TaskNode } from './types';
-import { PlanFinding, PlanValidation, validatePlanForOracle } from './plan';
+import {
+  CriterionScopeInput, PlanFinding, PlanValidation, validatePlanForOracle,
+} from './plan';
 import { Criterion, Oracle, ProjectContext } from './oracle';
 
 const str = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d);
@@ -82,12 +84,17 @@ export function normaliseNodes(missionId: string, raw: unknown, criteria: Criter
   });
 }
 
-const PLAN_HEADER = [
+export const PLAN_HEADER = [
   'Plan the work that will satisfy this mission contract. Reply with ONLY a',
   'JSON object: {"nodes":[{ "nodeId":"a-slug", "description":"...",',
   ' "dependsOn":["another-slug"], "preconditions":[], "reads":[], "writes":[],',
   ' "affectedCriteria":["C-0001"], "predictedEffects":[], "estimatedTier":"FAST",',
-  ' "estimatedCost":1, "risk":"LOW" }]}',
+  ' "estimatedCost":1.5, "risk":"LOW" }]}',
+  '',
+  'estimatedCost is YOUR ESTIMATE OF THE US DOLLAR COST of running that node,',
+  'and it is compared against the mission budget before the plan is accepted.',
+  'It is recorded and reported as an estimate, never as spend. Give a number',
+  'you actually believe; a placeholder makes the budget check meaningless.',
   '',
   'Do not invent an internal id format: use a short descriptive slug for nodeId',
   'and refer to dependencies by the same slug. Zeus assigns canonical ids.',
@@ -151,6 +158,27 @@ export interface PlanResult {
   raw: string;
 }
 
+/**
+ * The evaluator text a scope can be read out of.
+ *
+ * Only the evaluator, never the statement. A statement is prose written for a
+ * human — "zero implicit-any errors across src/" — and parsing prose for a
+ * path is exactly the guessing the scope check refuses to do. The evaluator is
+ * the machine-checkable half, so it is the half that gets parsed.
+ */
+export function scopeInputsFor(criteria: Criterion[]): CriterionScopeInput[] {
+  return criteria.map((c) => {
+    const ev = c.evaluator as any;
+    const texts: string[] = [];
+    if (ev?.kind === 'command' || ev?.kind === 'probe') {
+      if (typeof ev.command === 'string') texts.push(ev.command);
+    } else if (ev?.kind === 'rubric') {
+      for (const a of (ev.artifacts ?? [])) if (typeof a === 'string') texts.push(a);
+    }
+    return { criterionId: c.criterionId, texts };
+  });
+}
+
 export type OracleGate =
   | { ok: true; oracle: Oracle; criteria: Criterion[]; required: string[] }
   | { ok: false; code: 'NO_SUCH_MISSION' | 'ORACLE_NOT_COMPILED' | 'ORACLE_NOT_ACCEPTED'; message: string };
@@ -192,6 +220,7 @@ export function requireAcceptedOracle(
 /** Model call: propose a task graph for an accepted contract. */
 export async function planMission(input: PlanInput): Promise<PlanResult> {
   const required = input.criteria.filter((c) => c.required).map((c) => c.criterionId);
+  const scopeInputs = scopeInputsFor(input.criteria);
   const criteriaView = input.criteria.map((c) => ({
     criterionId: c.criterionId, slug: c.slug, required: c.required,
     statement: c.statement, type: c.type,
@@ -238,7 +267,7 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
   const graph: PlanGraph = { version: (input.prior?.version ?? 0) + 1, nodes };
   return {
     ok: true, infrastructureFailure: null, graph,
-    validation: validatePlanForOracle(graph, required),
+    validation: validatePlanForOracle(graph, required, scopeInputs),
     plannerProviderId: input.provider.id,
     ...(res.providerUsage ? { providerUsage: res.providerUsage } : {}),
     raw: res.raw ?? '',
@@ -268,11 +297,16 @@ export interface PlanCritique {
   providerUsage?: unknown;
 }
 
-const PLAN_CRITIQUE_HEADER = [
+export const PLAN_CRITIQUE_HEADER = [
   'Review this plan INDEPENDENTLY against the goal and the accepted criteria.',
   'You have the goal, the contract, the plan, what this project can run, the',
   'evidence that exists, and the deterministic validator\'s findings. You do NOT',
   'have the planner\'s reasoning or any previous critique: form your own.',
+  '',
+  'FOR EACH REQUIRED CRITERION: can the union of the plan\'s writes plausibly',
+  'move it from FAILED to PROVEN? If not, say which criterion and why. A plan',
+  'whose nodes name a criterion but touch a fraction of what the criterion is',
+  'evaluated over will report FAILED after the work is paid for.',
   '',
   'Report: work a criterion needs that no node does; work beyond the goal;',
   'ordering that cannot succeed; interference the validator flagged that the plan',

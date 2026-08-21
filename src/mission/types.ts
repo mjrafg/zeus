@@ -144,6 +144,14 @@ export const MISSION_EVENT_TYPES = [
   'MISSION_PROGRESS',
   'MISSION_RECONCILIATION',
   'SELFTEST_LIVE',
+  // What a human was SHOWN before a plan was accepted or refused, and what
+  // they decided. Without it, "accepted despite findings" records the findings
+  // and not the rendering, so a later reader cannot tell what was on screen.
+  'PLAN_STOP_DECISION',
+  // A budget raised deliberately, with old and new values. Budgets are
+  // recomputed from the log every cycle, so a revision has to be an EVENT or
+  // it would not survive a restart.
+  'MISSION_BUDGET_REVISED',
 ] as const;
 
 export type MissionEventType = typeof MISSION_EVENT_TYPES[number];

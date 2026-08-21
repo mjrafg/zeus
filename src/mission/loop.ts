@@ -22,8 +22,8 @@ import {
 } from './schedule';
 import {
   EFFECT_MODEL_WRONG_THRESHOLD, MissionBudgets, ObservedEvidence, checkMissionBudgets,
-  clampAchievement, genuineFlips, mergeMissionBudgets, missionUsage, mismatchesForVersion,
-  plannedExhausted, progressFrom, providerSpendOf, verifyEffects,
+  applyBudgetRevisions, clampAchievement, genuineFlips, mergeMissionBudgets, missionUsage,
+  mismatchesForVersion, plannedExhausted, progressFrom, providerSpendOf, verifyEffects,
 } from './progress';
 
 /* ------------------------------------------------------------------------ *
@@ -102,7 +102,11 @@ export async function runMissionLoop(
   missions: MissionRegistry, host: LoopHost, opts: LoopOptions,
 ): Promise<LoopResult> {
   const { missionId, oracle } = opts;
-  const budgets = mergeMissionBudgets(opts.budgets);
+  // Revisions are replayed from the log, so a budget raised at plan time is
+  // still raised after a restart — and a caller's in-memory override cannot
+  // quietly outrank what the log records.
+  const budgets = applyBudgetRevisions(
+    mergeMissionBudgets(opts.budgets), missions.events.read(missionId));
   const maxCycles = opts.maxCycles ?? budgets.maxTasks * 3;
   const refusals: LoopResult['refusals'] = [];
 

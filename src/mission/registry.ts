@@ -289,8 +289,18 @@ export class MissionRegistry {
     return reconstructFromEvents(missionId, evs);
   }
 
-  recordPlan(missionId: string, plan: PlanGraph): void {
-    this.append(missionId, 'PLAN_RECORDED', { version: plan.version, plan, nodes: plan.nodes.length });
+  /**
+   * Records a proposed plan, with any non-blocking findings the deterministic
+   * validator raised against it.
+   *
+   * The findings ride with the plan because acceptance happens later, from the
+   * LOG, and a finding that is not on the log at that moment is a finding
+   * nobody re-reads at the point of decision.
+   */
+  recordPlan(missionId: string, plan: PlanGraph, scopeFindings: unknown[] = []): void {
+    this.append(missionId, 'PLAN_RECORDED', {
+      version: plan.version, plan, nodes: plan.nodes.length, scopeFindings,
+    });
   }
 
   invalidatePlan(missionId: string, reason: string, supersededBy: number | null): void {
@@ -587,6 +597,37 @@ export class MissionRegistry {
     provenRequired: number; consecutiveNoProgress: number;
   }): void {
     this.append(missionId, 'MISSION_PROGRESS', { ...spec });
+  }
+
+  /**
+   * What a human was SHOWN before deciding, and what they decided.
+   *
+   * Separate from PLAN_ACCEPTED's `acceptedDespite`, which records the
+   * findings. This records the RENDERING — the text that was on screen — so a
+   * later reader can tell what the decision was actually made against rather
+   * than reconstructing it from a list of codes.
+   */
+  recordPlanStopDecision(missionId: string, spec: {
+    version: number; rendered: string[]; decision: string;
+    decidedBy: string; deferred?: boolean;
+  }): void {
+    this.append(missionId, 'PLAN_STOP_DECISION', {
+      version: spec.version, rendered: spec.rendered, decision: spec.decision,
+      decidedBy: spec.decidedBy, deferred: spec.deferred === true,
+    });
+  }
+
+  /**
+   * Raises (or lowers) one mission budget, deliberately and on the record.
+   *
+   * Budgets are recomputed from the log every cycle so a restart cannot reset
+   * them. A revision therefore has to be an event, or the next recomputation
+   * would quietly undo it.
+   */
+  reviseBudget(missionId: string, spec: {
+    limit: string; from: number; to: number; reason: string; decidedBy: string;
+  }): void {
+    this.append(missionId, 'MISSION_BUDGET_REVISED', { ...spec });
   }
 
   /** A reconciliation between what the log says and what the world shows. */

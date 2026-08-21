@@ -22,7 +22,8 @@ export type PlanFindingCode =
   | 'SCHEMA_INVALID'
   | 'UNREACHABLE_NODE'
   | 'UNDECLARED_INTERFERENCE'
-  | 'CRITERION_UNCOVERED';
+  | 'CRITERION_UNCOVERED'
+  | 'CRITERION_SCOPE_MISMATCH';
 
 export interface PlanFinding {
   code: PlanFindingCode;
@@ -218,16 +219,153 @@ export function coverageFindings(graph: PlanGraph,
     }));
 }
 
+
+/* ------------------------------------------------------------------------ *
+ * Scope: does the plan write over as much ground as the criterion reads?
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The scope-bearing text of one criterion's evaluator.
+ *
+ * Deliberately a plain shape rather than an `Oracle` import: this file knows
+ * about plans and stays free of the contract layer, and the caller is the one
+ * that already holds both.
+ */
+export interface CriterionScopeInput {
+  criterionId: string;
+  /** Evaluator text only — command lines, probe commands, rubric artifacts. */
+  texts: string[];
+}
+
+/** A trailing-slash-normalised directory prefix, or null if not a scope. */
+function asPrefix(token: string): string | null {
+  let t = token.trim().replace(/^['"]|['"]$/g, '');
+  if (!t || t.startsWith('-')) return null;
+  // A glob collapses to the fixed text before its first wildcard.
+  const star = t.indexOf('*');
+  if (star !== -1) t = t.slice(0, star);
+  if (!t.includes('/')) return null;                  // a bare word is not a path
+  if (t.startsWith('http://') || t.startsWith('https://')) return null;
+  t = t.replace(/^\.\//, '');
+  if (!t) return null;
+  // A path that names a file is a scope of exactly that file; a path that ends
+  // in a separator, or has no extension after its last separator, is a
+  // directory scope. Both are usable; only the second is ever "broader".
+  return t;
+}
+
+/**
+ * Path scopes an evaluator provably reads over.
+ *
+ * CONSERVATIVE BY CONSTRUCTION. Only tokens that are literally paths in the
+ * evaluator's own text count. `npm run typecheck` yields nothing, because what
+ * that script covers is a fact about the project's package.json and not about
+ * this string — and inferring it would be guessing with an authoritative
+ * voice. A criterion whose scope cannot be read off its evaluator produces no
+ * finding at all, which is the correct failure direction: this signal exists
+ * to make a human look, and a false one teaches people to stop looking.
+ */
+export function extractScopes(texts: string[]): string[] {
+  const out = new Set<string>();
+  for (const raw of texts) {
+    if (typeof raw !== 'string') continue;
+    for (const token of raw.split(/\s+/)) {
+      const p = asPrefix(token);
+      if (p) out.add(p);
+    }
+  }
+  return [...out].sort();
+}
+
+/** Whether `scope` names a directory rather than one specific file. */
+export function isDirectoryScope(scope: string): boolean {
+  if (scope.endsWith('/')) return true;
+  const last = scope.slice(scope.lastIndexOf('/') + 1);
+  return last.length > 0 && !last.includes('.');
+}
+
+/** Whether a declared write covers everything under `scope`. */
+function writeCoversScope(write: string, scope: string): boolean {
+  const w = write.trim().replace(/^\.\//, '');
+  const star = w.indexOf('*');
+  const wPrefix = star === -1 ? w : w.slice(0, star);
+  const dir = scope.endsWith('/') ? scope : `${scope}/`;
+  if (star === -1) {
+    // An exact path covers a scope only when it IS the scope.
+    return w === scope || `${w}/` === dir;
+  }
+  // A glob covers the scope when its fixed prefix reaches no further in.
+  return dir.startsWith(wPrefix) || wPrefix === '' ;
+}
+
+/**
+ * The BC-2 finding: a criterion read over a directory, a plan that writes one
+ * file inside it.
+ *
+ * Coverage was already checked, and passed, because coverage is NOMINAL — some
+ * node names the criterion. That is not the same question as whether the work
+ * is large enough to move it. A criterion evaluated across `src/` and a plan
+ * whose entire write surface is `src/one-file.ts` will honestly report FAILED,
+ * and the mismatch was visible in the plan before any task ran.
+ *
+ * NON-BLOCKING on purpose. A plan may legitimately intend partial progress —
+ * one cluster now, more later — and that is a decision for a person. What must
+ * not happen is paying for it without being told.
+ */
+export function scopeMismatchFindings(graph: PlanGraph,
+  criteria: CriterionScopeInput[]): PlanFinding[] {
+  const findings: PlanFinding[] = [];
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+
+  for (const c of criteria) {
+    const scopes = extractScopes(c.texts).filter(isDirectoryScope);
+    if (!scopes.length) continue;                     // not mechanically extractable
+
+    const covering = nodes.filter((n) => (n.affectedCriteria ?? []).includes(c.criterionId));
+    if (!covering.length) continue;                   // CRITERION_UNCOVERED already said this
+    const writes = covering.flatMap((n) => n.writes ?? []).filter(Boolean);
+
+    for (const scope of scopes) {
+      // Writes that land anywhere inside the scope. Writes elsewhere are not
+      // evidence about this scope in either direction.
+      const inside = writes.filter((w) => {
+        const wp = w.replace(/^\.\//, '');
+        const dir = scope.endsWith('/') ? scope : `${scope}/`;
+        return wp === scope || wp.startsWith(dir) || writeCoversScope(w, scope);
+      });
+      if (inside.some((w) => writeCoversScope(w, scope))) continue;   // a glob covers it
+
+      const gap = inside.length === 0
+        ? `the plan writes nothing under "${scope}"`
+        : `the plan writes only ${inside.map((w) => `"${w}"`).join(', ')} under "${scope}"`;
+      findings.push({
+        code: 'CRITERION_SCOPE_MISMATCH', severity: 'info',
+        detail: `"${c.criterionId}" is evaluated over "${scope}", and ${gap}`
+          + ' — this plan can move it partway at best, and the criterion will report FAILED',
+        nodeId: covering[0]?.nodeId,
+        otherNodeId: c.criterionId,
+      });
+    }
+  }
+  return findings;
+}
+
 /**
  * The full deterministic gate for a plan compiled against an oracle.
  *
  * Structure first, then coverage. Both are facts about the plan, so both are
  * answered before anyone is asked for an opinion about it.
  */
-export function validatePlanForOracle(graph: PlanGraph, requiredCriteria: string[]): PlanValidation {
+export function validatePlanForOracle(graph: PlanGraph, requiredCriteria: string[],
+  scopes: CriterionScopeInput[] = []): PlanValidation {
   const base = validatePlan(graph);
   const coverage = coverageFindings(graph, requiredCriteria);
-  const findings = [...base.findings, ...coverage];
+  // Scope is asked only of REQUIRED criteria: an optional criterion the plan
+  // moves partway is a smaller conversation, and this stop is expensive
+  // enough that it must be reserved for what the mission is judged on.
+  const required = new Set(requiredCriteria);
+  const scopeGaps = scopeMismatchFindings(graph, scopes.filter((s) => required.has(s.criterionId)));
+  const findings = [...base.findings, ...coverage, ...scopeGaps];
   return { ...base, findings, valid: !findings.some((f) => f.severity === 'error') };
 }
 

@@ -33,7 +33,10 @@ import {
 } from './mission/planner';
 import { runMissionLoop } from './mission/loop';
 import { missionHost, ledgerFrom } from './mission/host';
-import { missionUsage, progressFrom, providerSpendOf } from './mission/progress';
+import {
+  missionUsage, progressFrom, providerSpendOf, negotiateBudget, applyBudgetRevisions,
+  mergeMissionBudgets, BudgetNegotiation,
+} from './mission/progress';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -103,7 +106,7 @@ ${C.b}Usage${C.x}
   zeus mission recompile <id> [--mock]        send the critique back to the compiler and retry
   zeus mission evaluate <id> [--full]         prove the criteria; --criteria a,b for a subset
   zeus mission plan <id> [--mock]             plan the accepted contract and critique it
-  zeus mission accept-plan <id> [--version N] --yes
+  zeus mission accept-plan <id> [--version N] --yes [--raise-budget]
                                               accept the plan on the log, findings recorded
   zeus mission selftest --live                real provider contact before anything is spent
   zeus mission run <id> [--mock] [--yes]      execute the accepted plan, one node at a time
@@ -1333,7 +1336,8 @@ async function cmdMission(argv: string[]): Promise<number> {
         }
         return 1;
       }
-      missions.recordPlan(id, graph);
+      missions.recordPlan(id, graph, planned.validation.findings
+        .filter((f) => f.code === 'CRITERION_SCOPE_MISMATCH'));
 
       const critique = await critiquePlan({
         missionId: id, projectId: eng.projectId, goal: rec.goal, criteria: gate.criteria,
@@ -1361,6 +1365,9 @@ async function cmdMission(argv: string[]): Promise<number> {
         if (n.dependsOn.length) out(`           ${C.dim}after ${n.dependsOn.map(missionLabel).join(', ')}${C.x}`);
       }
       renderPlanFindings(critique.findings);
+      renderScopeGaps(planned.validation.findings);
+      const negotiation = negotiationFor(missions, id, graph);
+      renderNegotiation(negotiation);
 
       if (acceptance.decision === 'REJECT') {
         err(`${C.r}✗${C.x} ${acceptance.reasons.join('; ')}`);
@@ -1375,6 +1382,14 @@ async function cmdMission(argv: string[]): Promise<number> {
         // again and accept a DIFFERENT plan from the one just reviewed, which
         // is consent to something nobody read. `accept-plan` accepts the plan
         // that is on the log, by version.
+        missions.recordPlanStopDecision(id, {
+          version,
+          rendered: [...acceptance.reasons, negotiation.rendered,
+            ...planned.validation.findings.filter((f) => f.code === 'CRITERION_SCOPE_MISMATCH')
+              .map((f) => f.detail)],
+          decision: 'STOPPED_FINDINGS', decidedBy: 'nobody yet',
+          deferred: !process.stdin.isTTY,
+        });
         err(`${C.y}!${C.x} ${acceptance.reasons.join('; ')}`);
         err(`  ${C.dim}zeus mission accept-plan ${missionLabel(id)} --version ${version} --yes${C.x}`
           + `  ${C.dim}accepts THIS plan with those findings recorded${C.x}`);
@@ -1386,7 +1401,24 @@ async function cmdMission(argv: string[]): Promise<number> {
         out(`${C.g}✓${C.x} plan v${version} accepted with ${acceptance.advisory.length} finding(s) on the record`);
         return 0;
       }
+      if (!negotiation.fits) {
+        // A plan that cannot be paid for is a conversation, not a failure, and
+        // it is one nobody can have automatically: the budget may be the wrong
+        // size or the plan may be, and only a person can say which.
+        missions.recordPlanStopDecision(id, {
+          version, rendered: [negotiation.rendered], decision: 'STOPPED_BUDGET',
+          decidedBy: 'nobody yet', deferred: !process.stdin.isTTY,
+        });
+        err(`${C.y}!${C.x} this plan does not fit the mission budget`);
+        err(`  ${C.dim}zeus mission accept-plan ${missionLabel(id)} --version ${version} `
+          + `--raise-budget --yes${C.x}  ${C.dim}raises it, on the record${C.x}`);
+        return 1;
+      }
       missions.acceptPlan(id, graph, { acceptedBy: 'auto' });
+      missions.recordPlanStopDecision(id, {
+        version, rendered: [negotiation.rendered], decision: 'FLOW',
+        decidedBy: 'auto', deferred: false,
+      });
       out(`${C.g}✓${C.x} plan v${version} accepted ${C.dim}(the critique raised nothing)${C.x}`);
       return 0;
     }
@@ -1440,17 +1472,68 @@ async function cmdMission(argv: string[]): Promise<number> {
       }
       renderPlanFindings(findings);
 
+      // Scope mismatches were recorded by the deterministic validator when the
+      // plan was produced. They are re-rendered here because this is the
+      // moment someone is deciding, and a finding nobody re-reads at the point
+      // of decision is a finding that was not part of the decision.
+      const scopeGaps = ((recorded.payload as any).scopeFindings ?? []) as Array<any>;
+      renderScopeGaps(scopeGaps);
+
+      const negotiation = negotiateBudget(graph.nodes, budgetsFor(missions, id));
+      renderNegotiation(negotiation);
+
+      const rendered = [
+        ...findings.map((f) => `${f.severity} ${f.code}: ${f.detail}`),
+        ...scopeGaps.map((f: any) => `CRITERION_SCOPE_MISMATCH: ${f.detail}`),
+        negotiation.rendered,
+      ];
+
       if (!rest.includes('--yes')) {
-        err(`${C.y}!${C.x} ${findings.length} finding(s) stand against plan v${version}`);
+        missions.recordPlanStopDecision(id, {
+          version, rendered, decision: 'REFUSED_NO_CONSENT', decidedBy: 'nobody yet',
+          deferred: !process.stdin.isTTY,
+        });
+        err(`${C.y}!${C.x} ${findings.length + scopeGaps.length} finding(s) stand against plan v${version}`);
         err(`  ${C.dim}re-run with --yes to accept THIS plan with those findings on the record${C.x}`);
         return 1;
       }
+      if (!negotiation.fits && !rest.includes('--raise-budget')) {
+        // --yes answers the findings. It does not answer the budget: those are
+        // two different questions and one flag must not silently answer both.
+        missions.recordPlanStopDecision(id, {
+          version, rendered, decision: 'REFUSED_BUDGET', decidedBy: 'nobody yet',
+          deferred: !process.stdin.isTTY,
+        });
+        err(`${C.r}✗${C.x} ${negotiation.rendered}`);
+        err(`  ${C.dim}--yes accepts the findings; --raise-budget is a separate decision${C.x}`);
+        return 1;
+      }
+      if (!negotiation.fits) {
+        const before = budgetsFor(missions, id);
+        if (negotiation.tasksNeeded > before.maxTasks) {
+          missions.reviseBudget(id, { limit: 'maxTasks', from: before.maxTasks,
+            to: negotiation.tasksNeeded, decidedBy: 'user-confirmed',
+            reason: `plan v${version} needs ${negotiation.nodeCount} node(s) plus one repair` });
+        }
+        if (negotiation.estimatedCostUsd !== null
+          && negotiation.estimatedCostUsd > before.costCeilingUsd) {
+          missions.reviseBudget(id, { limit: 'costCeilingUsd', from: before.costCeilingUsd,
+            to: negotiation.estimatedCostUsd, decidedBy: 'user-confirmed',
+            reason: `the planner ESTIMATES ~$${negotiation.estimatedCostUsd.toFixed(2)} for plan v${version}` });
+        }
+        out(`  ${C.y}budget raised${C.x} ${C.dim}on the record — MISSION_BUDGET_REVISED${C.x}`);
+      }
+
       missions.acceptPlan(id, graph, {
         acceptedBy: 'user-confirmed',
-        acceptedDespite: findings.map((f) => `${f.severity} ${f.code}${f.nodeId ? ` ${missionLabel(f.nodeId)}` : ''}: ${f.detail}`),
+        acceptedDespite: [...findings.map((f) => `${f.severity} ${f.code}${f.nodeId ? ` ${missionLabel(f.nodeId)}` : ''}: ${f.detail}`),
+          ...scopeGaps.map((f: any) => `CRITERION_SCOPE_MISMATCH: ${f.detail}`)],
+      });
+      missions.recordPlanStopDecision(id, {
+        version, rendered, decision: 'ACCEPTED', decidedBy: 'user-confirmed', deferred: false,
       });
       out(`${C.g}✓${C.x} plan v${version} accepted by you`
-        + (findings.length ? ` ${C.y}despite ${findings.length} finding(s)${C.x}` : ''));
+        + (rendered.length ? ` ${C.y}despite ${findings.length + scopeGaps.length} finding(s)${C.x}` : ''));
       return 0;
     }
 
@@ -1647,6 +1730,36 @@ async function cmdMission(argv: string[]): Promise<number> {
   }
 }
 
+
+
+/** The budget a mission is actually operating under, revisions included. */
+function budgetsFor(missions: MissionRegistry, missionId: string) {
+  return applyBudgetRevisions(mergeMissionBudgets(), missions.events.read(missionId));
+}
+
+function negotiationFor(missions: MissionRegistry, missionId: string, graph: PlanGraph): BudgetNegotiation {
+  return negotiateBudget(graph.nodes, budgetsFor(missions, missionId));
+}
+
+/**
+ * The BC-2 signal, rendered where a person will see it before paying.
+ *
+ * Non-blocking, and printed anyway: a plan may legitimately intend partial
+ * progress, and the only thing that must not happen is paying for partial
+ * progress while believing it was the whole job.
+ */
+function renderScopeGaps(findings: Array<{ code: string; detail: string }>): void {
+  const gaps = findings.filter((f) => f.code === 'CRITERION_SCOPE_MISMATCH');
+  if (!gaps.length) return;
+  out(`  ${C.y}${gaps.length} scope mismatch(es)${C.x} ${C.dim}between what the criteria read `
+    + `and what this plan writes${C.x}`);
+  for (const g of gaps) out(`    ${C.y}CRITERION_SCOPE_MISMATCH${C.x} ${C.dim}${g.detail}${C.x}`);
+}
+
+function renderNegotiation(n: BudgetNegotiation): void {
+  if (n.fits) { out(`  ${C.dim}budget: ${n.rendered}${C.x}`); return; }
+  out(`  ${C.y}budget:${C.x} ${n.rendered}`);
+}
 
 /** Renders plan-critic findings the way the oracle's are rendered. */
 function renderPlanFindings(findings: Array<{ code: string; severity: string; nodeId?: string; detail: string }>): void {

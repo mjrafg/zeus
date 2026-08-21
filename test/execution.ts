@@ -18,15 +18,21 @@ import { EventStore, StoredEvent } from '../src/engine/events';
 import { MissionRegistry } from '../src/mission/registry';
 import { PlanGraph, TaskNode } from '../src/mission/types';
 import { Criterion, Oracle } from '../src/mission/oracle';
-import { requireAcceptedOracle, makeNodeId, normaliseNodes, planAcceptance } from '../src/mission/planner';
-import { validatePlanForOracle, coverageFindings } from '../src/mission/plan';
+import {
+  requireAcceptedOracle, makeNodeId, normaliseNodes, planAcceptance,
+  PLAN_CRITIQUE_HEADER, PLAN_HEADER,
+} from '../src/mission/planner';
+import {
+  validatePlanForOracle, coverageFindings, scopeMismatchFindings, extractScopes,
+  isDirectoryScope,
+} from '../src/mission/plan';
 import {
   topoOrder, nextNode, dependentsOf, checkPreconditions, unreachableNow, PreconditionProbe,
 } from '../src/mission/schedule';
 import {
   missionUsage, checkMissionBudgets, mergeMissionBudgets, verifyEffects, progressFrom,
   genuineFlips, detectFlips, clampAchievement, mismatchesForVersion, plannedExhausted,
-  EFFECT_MODEL_WRONG_THRESHOLD, providerSpendOf,
+  EFFECT_MODEL_WRONG_THRESHOLD, providerSpendOf, negotiateBudget, applyBudgetRevisions,
 } from '../src/mission/progress';
 import {
   isZeusArtifact, ZEUS_PATHSPEC_EXCLUDES, ZEUS_WORKTREE_EXCLUDES,
@@ -1017,5 +1023,186 @@ export async function executionSuite(): Promise<void> {
     check('MC5: and the breach names the unpriced call it could not add in',
       checkMissionBudgets(budgets, seeing)!.detail.includes('reported no cost'),
       checkMissionBudgets(budgets, seeing)!.detail);
+  }
+  section('plan scope: the BC-2 replay — a global criterion, a one-file plan');
+  {
+    // The shape that cost $4.87: the criterion is read over a whole directory,
+    // the plan's entire write surface is one file inside it, and coverage was
+    // satisfied because coverage is NOMINAL.
+    const criterionId = 'p/M-0001/C-0001';
+    const globalCriterion = {
+      criterionId,
+      texts: ['npx tsc --noEmit && rg "implicit any" src/'],
+    };
+    const oneFilePlan = graphOf([node('p/M-0001/N-0001', {
+      affectedCriteria: [criterionId], writes: ['src/one-file.ts'],
+    })]);
+
+    const gaps = scopeMismatchFindings(oneFilePlan, [globalCriterion]);
+    check('SM1: a criterion read over src/ and a plan that writes one file inside it is flagged',
+      gaps.length === 1 && gaps[0].code === 'CRITERION_SCOPE_MISMATCH', JSON.stringify(gaps));
+    check('SM1b: the finding names the criterion, the scope, and what the plan actually writes',
+      gaps[0].detail.includes(criterionId) && gaps[0].detail.includes('src/')
+      && gaps[0].detail.includes('src/one-file.ts'), gaps[0].detail);
+    check('SM1c: it is NON-BLOCKING — the plan may intend partial progress',
+      gaps[0].severity === 'info', gaps[0].severity);
+
+    // Coverage passes, which is the whole point: the two questions differ.
+    const validation = validatePlanForOracle(oneFilePlan, [criterionId], [globalCriterion]);
+    check('SM1d: coverage is satisfied and the plan still validates',
+      validation.valid
+      && !validation.findings.some((f) => f.code === 'CRITERION_UNCOVERED'),
+      JSON.stringify(validation.findings.map((f) => f.code)));
+    check('SM1e: but the scope mismatch rides along, so a human sees it before paying',
+      validation.findings.some((f) => f.code === 'CRITERION_SCOPE_MISMATCH'));
+  }
+
+  section('plan scope: conservatism — it does not guess');
+  {
+    const cid = 'p/M-0001/C-0001';
+    const wide = graphOf([node('p/M-0001/N-0001', {
+      affectedCriteria: [cid], writes: ['src/**/*.ts'],
+    })]);
+    check('SM2: a plan whose glob covers the scope raises nothing',
+      scopeMismatchFindings(wide, [{ criterionId: cid, texts: ['rg any src/'] }]).length === 0);
+
+    const exact = graphOf([node('p/M-0001/N-0001', {
+      affectedCriteria: [cid], writes: ['src/a.ts'],
+    })]);
+    check('SM2b: a criterion scoped to ONE FILE that the plan writes raises nothing',
+      scopeMismatchFindings(exact, [{ criterionId: cid, texts: ['tsc src/a.ts'] }]).length === 0);
+
+    check('SM2c: an evaluator with no extractable path raises nothing — no guessing',
+      scopeMismatchFindings(exact, [{ criterionId: cid, texts: ['npm run typecheck'] }]).length === 0);
+    check('SM2d: a bare word is not a path, and a flag is not a path',
+      extractScopes(['jest --coverage --ci']).length === 0,
+      JSON.stringify(extractScopes(['jest --coverage --ci'])));
+    check('SM2e: a URL is not a filesystem scope',
+      extractScopes(['curl https://example.com/health']).length === 0,
+      JSON.stringify(extractScopes(['curl https://example.com/health'])));
+    check('SM2f: a glob collapses to the fixed text before its wildcard',
+      extractScopes(['rg x modules/api/src/**/*.ts']).join(',') === 'modules/api/src/',
+      JSON.stringify(extractScopes(['rg x modules/api/src/**/*.ts'])));
+    check('SM2g: a file scope is not a directory scope',
+      isDirectoryScope('src/') && isDirectoryScope('src/engine')
+      && !isDirectoryScope('src/a.ts'));
+
+    // An uncovered criterion is CRITERION_UNCOVERED's business, not this one's.
+    const elsewhere = graphOf([node('p/M-0001/N-0001', {
+      affectedCriteria: ['p/M-0001/C-0009'], writes: ['docs/x.md'],
+    })]);
+    check('SM2h: a criterion no node claims is left to CRITERION_UNCOVERED',
+      scopeMismatchFindings(elsewhere, [{ criterionId: cid, texts: ['rg any src/'] }]).length === 0);
+
+    // A covering node that writes nothing at all cannot move a path scope.
+    const noWrites = graphOf([node('p/M-0001/N-0001', { affectedCriteria: [cid], writes: [] })]);
+    const nw = scopeMismatchFindings(noWrites, [{ criterionId: cid, texts: ['rg any src/'] }]);
+    check('SM2i: a covering node that writes nothing is flagged, and says so plainly',
+      nw.length === 1 && nw[0].detail.includes('writes nothing under'), JSON.stringify(nw));
+
+    // Only REQUIRED criteria reach this stop.
+    const optionalOnly = validatePlanForOracle(
+      graphOf([node('p/M-0001/N-0001', { affectedCriteria: [cid], writes: ['src/a.ts'] })]),
+      [], [{ criterionId: cid, texts: ['rg any src/'] }]);
+    check('SM2j: an OPTIONAL criterion does not raise this stop',
+      !optionalOnly.findings.some((f) => f.code === 'CRITERION_SCOPE_MISMATCH'),
+      JSON.stringify(optionalOnly.findings.map((f) => f.code)));
+  }
+
+  section('plan scope: the critic is asked the same question in words');
+  {
+    const header = PLAN_CRITIQUE_HEADER;
+    check('SM3: the critic prompt asks, per required criterion, whether the writes can move it',
+      /FOR EACH REQUIRED CRITERION/.test(header)
+      && /union of the plan/i.test(header) && /FAILED to PROVEN/.test(header), 'question present');
+    check('SM3b: and names the consequence, so the answer is not academic',
+      /will report FAILED after the work is paid for/.test(header));
+    check('SM3c: the planner is told estimatedCost is dollars, or the budget check compares nothing',
+      /US DOLLAR COST/.test(PLAN_HEADER) && /never as spend/.test(PLAN_HEADER));
+  }
+
+  section('plan budget: a plan that does not fit is a conversation');
+  {
+    const budgets = mergeMissionBudgets({ maxTasks: 5, costCeilingUsd: 5 });
+    const nodesOf = (n: number, cost?: number) =>
+      Array.from({ length: n }, () => (cost === undefined ? {} : { estimatedCost: cost }));
+
+    const fits = negotiateBudget(nodesOf(4), budgets);
+    const tooMany = negotiateBudget(nodesOf(7), budgets);
+    check('BN1: a plan with room for one repair fits',
+      fits.fits && fits.tasksNeeded === 5, JSON.stringify(fits.reasons));
+    check('BN2: seven nodes against a budget of five does not fit',
+      !tooMany.fits && tooMany.tasksNeeded === 8, JSON.stringify(tooMany.reasons));
+    check('BN2b: the rendering states both numbers and the three options',
+      tooMany.rendered.includes('7 task(s)') && tooMany.rendered.includes('budget is 5')
+      && tooMany.rendered.includes('raise the budget')
+      && tooMany.rendered.includes('re-scope') && tooMany.rendered.includes('abort'),
+      tooMany.rendered);
+
+    const pricey = negotiateBudget(nodesOf(3, 4), budgets);
+    check('BN3: estimated cost over the ceiling does not fit',
+      !pricey.fits && pricey.estimatedCostUsd === 12, String(pricey.estimatedCostUsd));
+    check('BN3b: and it is labelled an ESTIMATE, never observed spend',
+      pricey.rendered.includes('ESTIMATES') && !pricey.rendered.includes('spent'),
+      pricey.rendered);
+
+    const unpriced = negotiateBudget(nodesOf(3), budgets);
+    check('BN4: with no estimates there is no cost-based stop — numbers are never invented',
+      unpriced.fits && unpriced.estimatedCostUsd === null
+      && unpriced.rendered.includes('no cost estimate'), unpriced.rendered);
+    check('BN4b: a zero estimate is treated as absent, not as free',
+      negotiateBudget([{ estimatedCost: 0 }], budgets).estimatedCostUsd === null);
+  }
+
+  section('plan budget: a raise is an event, and survives a restart');
+  {
+    const missions = freshRegistry();
+    const rec = missions.create('goal', 'base0');
+    const base = mergeMissionBudgets({ maxTasks: 5 });
+    check('BR1x: before any revision the budget is the default',
+      applyBudgetRevisions(base, evs(missions, rec.missionId)).maxTasks === 5);
+
+    missions.reviseBudget(rec.missionId, { limit: 'maxTasks', from: 5, to: 8,
+      reason: 'plan v1 needs 7 nodes plus one repair', decidedBy: 'user-confirmed' });
+
+    // Re-read from the store, which is what a restarted process would do.
+    const replayed = applyBudgetRevisions(base, missions.events.read(rec.missionId));
+    check('BR2x: the revision is replayed from the log, not held in memory',
+      replayed.maxTasks === 8, String(replayed.maxTasks));
+    const ev = evs(missions, rec.missionId).find((e) => e.type === 'MISSION_BUDGET_REVISED')!;
+    check('BR3x: the event records old and new, and who decided',
+      (ev.payload as any).from === 5 && (ev.payload as any).to === 8
+      && (ev.payload as any).decidedBy === 'user-confirmed', JSON.stringify(ev.payload));
+    check('BR4x: a revision naming an unknown limit is ignored rather than obeyed',
+      applyBudgetRevisions(base, [{ ...ev, payload: { limit: 'nonsense', to: 99 } } as any])
+        .maxTasks === 5);
+    check('BR5x: a non-numeric revision is ignored',
+      applyBudgetRevisions(base, [{ ...ev, payload: { limit: 'maxTasks', to: 'lots' } } as any])
+        .maxTasks === 5);
+
+    // And the loop reads the same revised budget.
+    const negotiation = negotiateBudget(Array.from({ length: 7 }, () => ({})), replayed);
+    check('BR6x: after the raise, the plan that forced it now fits',
+      negotiation.fits, negotiation.rendered);
+  }
+
+  section('plan budget: what a person saw is recorded');
+  {
+    const missions = freshRegistry();
+    const rec = missions.create('goal', 'base0');
+    missions.recordPlanStopDecision(rec.missionId, {
+      version: 1,
+      rendered: ['CRITERION_SCOPE_MISMATCH: src/ vs one file', '7 tasks against a budget of 5'],
+      decision: 'REFUSED_BUDGET', decidedBy: 'nobody yet', deferred: true,
+    });
+    const ev = evs(missions, rec.missionId).find((e) => e.type === 'PLAN_STOP_DECISION')!;
+    const p = ev.payload as any;
+    check('PS1: the stop records the RENDERING, not only the finding codes',
+      p.rendered.length === 2 && String(p.rendered[0]).includes('src/ vs one file'),
+      JSON.stringify(p.rendered));
+    check('PS2: it records the decision and that nobody had made one yet',
+      p.decision === 'REFUSED_BUDGET' && p.decidedBy === 'nobody yet');
+    check('PS3: a non-terminal session is recorded as deferred, not as consent',
+      p.deferred === true);
   }
 }

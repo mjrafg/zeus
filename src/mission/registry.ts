@@ -499,13 +499,20 @@ export class MissionRegistry {
 
   /* ---- stage 3: the execution loop -------------------------------------- */
 
-  /** A plan the deterministic validator refused. Retryable, and recorded. */
+  /**
+   * A plan the deterministic validator refused. Retryable, and recorded.
+   *
+   * The NODES are recorded, not just the findings. The oracle layer learned
+   * this already — `ORACLE_COMPILE_REJECTED` carries the criteria it refused —
+   * and the plan layer did not inherit it, so the first live planner rejection
+   * could not be read back without paying a model to produce it again.
+   */
   recordPlanRejected(missionId: string, spec: {
-    version: number; findings: unknown[]; retryable: boolean; note?: string;
+    version: number; nodes: unknown[]; findings: unknown[]; retryable: boolean; note?: string;
   }): void {
     this.append(missionId, 'PLAN_REJECTED', {
-      version: spec.version, findings: spec.findings,
-      retryable: spec.retryable, note: spec.note ?? null,
+      version: spec.version, nodes: spec.nodes, nodeCount: spec.nodes.length,
+      findings: spec.findings, retryable: spec.retryable, note: spec.note ?? null,
     });
   }
 

@@ -1308,7 +1308,7 @@ async function cmdMission(argv: string[]): Promise<number> {
       const graph: PlanGraph = { version, nodes: planned.graph.nodes };
       if (!planned.validation.valid) {
         missions.recordPlanRejected(id, {
-          version, findings: planned.validation.findings, retryable: true,
+          version, nodes: graph.nodes, findings: planned.validation.findings, retryable: true,
           note: 'the deterministic validator refused the plan; the mission is unchanged',
         });
         err(`${C.r}✗${C.x} the plan did not validate — nothing was accepted`);

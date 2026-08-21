@@ -876,4 +876,33 @@ export async function executionSuite(): Promise<void> {
     check('ST2: a mission id passed to zeus status is refused, not crashed on',
       byMissionId === 2, String(byMissionId));
   }
+  section('mission stage 3: a refused plan is readable without paying for it again');
+  {
+    const missions = freshRegistry();
+    const rec = missions.create('goal', 'base0');
+    const proposed = [
+      node(`${rec.missionId}/N-0001`, {
+        slug: 'do-a-thing',
+        preconditions: [{ kind: 'workingTreeClean' as any, target: '.' }],
+      }),
+    ];
+    missions.recordPlanRejected(rec.missionId, {
+      version: 1, nodes: proposed,
+      findings: [{ code: 'SCHEMA_INVALID', nodeId: proposed[0].nodeId, detail: 'bad kind' }],
+      retryable: true, note: 'refused',
+    });
+    const ev = evs(missions, rec.missionId).find((e) => e.type === 'PLAN_REJECTED')!;
+    const p = ev.payload as any;
+
+    check('PR1: the refusal records WHAT was proposed, not only that it was refused',
+      Array.isArray(p.nodes) && p.nodes.length === 1
+      && p.nodes[0].nodeId === proposed[0].nodeId, JSON.stringify(Object.keys(p)));
+    check('PR2: the invented precondition kind is legible from the log alone',
+      p.nodes[0].preconditions[0].kind === 'workingTreeClean',
+      JSON.stringify(p.nodes[0].preconditions));
+    check('PR3: the findings and the retryability are still recorded',
+      p.findings.length === 1 && p.retryable === true && p.nodeCount === 1);
+    check('PR4: a refused plan is not an accepted one',
+      missions.mission(rec.missionId)!.acceptedPlan === null);
+  }
 }

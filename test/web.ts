@@ -24,6 +24,11 @@ import {
   classifyMessage, draftCard, wantsTightening, chatHistory,
 } from '../src/mission/chat';
 import { scopeOf } from '../src/mission/types';
+import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
+import { extractZip } from '../src/zip';
+import {
+  listProjects, projectBySlug, slugForUrl, slugify, freeSlug,
+} from '../src/projects';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-web-'));
 let seq = 0;
@@ -731,5 +736,236 @@ export async function webSuite(): Promise<void> {
     check('CG4x: and the digest covers the proposal, so accepting it is accepting that text',
       draftCard({ intent: 'WORK', message: 'a. b.', proposedGoal: 'other', proposalCostUsd: 0.0123 })
         .digest !== card.digest);
+  }
+  section('project creation: the route is chosen deterministically');
+  {
+    const TABLE: Array<{ msg: string; att: boolean; want: string }> = [
+      { msg: 'anything at all', att: true, want: 'ZIP' },
+      { msg: '', att: true, want: 'ZIP' },
+      { msg: 'https://github.com/owner/repo.git', att: false, want: 'CLONE' },
+      { msg: 'https://gitlab.com/group/sub/repo', att: false, want: 'CLONE' },
+      { msg: 'git@github.com:owner/repo.git', att: false, want: 'CLONE' },
+      { msg: 'git://example.com/repo.git', att: false, want: 'CLONE' },
+      { msg: 'owner/repo', att: false, want: 'CLONE' },
+      { msg: 'gh:owner/repo', att: false, want: 'CLONE' },
+      { msg: 'build me a CLI that renames files', att: false, want: 'DESCRIPTION' },
+      { msg: 'یک ابزار خط فرمان بساز', att: false, want: 'DESCRIPTION' },
+      // URL-ish but not a URL: must ASK, never guess.
+      { msg: 'clone https://github.com/owner/repo and fix the tests', att: false, want: 'ASK' },
+      { msg: 'the repo on github.com is broken', att: false, want: 'ASK' },
+      { msg: 'take a look at git@host:thing.git please', att: false, want: 'ASK' },
+      { msg: '', att: false, want: 'ASK' },
+    ];
+    const wrong = TABLE.filter((t) => routeFor({ message: t.msg, hasAttachment: t.att }).route !== t.want);
+    check('PC1: the route table holds for attachments, URLs, descriptions and near-misses',
+      wrong.length === 0,
+      wrong.map((t) => `"${t.msg}" → ${routeFor({ message: t.msg, hasAttachment: t.att }).route}, wanted ${t.want}`).join(' | '));
+    check('PC1b: a URL inside a sentence ASKS rather than cloning something unintended',
+      routeFor({ message: 'clone https://github.com/o/r and fix it', hasAttachment: false }).route === 'ASK');
+    check('PC1c: every decision carries the reason it was taken',
+      TABLE.every((t) => routeFor({ message: t.msg, hasAttachment: t.att }).reason.length > 15));
+    check('PC1d: an attachment always wins — it is the source, whatever the text says',
+      routeFor({ message: 'https://github.com/o/r', hasAttachment: true }).route === 'ZIP');
+
+    check('PC2: a credentialed URL is detected',
+      carriesCredentials('https://user:token@github.com/o/r.git')
+      && carriesCredentials('https://token@github.com/o/r.git'),
+      'credentials detected');
+    check('PC2b: an ordinary URL and an SSH URL are not mistaken for credentialed',
+      !carriesCredentials('https://github.com/o/r.git')
+      && !carriesCredentials('git@github.com:o/r.git'));
+    const credCard = draftCreationCard({
+      route: 'CLONE', source: 'https://user:tok@github.com/o/r.git',
+      projectsRoot: '/tmp/roots', targetSlug: 'r',
+    });
+    check('PC2c: the card says plainly that a credentialed URL will be refused',
+      credCard.warnings.some((w) => /REFUSED/.test(w) && /SSH agent/.test(w)),
+      credCard.warnings.join(' | '));
+  }
+
+  section('project creation: cards render before anything is created');
+  {
+    const clone = draftCreationCard({
+      route: 'CLONE', source: 'https://github.com/o/r.git',
+      projectsRoot: '/tmp/roots', targetSlug: 'r',
+    });
+    check('PC3: the clone card shows the target directory before creating it',
+      clone.targetPath === '/tmp/roots/r' && clone.targetSlug === 'r', clone.targetPath);
+    check('PC3b: it states that the clone is shallow and supervised',
+      clone.whatHappensNext[0].includes('--depth 1')
+      && clone.whatHappensNext[0].includes('supervisor')
+      && clone.whatHappensNext[0].includes('run registry'), clone.whatHappensNext[0]);
+    check('PC3c: and that network is required',
+      clone.warnings.some((w) => /network/i.test(w)), clone.warnings.join(' | '));
+
+    const zip = draftCreationCard({
+      route: 'ZIP', source: 'upload.zip', projectsRoot: '/tmp/roots', targetSlug: 'up',
+    });
+    check('PC4: the zip card names the three walls',
+      /every destination checked/.test(zip.whatHappensNext[0])
+      && /link entries skipped/.test(zip.whatHappensNext[0])
+      && /capped at/.test(zip.whatHappensNext[0]), zip.whatHappensNext[0]);
+    check('PC4b: and names what is NOT checked, rather than implying completeness',
+      zip.warnings.some((w) => /compression-ratio|content scanning|rate limiting/.test(w)),
+      zip.warnings.join(' | '));
+
+    const desc = draftCreationCard({
+      route: 'DESCRIPTION', source: 'build me a thing',
+      projectsRoot: '/tmp/roots', targetSlug: 'thing',
+    });
+    check('PC5: the description card says a mission will be drafted, not scaffolded',
+      desc.whatHappensNext.some((s) => /draft a MISSION/.test(s))
+      && desc.whatHappensNext.some((s) => /compile, critic, consent/.test(s)),
+      desc.whatHappensNext.join(' | '));
+    check('PC5b: it says plainly there is no shortcut',
+      desc.warnings.some((w) => /no scaffolding shortcut/i.test(w)), desc.warnings.join(' | '));
+    check('PC5c: and cites committed cost evidence rather than an invented average',
+      /audits\/missions/.test(desc.costExpectation), desc.costExpectation.slice(0, 60));
+
+    const ask = draftCreationCard({
+      route: 'ASK', source: 'clone the repo on github', projectsRoot: '/tmp/roots', targetSlug: 'x',
+    });
+    check('PC6: an ASK card offers the routes instead of choosing one',
+      ask.actions.map((a) => a.id).join(',') === 'clone,describe,cancel',
+      ask.actions.map((a) => a.id).join(','));
+
+    check('PC7: the digest covers the card, so a changed target is a different card',
+      draftCreationCard({ route: 'CLONE', source: 'https://github.com/o/r.git',
+        projectsRoot: '/tmp/roots', targetSlug: 'elsewhere' }).digest !== clone.digest);
+  }
+
+  section('project creation: the zip walls hold');
+  {
+    const root = path.join(TMP, `zips-${seq += 1}`);
+    fs.mkdirSync(root, { recursive: true });
+
+    // Built by hand, because a fixture that a library produced cannot express
+    // the entries an attacker would send.
+    const zipOf = (files: Array<{ name: string; body: string; mode?: number }>): Buffer => {
+      const locals: Buffer[] = [];
+      const centrals: Buffer[] = [];
+      let offset = 0;
+      for (const f of files) {
+        const name = Buffer.from(f.name, 'utf8');
+        const body = Buffer.from(f.body, 'utf8');
+        const lh = Buffer.alloc(30);
+        lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4);
+        lh.writeUInt16LE(0, 8);                      // stored
+        lh.writeUInt32LE(0, 14);
+        lh.writeUInt32LE(body.length, 18); lh.writeUInt32LE(body.length, 22);
+        lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+        const local = Buffer.concat([lh, name, body]);
+        const ch = Buffer.alloc(46);
+        ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+        ch.writeUInt16LE(0, 10);
+        ch.writeUInt32LE(0, 16);
+        ch.writeUInt32LE(body.length, 20); ch.writeUInt32LE(body.length, 24);
+        ch.writeUInt16LE(name.length, 28);
+        ch.writeUInt32LE((((f.mode ?? 0o100644) << 16) >>> 0), 38);
+        ch.writeUInt32LE(offset, 42);
+        centrals.push(Buffer.concat([ch, name]));
+        locals.push(local);
+        offset += local.length;
+      }
+      const cd = Buffer.concat(centrals);
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+      eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+      return Buffer.concat([...locals, cd, eocd]);
+    };
+
+    const good = extractZip(zipOf([{ name: 'src/a.ts', body: 'export const a = 1;\n' }]),
+      path.join(root, 'good'));
+    check('PC8: an ordinary archive extracts',
+      good.ok && good.written === 1
+      && fs.readFileSync(path.join(root, 'good', 'src', 'a.ts'), 'utf8').includes('const a'),
+      JSON.stringify(good.refusal));
+
+    // WALL A
+    const evil = path.join(root, 'traversal');
+    const trav = extractZip(zipOf([
+      { name: 'ok.txt', body: 'fine' },
+      { name: '../../evil.txt', body: 'pwned' },
+    ]), evil);
+    check('PC9: a traversal entry is refused through resolveWithin',
+      !trav.ok && /escapes the target directory/.test(trav.refusal ?? ''), trav.refusal ?? '');
+    check('PC9b: and NOTHING is left on disk — extraction is atomic',
+      !fs.existsSync(evil) && !fs.existsSync(`${evil}.incoming-${process.pid}`),
+      'target and temp both absent');
+    check('PC9c: the escape did not reach the parent either',
+      !fs.existsSync(path.join(root, 'evil.txt')) && !fs.existsSync(path.join(TMP, 'evil.txt')));
+
+    const abs = extractZip(zipOf([{ name: '/etc/zeus-pwned', body: 'x' }]),
+      path.join(root, 'absolute'));
+    check('PC9d: an absolute path is refused too',
+      !abs.ok && !fs.existsSync('/etc/zeus-pwned'), abs.refusal ?? '');
+
+    // WALL B
+    const linky = path.join(root, 'links');
+    const links = extractZip(zipOf([
+      { name: 'real.txt', body: 'kept' },
+      { name: 'link', body: '/etc/passwd', mode: 0o120777 },
+    ]), linky);
+    check('PC10: a symlink entry is skipped, not followed',
+      links.ok && links.skippedLinks.join(',') === 'link' && links.written === 1,
+      JSON.stringify(links.skippedLinks));
+    check('PC10b: and it is counted so the result card can say so',
+      !fs.existsSync(path.join(linky, 'link'))
+      && fs.existsSync(path.join(linky, 'real.txt')));
+
+    // WALL C
+    const many = Array.from({ length: 12 }, (_, i) => ({ name: `f${i}.txt`, body: 'x' }));
+    const capped = extractZip(zipOf(many), path.join(root, 'capped'),
+      { maxEntries: 5, maxTotalBytes: 1_000_000 });
+    check('PC11: an entry-count breach is refused before anything is written',
+      !capped.ok && /over the 5-entry cap/.test(capped.refusal ?? '')
+      && !fs.existsSync(path.join(root, 'capped')), capped.refusal ?? '');
+
+    const big = extractZip(zipOf([{ name: 'big.txt', body: 'x'.repeat(4096) }]),
+      path.join(root, 'big'), { maxEntries: 100, maxTotalBytes: 100 });
+    check('PC11b: a size breach is refused and leaves nothing behind',
+      !big.ok && /cap/.test(big.refusal ?? '') && !fs.existsSync(path.join(root, 'big')),
+      big.refusal ?? '');
+
+    const junk = extractZip(Buffer.from('this is not a zip file at all'), path.join(root, 'junk'));
+    check('PC12: a file that is not an archive is refused, not guessed at',
+      !junk.ok && /not a zip archive/.test(junk.refusal ?? ''), junk.refusal ?? '');
+  }
+
+  section('project creation: the projects root is a directory, not an index');
+  {
+    const root = path.join(TMP, `proot-${seq += 1}`);
+    fs.mkdirSync(root, { recursive: true });
+    const mk = (slug: string) => {
+      const dir = path.join(root, slug);
+      fs.mkdirSync(path.join(dir, '.zeus', 'state'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.zeus', 'config.yaml'),
+        `version: 1\nproject:\n  name: ${slug}\n  adapter: node\n`);
+      return dir;
+    };
+    mk('alpha'); mk('beta');
+    fs.mkdirSync(path.join(root, 'not-a-project'), { recursive: true });
+
+    const list = listProjects(root);
+    check('PC13: only initialised projects are listed',
+      list.map((p) => p.slug).join(',') === 'alpha,beta',
+      list.map((p) => p.slug).join(','));
+    check('PC13b: each carries its identity and adapter',
+      list[0].projectId === 'alpha' && list[0].adapter === 'node');
+    check('PC14: a slug that tries to leave the root resolves to nothing',
+      projectBySlug(root, '../etc') === null && projectBySlug(root, 'a/b') === null
+      && projectBySlug(root, '') === null);
+    check('PC14b: a real slug resolves',
+      projectBySlug(root, 'alpha')?.slug === 'alpha');
+
+    check('PC15: a URL becomes a safe directory name',
+      slugForUrl('https://github.com/owner/My.Repo.git') === 'my.repo'
+      && slugForUrl('git@host:group/thing.git') === 'thing',
+      `${slugForUrl('https://github.com/owner/My.Repo.git')} / ${slugForUrl('git@host:group/thing.git')}`);
+    check('PC15b: a hostile name is flattened rather than honoured',
+      slugify('../../etc/passwd') === 'etc-passwd', slugify('../../etc/passwd'));
+    check('PC15c: a taken name gets a free suffix instead of clobbering',
+      freeSlug(root, 'alpha') === 'alpha-2', freeSlug(root, 'alpha'));
   }
 }

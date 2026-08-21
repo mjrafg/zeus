@@ -29,7 +29,12 @@ import {
   EFFECT_MODEL_WRONG_THRESHOLD,
 } from '../src/mission/progress';
 import { runMissionLoop, LoopHost, NodeExecution } from '../src/mission/loop';
-import { selftestLive, SELFTEST_COST_CAP_USD } from '../src/mission/selftest';
+import {
+  selftestLive, selftestCostCap, SELFTEST_PER_CONTACT_CAP_USD, OBSERVED_CONTACT_COST_USD,
+} from '../src/mission/selftest';
+import {
+  readBaseline, baselinePath, normaliseVersion, compareVersion,
+} from '../src/mission/versions';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-m3-'));
 let storeSeq = 0;
@@ -155,7 +160,8 @@ export async function executionSuite(): Promise<void> {
       gaps.length === 1 && gaps[0].code === 'CRITERION_UNCOVERED'
       && gaps[0].detail.includes('C-0002'), JSON.stringify(gaps));
     check('M3-2f: deterministic validation refuses the plan before anyone is asked for an opinion',
-      !validation.ok && validation.findings.some((f) => f.code === 'CRITERION_UNCOVERED'));
+      !validation.valid && validation.findings.some((f) => f.code === 'CRITERION_UNCOVERED'),
+      JSON.stringify({ valid: validation.valid, codes: validation.findings.map((f) => f.code) }));
   }
 
   section('mission stage 3: principle A at the plan layer');
@@ -628,12 +634,18 @@ export async function executionSuite(): Promise<void> {
 
     const base = { supervisor: {} as any, policy: {} as any, projectId: 'p', isolation: iso };
 
+    // A state root per case, so one case cannot seed another's baseline.
+    const vroot = (n: string) => path.join(TMP, `m316-${n}-${storeSeq += 1}`);
+    const driftRoot = vroot('drift');
     const good = await (selftestLive({ ...base, providers: [provider({})],
-      recordedVersions: { fake: '1.2.3' }, versionOf: () => '1.2.3' }));
+      stateRoot: vroot('good'), versionOf: () => '1.2.3' }));
     const unparsed = await (selftestLive({ ...base, providers: [provider({ structured: null })],
-      recordedVersions: { fake: '1.2.3' }, versionOf: () => '1.2.3' }));
+      stateRoot: vroot('unparsed'), versionOf: () => '1.2.3' }));
+    // Baseline first, then the same CLI reports a different version.
+    await selftestLive({ ...base, providers: [provider({})],
+      stateRoot: driftRoot, versionOf: () => '1.2.3' });
     const drifted = await (selftestLive({ ...base, providers: [provider({})],
-      recordedVersions: { fake: '1.2.3' }, versionOf: () => '1.3.0' }));
+      stateRoot: driftRoot, versionOf: () => '1.3.0' }));
     const unavailable = await (selftestLive({ ...base, providers: [{
       id: 'fake', available: async () => ({ ok: false, detail: 'not logged in' }), invoke: async () => ({}),
     } as any] }));
@@ -657,8 +669,10 @@ export async function executionSuite(): Promise<void> {
     check('M3-16f: fallback isolation asks before a mission runs unattended',
       degraded.needsConfirmation
       && degraded.lanes.some((l) => l.lane === 'isolation-live' && l.status === 'DRIFT'));
-    check('M3-16g: the preflight cost is provider-reported and inside its cap',
-      good.costUsd !== null && good.costUsd <= SELFTEST_COST_CAP_USD, String(good.costUsd));
+    check('M3-16g: the preflight cost is provider-reported and inside its scaled cap',
+      good.costUsd !== null && good.costUsd <= good.costCapUsd
+      && good.costCapUsd === selftestCostCap(good.contacts),
+      `$${good.costUsd} of $${good.costCapUsd} for ${good.contacts} contact(s)`);
   }
   section('mission stage 3: the CLI refuses in the right order');
   {
@@ -706,5 +720,160 @@ export async function executionSuite(): Promise<void> {
       reported === 0, String(reported));
     check('M3-17f: zeus mission selftest without --live is a usage error, not a silent no-op',
       selftestNoLive === 2, String(selftestNoLive));
+  }
+  section('selftest: the cost cap scales with the work the preflight does');
+  {
+    const iso = { backends: [], selected: 'systemd-scope', fallbackMode: false,
+      resourceEnforcement: 'cgroup', resourceDetail: 'cgroup v2', enforces: [] } as any;
+    const priced = (usd: number | null) => ({
+      id: `p${usd === null ? 'x' : String(usd).replace('.', '')}`,
+      available: async () => ({ ok: true, detail: 'ok' }),
+      invoke: async () => ({
+        ok: true, role: 'reviewer', structured: { zeus_selftest: 'ok' }, text: '', raw: '',
+        exitCode: 0, durationMs: 1, outcome: 'COMPLETED', infrastructureFailure: null,
+        ...(usd === null ? {} : { providerUsage: { totalCostUsd: usd } }),
+      }),
+    }) as any;
+    const base = { supervisor: {} as any, policy: {} as any, projectId: 'p', isolation: iso };
+
+    check('SC1: one contact is capped at the observed contact price plus headroom',
+      selftestCostCap(1) === SELFTEST_PER_CONTACT_CAP_USD
+      && SELFTEST_PER_CONTACT_CAP_USD >= OBSERVED_CONTACT_COST_USD,
+      `${selftestCostCap(1)} vs observed ${OBSERVED_CONTACT_COST_USD}`);
+    check('SC2: the cap scales with the number of providers contacted',
+      selftestCostCap(2) === Number((SELFTEST_PER_CONTACT_CAP_USD * 2).toFixed(2))
+      && selftestCostCap(3) > selftestCostCap(2), `${selftestCostCap(2)}/${selftestCostCap(3)}`);
+    check('SC3: zero contacts still has a floor rather than a zero cap',
+      selftestCostCap(0) === SELFTEST_PER_CONTACT_CAP_USD, String(selftestCostCap(0)));
+
+    // The regression: the exact topology that broke the old constant — two
+    // providers, one of them subscription-billed and reporting no price.
+    const observed = await selftestLive({ ...base,
+      providers: [priced(OBSERVED_CONTACT_COST_USD), priced(null)] });
+    check('SC4: the observed two-provider preflight is INSIDE the cap',
+      !observed.needsConfirmation && observed.contacts === 2
+      && observed.costUsd === OBSERVED_CONTACT_COST_USD
+      && observed.costUsd! <= observed.costCapUsd,
+      `$${observed.costUsd} of $${observed.costCapUsd}, ${observed.contacts} contact(s)`);
+    check('SC4b: the unpriced contact makes the total a LOWER BOUND, not a total',
+      observed.costIsLowerBound && observed.unmeteredCalls === 1,
+      JSON.stringify({ lb: observed.costIsLowerBound, un: observed.unmeteredCalls }));
+    check('SC4c: an unpriced contact is never counted as free',
+      observed.costUsd === OBSERVED_CONTACT_COST_USD, String(observed.costUsd));
+
+    // And it can still catch a genuinely expensive preflight.
+    const expensive = await selftestLive({ ...base, providers: [priced(5), priced(5)] });
+    check('SC5: a preflight that really is expensive still trips the cap',
+      expensive.needsConfirmation
+      && expensive.lanes.some((l) => l.status === 'DRIFT' && l.detail.includes('cap')),
+      expensive.detail);
+    check('SC5b: the over-cap message names the unmetered contacts it could not price',
+      (await selftestLive({ ...base, providers: [priced(5), priced(null)] }))
+        .lanes.some((l) => l.status === 'DRIFT' && l.detail.includes('reported no price')));
+  }
+
+  section('selftest: the version baseline is durable, and first contact is not drift');
+  {
+    const root = path.join(TMP, `vb-${storeSeq += 1}`);
+    const iso = { backends: [], selected: 'systemd-scope', fallbackMode: false,
+      resourceEnforcement: 'cgroup', resourceDetail: 'cgroup v2', enforces: [] } as any;
+    const prov = (id: string) => ({
+      id, available: async () => ({ ok: true, detail: 'ok' }),
+      invoke: async () => ({
+        ok: true, role: 'reviewer', structured: { zeus_selftest: 'ok' }, text: '', raw: '',
+        exitCode: 0, durationMs: 1, outcome: 'COMPLETED', infrastructureFailure: null,
+      }),
+    }) as any;
+    const base = {
+      supervisor: {} as any, policy: {} as any, projectId: 'p', isolation: iso,
+      providers: [prov('claude')], stateRoot: root, now: () => '2026-01-01T00:00:00.000Z',
+    };
+    const laneOf = (r: any) => r.lanes.find((l: any) => l.lane === 'cli-version-drift');
+
+    const first = await selftestLive({ ...base, versionOf: () => '1.2.3' });
+    const again = await selftestLive({ ...base, versionOf: () => '1.2.3' });
+    const moved = await selftestLive({ ...base, versionOf: () => '1.3.0' });
+    const stillMoved = await selftestLive({ ...base, versionOf: () => '1.3.0' });
+
+    check('VB1: the lane is no longer permanently SKIPPED',
+      laneOf(first).status !== 'SKIPPED', laneOf(first).status);
+    check('VB2: first contact records the baseline and is not drift',
+      laneOf(first).status === 'PASS' && laneOf(first).detail.includes('baseline'),
+      laneOf(first).detail);
+    check('VB3: the same version later PASSES',
+      laneOf(again).status === 'PASS', laneOf(again).detail);
+    check('VB4: a changed version is DRIFT',
+      laneOf(moved).status === 'DRIFT' && laneOf(moved).detail.includes('1.2.3 → 1.3.0'),
+      laneOf(moved).detail);
+    check('VB5: drift does not silently adopt the new version — it keeps reporting',
+      laneOf(stillMoved).status === 'DRIFT', laneOf(stillMoved).detail);
+
+    // The baseline is state on disk, so a fresh process sees it.
+    const reread = readBaseline(root);
+    check('VB6: the baseline survives restart, because it is state and not a cache',
+      reread.providers.claude?.version === '1.2.3',
+      JSON.stringify(reread.providers));
+    check('VB7: it is a real file under the state root',
+      fs.existsSync(baselinePath(root)), baselinePath(root));
+
+    // Unknown is never a pass, and is never recorded.
+    const quietRoot = path.join(TMP, `vb-${storeSeq += 1}`);
+    const quiet = await selftestLive({ ...base, stateRoot: quietRoot, versionOf: () => null });
+    check('VB8: a CLI that will not report a version is SKIPPED, never PASS',
+      laneOf(quiet).status === 'SKIPPED', laneOf(quiet).status);
+    check('VB9: and no version is invented for it',
+      Object.keys(readBaseline(quietRoot).providers).length === 0,
+      JSON.stringify(readBaseline(quietRoot).providers));
+
+    // Going quiet AFTER a baseline exists is not agreement either.
+    const wentQuiet = await selftestLive({ ...base, versionOf: () => null });
+    check('VB10: a provider that goes quiet after a baseline exists does not PASS',
+      laneOf(wentQuiet).status === 'SKIPPED', laneOf(wentQuiet).status);
+    check('VB10b: and the lane names the baseline it could no longer check',
+      laneOf(wentQuiet).detail.includes('1.2.3'), laneOf(wentQuiet).detail);
+
+    // Nothing identifying is persisted.
+    check('VB11: an account-shaped token is not recorded as a version',
+      normaliseVersion('claude 1.4.0 (someone@example.com)') === null,
+      String(normaliseVersion('claude 1.4.0 (someone@example.com)')));
+    check('VB12: a version is the first line, whitespace-collapsed and bounded',
+      normaliseVersion('  1.5.0   (build 9)\nextra line\n') === '1.5.0 (build 9)',
+      String(normaliseVersion('  1.5.0   (build 9)\nextra line\n')));
+    check('VB13: no version at all stays null rather than becoming a string',
+      normaliseVersion(null) === null && normaliseVersion('   ') === null);
+
+    // A compare must not establish a baseline as a side effect.
+    const peekRoot = path.join(TMP, `vb-${storeSeq += 1}`);
+    compareVersion(readBaseline(peekRoot), 'claude', '9.9.9');
+    check('VB14: asking the question does not answer it — compare writes nothing',
+      !fs.existsSync(baselinePath(peekRoot)));
+  }
+  section('zeus status: a mission in the store is not a broken status command');
+  {
+    const root = path.join(TMP, 'status-demo');
+    fs.mkdirSync(root, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"statusdemo"}\n');
+    fs.writeFileSync(path.join(root, 'README.md'), '# demo\n');
+    execFileSync('git', ['-C', root, 'add', '-A']);
+    execFileSync('git', ['-C', root, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']);
+
+    const cwd = process.cwd();
+    process.chdir(root);
+    let plain = -1, byMissionId = -1;
+    try {
+      await main(['init']);
+      await main(['mission', 'create', 'a goal nobody will plan']);
+      // Before the fix this threw ScopeMismatchError out of cmdStatus: the
+      // primary status command was broken on any project that had ever
+      // created a mission.
+      plain = await main(['status']);
+      byMissionId = await main(['status', 'M-0001']);
+    } finally { process.chdir(cwd); }
+
+    check('ST1: zeus status survives a store that contains missions',
+      plain === 0, String(plain));
+    check('ST2: a mission id passed to zeus status is refused, not crashed on',
+      byMissionId === 2, String(byMissionId));
   }
 }

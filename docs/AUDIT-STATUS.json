@@ -1,285 +1,360 @@
 {
-  "auditedAt": "v0.1.0-rc.1 readiness review",
-  "scope": "src/ \u2014 the shipped runtime, which is all this repository contains. Findings raised against an earlier, unrelated prototype are marked OBSOLETE where the defect cannot occur in the current design.",
-  "findings": [
-    {
-      "id": "P0-1",
-      "severity": "P0",
-      "title": "One task can exhaust the host",
-      "status": "FIXED",
-      "resolution": "ProcessSupervisor: host-derived budgets with a control-plane reservation, per-execution memory/CPU/PID caps, worker caps injected into the environment and argv, wall clock, process-group and cgroup-scope termination.",
-      "regressionTests": [
-        "A: five heavy jobs never overlap (max concurrency 1)",
-        "EN-R1: the pathological task is bounded by the wall clock",
-        "EN-R3: all 100 descendants are killed, not just the parent",
-        "EN-R5: the control plane can still execute while a task misbehaved",
-        "B1: budgets are derived from the host, not hard-coded",
-        "B2: capacity is reserved for the control plane"
-      ]
-    },
-    {
-      "id": "P0-2",
-      "severity": "P0",
-      "title": "Arbitrary shell execution / insufficient filesystem confinement",
-      "status": "FIXED",
-      "resolution": "ExecutionPolicy evaluated before every spawn: symlink-aware path containment, traversal and absolute-path refusal, destructive/fork-bomb/persistence/env-poisoning detection, environment allowlist with an always-deny secret list, and bubblewrap filesystem+network confinement for project commands.",
-      "regressionTests": [
-        "EN-X2: ../ traversal is refused",
-        "EN-X4: a symlink pointing out of the worktree is refused",
-        "X6: rm -rf / is refused",
-        "X8: a fork bomb is refused",
-        "X11: writing a shell profile for persistence is refused",
-        "X12: re-introducing a stripped credential is refused",
-        "X16: secrets never reach a project command",
-        "EN-S2: a policy-denied command never spawns",
-        "EN-S3: a cwd outside the worktree is refused"
-      ],
-      "residualRisk": "The implementer agent is intentionally allowed to edit its worktree and run project commands; confinement bounds it to that worktree, but a malicious project command that stays inside the worktree is still executed."
-    },
-    {
-      "id": "P0-3",
-      "severity": "P0",
-      "title": "No multi-instance protection for the event store",
-      "status": "FIXED",
-      "resolution": "ProjectLock: O_EXCL lease with owner identity, PID, hostname, heartbeat and TTL; stale detection by liveness and expiry; atomic replace on renewal. EventStore additionally refuses duplicate sequence/id, detects chain breaks and tampering, quarantines a torn final line and fsyncs each append.",
-      "regressionTests": [
-        "EN-L2: a second instance is refused, with a specific reason",
-        "EN-L3: a separate OS PROCESS is also refused the lease",
-        "L5: a crashed owner's lease is reclaimed, and the takeover is stated",
-        "L6: an expired lease from another host is reclaimed",
-        "EN-V2: an edited event is detected",
-        "EN-V3: a torn final line is excluded, not parsed as truth",
-        "EN-V5: a SIGKILL during appends leaves a readable, verifiable log"
-      ]
-    },
-    {
-      "id": "P0-4",
-      "severity": "P0",
-      "title": "the heavyweight suite timeout killed nothing",
-      "status": "OBSOLETE",
-      "resolution": "The heavyweight suite belonged to an earlier prototype. In the portable engine there is no such runner: every check goes through the supervisor, which owns the timeout and the process-group kill, so the defect is structurally absent rather than patched.",
-      "regressionTests": [
-        "B: a hung job is stopped by the wall clock",
-        "B-3: the whole process tree dies, not just the shell"
-      ]
-    },
-    {
-      "id": "P0-5",
-      "severity": "P0",
-      "title": "Deploy could not prove what it deployed",
-      "status": "OBSOLETE",
-      "resolution": "The portable engine performs no merge and no deploy at all; acceptance ends at COMPLETED and shipping is a separate, explicitly enabled operation. There is no deploy path to get wrong.",
-      "regressionTests": [
-        "EN-E3: the task reaches a terminal state"
-      ]
-    },
-    {
-      "id": "P0-6",
-      "severity": "P0",
-      "title": "Cancellation did not work across processes",
-      "status": "FIXED",
-      "discoveredBy": "CLI verification during this phase \u2014 `zeus cancel` reported success while the process tree kept running",
-      "resolution": "Every spawn records its process group in an on-disk run registry under the project state root; cancel kills recorded groups from any process, prunes stale entries and records PROCESSES_TERMINATED evidence.",
-      "regressionTests": [
-        "EN-C11: a running execution is recorded on disk where another process can find it",
-        "EN-C12: a SEPARATE process can cancel and the tree really dies",
-        "C13: the registry entry is removed after the kill"
-      ]
-    },
-    {
-      "id": "P1-1",
-      "severity": "P1",
-      "title": "A task could pass acceptance with no executed verification",
-      "status": "FIXED",
-      "resolution": "A required check that does not execute yields REQUIRED_TEST_NOT_RUN and the task ends NEEDS_RECONCILIATION. A project with no executable verification at all cannot claim acceptance unless policy.allowUnverifiedAcceptance is explicitly set.",
-      "regressionTests": [
-        "EN-Q5: a policy denial of a REQUIRED test is REQUIRED_TEST_NOT_RUN",
-        "Q8: a required test that never ran blocks acceptance",
-        "Q9: a project with no executable verification cannot claim acceptance",
-        "Q10: an explicit opt-in allows acceptance without tests"
-      ]
-    },
-    {
-      "id": "P1-2",
-      "severity": "P1",
-      "title": "An intentional guard reported as a failure",
-      "status": "OBSOLETE",
-      "resolution": "That behaviour belonged to the legacy validation-run guard, which does not exist in the portable engine.",
-      "regressionTests": []
-    },
-    {
-      "id": "P1-3",
-      "severity": "P1",
-      "title": "No task-level wall clock",
-      "status": "FIXED",
-      "resolution": "Task-level ceilings (wall clock, agent invocations, design attempts, review cycles, repair cycles, provider wall clock, and measured cost only when a provider reports one). Usage is recomputed from the event log, so a restart cannot reset a budget. A breach emits TASK_BUDGET_EXCEEDED with limit and observed usage and stops at AWAITING_HUMAN. Queue wait is tracked apart from execution.",
-      "regressionTests": [
-        "TB2: total wall-clock exhaustion is detected",
-        "TB3: review-loop exhaustion is detected",
-        "TB4: repair-loop exhaustion is detected",
-        "TB5: provider-call exhaustion is detected",
-        "TB7: queue wait is tracked separately and does not count as execution",
-        "TB8: unmeasured cost is reported as unknown, never invented",
-        "TB10: a budget breach stops the task and asks a human, not silently continues",
-        "TB11: the breach records budget, limit and observed usage",
-        "TB12: budget usage survives a process restart (recomputed from the log)"
-      ]
-    },
-    {
-      "id": "P1-4",
-      "severity": "P1",
-      "title": "Synchronous work on the request path",
-      "status": "OBSOLETE",
-      "resolution": "Applies to the legacy control-plane HTTP server, which is not part of the portable product. The CLI has no request path.",
-      "regressionTests": []
-    },
-    {
-      "id": "P1-5",
-      "severity": "P1",
-      "title": "EventStore.append is O(n) per write",
-      "status": "FIXED",
-      "regressionTests": [
-        "ES1: appends stay flat as history grows (no full rescan)",
-        "ES2: the whole history is present and verifies",
-        "ES4: tamper detection still works with an index",
-        "ES5: a second store instance appends correctly after an external write",
-        "ES6: a torn final line is still excluded",
-        "ES7: appends resume correctly after a repair"
-      ],
-      "resolution": "append() keeps a durable per-task cursor (last sequence, last id, log byte length) plus an in-memory id set, so a normal append no longer rescans history. The cursor is invalidated by any byte-length mismatch, so an out-of-band write falls back to a full scan rather than trusting a stale number. verify() still walks the whole chain; fsync, duplicate refusal, tamper detection and torn-line quarantine are unchanged."
-    },
-    {
-      "id": "P1-6",
-      "severity": "P1",
-      "title": "Crash recovery re-runs whole phases",
-      "status": "ACCEPTED_RISK",
-      "resolution": "Deliberate policy, documented per phase in docs/RECOVERY.md. DESIGN and REVIEW are read-only (SAFE_AUTO_RETRY), VERIFY is repeatable (SAFE_AUTO_RESUME), IMPLEMENT/FIX/FINAL_ACCEPTANCE are side-effecting (REQUIRES_RECONCILIATION), merge/deploy would be NEVER_AUTO_RESUME. Nothing auto-resumes today: the residual cost is operator time after a crash, versus duplicated side effects on a user repository if it were automated.",
-      "regressionTests": [
-        "EN-C7: a crash mid-phase is visible as a started-but-unfinished phase",
-        "EN-C8: the dirty worktree is preserved, not reset",
-        "EN-C9: the log still verifies after the crash",
-        "EN-C10: missing final JSON is NOT read as \"nothing happened\""
-      ]
-    },
-    {
-      "id": "P1-7",
-      "severity": "P1",
-      "title": "Provider failures escalate as task failures",
-      "status": "FIXED",
-      "resolution": "Provider outages (429/529/overloaded/transport) and infrastructure outcomes are classified separately and send the task to NEEDS_RECONCILIATION, never to FAILED or BLOCKED. A missing toolchain is INFRASTRUCTURE_FAILURE, not a failing test.",
-      "regressionTests": [
-        "EN-Q6: a spawn failure is INFRASTRUCTURE_FAILURE",
-        "EN-S4b: a missing toolchain is INFRASTRUCTURE_FAILURE, never a failing test",
-        "EN-S4c: the same holds under filesystem confinement, where the wrapper hides it"
-      ]
-    },
-    {
-      "id": "P1-8",
-      "severity": "P1",
-      "title": "Tool-evidence parser produced false accusations",
-      "status": "OBSOLETE",
-      "resolution": "Zeus does not implement tool-evidence reconciliation, so the defect cannot occur here. Building that layer is future work and must carry its own tests before it is trusted.",
-      "regressionTests": []
-    },
-    {
-      "id": "P1-9",
-      "severity": "P1",
-      "title": "Prediction checks ran from the wrong directory",
-      "status": "OBSOLETE",
-      "resolution": "Every check runs with an explicit, policy-validated cwd inside the worktree; there is no ambient working directory to get wrong.",
-      "regressionTests": [
-        "EN-S3: a cwd outside the worktree is refused"
-      ]
-    },
-    {
-      "id": "P1-10",
-      "severity": "P1",
-      "title": "Reviewer independence is not yet mechanically verified",
-      "status": "FIXED",
-      "regressionTests": [
-        "RI1: a clean review payload is valid and carries its provenance",
-        "RI2: every delivered section is hashed for later checking",
-        "RI4-1: planner-reasoning is refused by policy",
-        "RI4-2: planner-plan is refused by policy",
-        "RI4-3: implementer-transcript is refused by policy",
-        "RI4-4: implementer-rationale is refused by policy",
-        "RI4-5: previous-review is refused by policy",
-        "RI4-6: adjudication is refused by policy",
-        "RI4-7: acceptance-verdict is refused by policy",
-        "RI4-8: area-context is refused by policy",
-        "RI5-1: planner chain-of-thought smuggled inside an allowed section is caught",
-        "RI5-2: planner design output smuggled inside an allowed section is caught",
-        "RI5-3: implementer transcript smuggled inside an allowed section is caught",
-        "RI5-4: previous review smuggled inside an allowed section is caught",
-        "RI5-5: adjudication smuggled inside an allowed section is caught",
-        "RI5-6: area context smuggled inside an allowed section is caught",
-        "RI6: a contaminated payload is never handed to the reviewer",
-        "RI8: the developer payload contains exactly what the reviewer is denied",
-        "RI9: a reviewer claiming context it was never given is recorded"
-      ],
-      "resolution": "The reviewer payload is assembled under an explicit policy, section by section, then hashed and recorded (REVIEW_CONTEXT). Forbidden kinds are refused, and a content scan catches forbidden material smuggled inside an allowed section. A violation invalidates the review: the prompt is never handed over and the task goes to NEEDS_RECONCILIATION with REVIEW_CONTEXT_POLICY_VIOLATION. Reviewer self-report is reconciled against what was delivered and unsupported claims are recorded."
-    },
-    {
-      "id": "P3-5",
-      "severity": "P3",
-      "title": "Task ids collided across projects",
-      "status": "FIXED",
-      "resolution": "Task ids carry the project identifier (project/T-0001) and are sanitised for filesystem use; the short local label remains for humans.",
-      "regressionTests": [
-        "ID1: a task id carries its project",
-        "ID5: two projects' first tasks do not share an id",
-        "ID6: each engine resolves only its own task"
-      ]
-    },
-    {
-      "id": "P3-7",
-      "severity": "P3",
-      "title": "Prototype code mistakable for runtime",
-      "status": "FIXED",
-      "resolution": "The prototype is not in this repository. The package ships by allowlist rather than denylist, and scripts/package.sh inspects the staged artifact before writing it.",
-      "regressionTests": [
-        "PK1: the package ships only the runtime, by allowlist",
-        "PK2: no runtime source imports anything from outside src/",
-        "PK3: the repository carries no prototype, archive or vendored tree",
-        "PB1: the repository carries no archive, prototype or legacy tree",
-        "PB10-2: the artifact contains no archive, prototype or state paths"
-      ]
-    },
-    {
-      "id": "P3-3",
-      "severity": "P3",
-      "title": "No LICENSE",
-      "status": "FIXED",
-      "regressionTests": [
-        "BR16: the package declares AGPL-3.0-only and ships the licence",
-        "PB15: the artifact ships the AGPL licence"
-      ],
-      "resolution": "Zeus is licensed AGPL-3.0-only. LICENSE holds the full text, package.json declares \"AGPL-3.0-only\", scripts/package.sh ships it in the artifact, and docs/LICENSING.md explains the network clause and what it means for users, modifiers and contributors."
-    },
-    {
-      "id": "P3-8",
-      "severity": "P3",
-      "title": "Product identity rename to Zeus",
-      "status": "FIXED",
-      "resolution": "Every product-facing surface identifies the product as Zeus: CLI (zeus), project directory (.zeus/), user paths (~/.local/share/zeus, ~/.config/zeus), installer, setup wizard, doctor, docs, package metadata and artifact name. The old identity survives only in src/migrate.ts and the bin/autopilot deprecation shim, both deliberate and both scanned for. Git history was not rewritten.",
-      "regressionTests": [
-        "BR1: no product-facing source names the old product",
-        "BR2: the CLI executable is zeus",
-        "BR3: zeus --help works and identifies the product",
-        "BR6: zeus init creates .zeus/ and never .autopilot/",
-        "BR5b: user data and config live under zeus, XDG-respecting",
-        "BR15b: it forwards to zeus and produces the real answer",
-        "BR15c: it says once, on stderr, that the command was renamed",
-        "BR11: migration moves the directory",
-        "BR11b: configuration survives",
-        "BR11c: the hash-chained event log survives byte for byte",
-        "BR11d: logs and evidence survive",
-        "BR12: migration is idempotent \u2014 a second run finds nothing to do",
-        "BR13: both layouts existing is a reported conflict, not a merge",
-        "BR13b: nothing is moved when there is a conflict",
-        "BR13c: neither copy is modified",
-        "PB13: the artifact carries no stale product branding"
-      ]
-    }
-  ]
+ "auditedAt": "v1.0.0-rc.1 closure review",
+ "scope": "src/ \u2014 the shipped runtime, which is all this repository contains. Findings raised against an earlier, unrelated prototype are marked OBSOLETE where the defect cannot occur in the current design.",
+ "findings": [
+  {
+   "id": "P0-1",
+   "severity": "P0",
+   "title": "One task can exhaust the host",
+   "status": "FIXED",
+   "resolution": "ProcessSupervisor: host-derived budgets with a control-plane reservation, per-execution memory/CPU/PID caps, worker caps injected into the environment and argv, wall clock, process-group and cgroup-scope termination.",
+   "regressionTests": [
+    "A: five heavy jobs never overlap (max concurrency 1)",
+    "EN-R1: the pathological task is bounded by the wall clock",
+    "EN-R3: all 100 descendants are killed, not just the parent",
+    "EN-R5: the control plane can still execute while a task misbehaved",
+    "B1: budgets are derived from the host, not hard-coded",
+    "B2: capacity is reserved for the control plane"
+   ]
+  },
+  {
+   "id": "P0-2",
+   "severity": "P0",
+   "title": "Arbitrary shell execution / insufficient filesystem confinement",
+   "status": "FIXED",
+   "resolution": "ExecutionPolicy evaluated before every spawn: symlink-aware path containment, traversal and absolute-path refusal, destructive/fork-bomb/persistence/env-poisoning detection, environment allowlist with an always-deny secret list, and bubblewrap filesystem+network confinement for project commands.",
+   "regressionTests": [
+    "EN-X2: ../ traversal is refused",
+    "EN-X4: a symlink pointing out of the worktree is refused",
+    "X6: rm -rf / is refused",
+    "X8: a fork bomb is refused",
+    "X11: writing a shell profile for persistence is refused",
+    "X12: re-introducing a stripped credential is refused",
+    "X16: secrets never reach a project command",
+    "EN-S2: a policy-denied command never spawns",
+    "EN-S3: a cwd outside the worktree is refused"
+   ],
+   "residualRisk": "The implementer agent is intentionally allowed to edit its worktree and run project commands; confinement bounds it to that worktree, but a malicious project command that stays inside the worktree is still executed."
+  },
+  {
+   "id": "P0-3",
+   "severity": "P0",
+   "title": "No multi-instance protection for the event store",
+   "status": "FIXED",
+   "resolution": "ProjectLock: O_EXCL lease with owner identity, PID, hostname, heartbeat and TTL; stale detection by liveness and expiry; atomic replace on renewal. EventStore additionally refuses duplicate sequence/id, detects chain breaks and tampering, quarantines a torn final line and fsyncs each append.",
+   "regressionTests": [
+    "EN-L2: a second instance is refused, with a specific reason",
+    "EN-L3: a separate OS PROCESS is also refused the lease",
+    "L5: a crashed owner's lease is reclaimed, and the takeover is stated",
+    "L6: an expired lease from another host is reclaimed",
+    "EN-V2: an edited event is detected",
+    "EN-V3: a torn final line is excluded, not parsed as truth",
+    "EN-V5: a SIGKILL during appends leaves a readable, verifiable log"
+   ]
+  },
+  {
+   "id": "P0-4",
+   "severity": "P0",
+   "title": "the heavyweight suite timeout killed nothing",
+   "status": "OBSOLETE",
+   "resolution": "The heavyweight suite belonged to an earlier prototype. In the portable engine there is no such runner: every check goes through the supervisor, which owns the timeout and the process-group kill, so the defect is structurally absent rather than patched.",
+   "regressionTests": [
+    "B: a hung job is stopped by the wall clock",
+    "B-3: the whole process tree dies, not just the shell"
+   ]
+  },
+  {
+   "id": "P0-5",
+   "severity": "P0",
+   "title": "Deploy could not prove what it deployed",
+   "status": "OBSOLETE",
+   "resolution": "The portable engine performs no merge and no deploy at all; acceptance ends at COMPLETED and shipping is a separate, explicitly enabled operation. There is no deploy path to get wrong.",
+   "regressionTests": [
+    "EN-E3: the task reaches a terminal state"
+   ]
+  },
+  {
+   "id": "P0-6",
+   "severity": "P0",
+   "title": "Cancellation did not work across processes",
+   "status": "FIXED",
+   "discoveredBy": "CLI verification during this phase \u2014 `zeus cancel` reported success while the process tree kept running",
+   "resolution": "Every spawn records its process group in an on-disk run registry under the project state root; cancel kills recorded groups from any process, prunes stale entries and records PROCESSES_TERMINATED evidence.",
+   "regressionTests": [
+    "EN-C11: a running execution is recorded on disk where another process can find it",
+    "EN-C12: a SEPARATE process can cancel and the tree really dies",
+    "C13: the registry entry is removed after the kill"
+   ]
+  },
+  {
+   "id": "P1-1",
+   "severity": "P1",
+   "title": "A task could pass acceptance with no executed verification",
+   "status": "FIXED",
+   "resolution": "A required check that does not execute yields REQUIRED_TEST_NOT_RUN and the task ends NEEDS_RECONCILIATION. A project with no executable verification at all cannot claim acceptance unless policy.allowUnverifiedAcceptance is explicitly set.",
+   "regressionTests": [
+    "EN-Q5: a policy denial of a REQUIRED test is REQUIRED_TEST_NOT_RUN",
+    "Q8: a required test that never ran blocks acceptance",
+    "Q9: a project with no executable verification cannot claim acceptance",
+    "Q10: an explicit opt-in allows acceptance without tests"
+   ]
+  },
+  {
+   "id": "P1-2",
+   "severity": "P1",
+   "title": "An intentional guard reported as a failure",
+   "status": "OBSOLETE",
+   "resolution": "That behaviour belonged to the legacy validation-run guard, which does not exist in the portable engine.",
+   "regressionTests": []
+  },
+  {
+   "id": "P1-3",
+   "severity": "P1",
+   "title": "No task-level wall clock",
+   "status": "FIXED",
+   "resolution": "Task-level ceilings (wall clock, agent invocations, design attempts, review cycles, repair cycles, provider wall clock, and measured cost only when a provider reports one). Usage is recomputed from the event log, so a restart cannot reset a budget. A breach emits TASK_BUDGET_EXCEEDED with limit and observed usage and stops at AWAITING_HUMAN. Queue wait is tracked apart from execution.",
+   "regressionTests": [
+    "TB2: total wall-clock exhaustion is detected",
+    "TB3: review-loop exhaustion is detected",
+    "TB4: repair-loop exhaustion is detected",
+    "TB5: provider-call exhaustion is detected",
+    "TB7: queue wait is tracked separately and does not count as execution",
+    "TB8: unmeasured cost is reported as unknown, never invented",
+    "TB10: a budget breach stops the task and asks a human, not silently continues",
+    "TB11: the breach records budget, limit and observed usage",
+    "TB12: budget usage survives a process restart (recomputed from the log)"
+   ]
+  },
+  {
+   "id": "P1-4",
+   "severity": "P1",
+   "title": "Synchronous work on the request path",
+   "status": "OBSOLETE",
+   "resolution": "Applies to the legacy control-plane HTTP server, which is not part of the portable product. The CLI has no request path.",
+   "regressionTests": []
+  },
+  {
+   "id": "P1-5",
+   "severity": "P1",
+   "title": "EventStore.append is O(n) per write",
+   "status": "FIXED",
+   "regressionTests": [
+    "ES1: appends stay flat as history grows (no full rescan)",
+    "ES2: the whole history is present and verifies",
+    "ES4: tamper detection still works with an index",
+    "ES5: a second store instance appends correctly after an external write",
+    "ES6: a torn final line is still excluded",
+    "ES7: appends resume correctly after a repair"
+   ],
+   "resolution": "append() keeps a durable per-task cursor (last sequence, last id, log byte length) plus an in-memory id set, so a normal append no longer rescans history. The cursor is invalidated by any byte-length mismatch, so an out-of-band write falls back to a full scan rather than trusting a stale number. verify() still walks the whole chain; fsync, duplicate refusal, tamper detection and torn-line quarantine are unchanged."
+  },
+  {
+   "id": "P1-6",
+   "severity": "P1",
+   "title": "Crash recovery re-runs whole phases",
+   "status": "ACCEPTED_RISK",
+   "resolution": "Deliberate policy, documented per phase in docs/RECOVERY.md. DESIGN and REVIEW are read-only (SAFE_AUTO_RETRY), VERIFY is repeatable (SAFE_AUTO_RESUME), IMPLEMENT/FIX/FINAL_ACCEPTANCE are side-effecting (REQUIRES_RECONCILIATION), merge/deploy would be NEVER_AUTO_RESUME. Nothing auto-resumes today: the residual cost is operator time after a crash, versus duplicated side effects on a user repository if it were automated.",
+   "regressionTests": [
+    "EN-C7: a crash mid-phase is visible as a started-but-unfinished phase",
+    "EN-C8: the dirty worktree is preserved, not reset",
+    "EN-C9: the log still verifies after the crash",
+    "EN-C10: missing final JSON is NOT read as \"nothing happened\""
+   ]
+  },
+  {
+   "id": "P1-7",
+   "severity": "P1",
+   "title": "Provider failures escalate as task failures",
+   "status": "FIXED",
+   "resolution": "Provider outages (429/529/overloaded/transport) and infrastructure outcomes are classified separately and send the task to NEEDS_RECONCILIATION, never to FAILED or BLOCKED. A missing toolchain is INFRASTRUCTURE_FAILURE, not a failing test.",
+   "regressionTests": [
+    "EN-Q6: a spawn failure is INFRASTRUCTURE_FAILURE",
+    "EN-S4b: a missing toolchain is INFRASTRUCTURE_FAILURE, never a failing test",
+    "EN-S4c: the same holds under filesystem confinement, where the wrapper hides it"
+   ]
+  },
+  {
+   "id": "P1-8",
+   "severity": "P1",
+   "title": "Tool-evidence parser produced false accusations",
+   "status": "OBSOLETE",
+   "resolution": "Zeus does not implement tool-evidence reconciliation, so the defect cannot occur here. Building that layer is future work and must carry its own tests before it is trusted.",
+   "regressionTests": []
+  },
+  {
+   "id": "P1-9",
+   "severity": "P1",
+   "title": "Prediction checks ran from the wrong directory",
+   "status": "OBSOLETE",
+   "resolution": "Every check runs with an explicit, policy-validated cwd inside the worktree; there is no ambient working directory to get wrong.",
+   "regressionTests": [
+    "EN-S3: a cwd outside the worktree is refused"
+   ]
+  },
+  {
+   "id": "P1-10",
+   "severity": "P1",
+   "title": "Reviewer independence is not yet mechanically verified",
+   "status": "FIXED",
+   "regressionTests": [
+    "RI1: a clean review payload is valid and carries its provenance",
+    "RI2: every delivered section is hashed for later checking",
+    "RI4-1: planner-reasoning is refused by policy",
+    "RI4-2: planner-plan is refused by policy",
+    "RI4-3: implementer-transcript is refused by policy",
+    "RI4-4: implementer-rationale is refused by policy",
+    "RI4-5: previous-review is refused by policy",
+    "RI4-6: adjudication is refused by policy",
+    "RI4-7: acceptance-verdict is refused by policy",
+    "RI4-8: area-context is refused by policy",
+    "RI5-1: planner chain-of-thought smuggled inside an allowed section is caught",
+    "RI5-2: planner design output smuggled inside an allowed section is caught",
+    "RI5-3: implementer transcript smuggled inside an allowed section is caught",
+    "RI5-4: previous review smuggled inside an allowed section is caught",
+    "RI5-5: adjudication smuggled inside an allowed section is caught",
+    "RI5-6: area context smuggled inside an allowed section is caught",
+    "RI6: a contaminated payload is never handed to the reviewer",
+    "RI8: the developer payload contains exactly what the reviewer is denied",
+    "RI9: a reviewer claiming context it was never given is recorded"
+   ],
+   "resolution": "The reviewer payload is assembled under an explicit policy, section by section, then hashed and recorded (REVIEW_CONTEXT). Forbidden kinds are refused, and a content scan catches forbidden material smuggled inside an allowed section. A violation invalidates the review: the prompt is never handed over and the task goes to NEEDS_RECONCILIATION with REVIEW_CONTEXT_POLICY_VIOLATION. Reviewer self-report is reconciled against what was delivered and unsupported claims are recorded."
+  },
+  {
+   "id": "P3-5",
+   "severity": "P3",
+   "title": "Task ids collided across projects",
+   "status": "FIXED",
+   "resolution": "Task ids carry the project identifier (project/T-0001) and are sanitised for filesystem use; the short local label remains for humans.",
+   "regressionTests": [
+    "ID1: a task id carries its project",
+    "ID5: two projects' first tasks do not share an id",
+    "ID6: each engine resolves only its own task"
+   ]
+  },
+  {
+   "id": "P3-7",
+   "severity": "P3",
+   "title": "Prototype code mistakable for runtime",
+   "status": "FIXED",
+   "resolution": "The prototype is not in this repository. The package ships by allowlist rather than denylist, and scripts/package.sh inspects the staged artifact before writing it.",
+   "regressionTests": [
+    "PK1: the package ships only the runtime, by allowlist",
+    "PK2: no runtime source imports anything from outside src/",
+    "PK3: the repository carries no prototype, archive or vendored tree",
+    "PB1: the repository carries no archive, prototype or legacy tree",
+    "PB10-2: the artifact contains no archive, prototype or state paths"
+   ]
+  },
+  {
+   "id": "P3-3",
+   "severity": "P3",
+   "title": "No LICENSE",
+   "status": "FIXED",
+   "regressionTests": [
+    "BR16: the package declares AGPL-3.0-only and ships the licence",
+    "PB15: the artifact ships the AGPL licence"
+   ],
+   "resolution": "Zeus is licensed AGPL-3.0-only. LICENSE holds the full text, package.json declares \"AGPL-3.0-only\", scripts/package.sh ships it in the artifact, and docs/LICENSING.md explains the network clause and what it means for users, modifiers and contributors."
+  },
+  {
+   "id": "P3-8",
+   "severity": "P3",
+   "title": "Product identity rename to Zeus",
+   "status": "FIXED",
+   "resolution": "Every product-facing surface identifies the product as Zeus: CLI (zeus), project directory (.zeus/), user paths (~/.local/share/zeus, ~/.config/zeus), installer, setup wizard, doctor, docs, package metadata and artifact name. The old identity survives only in src/migrate.ts and the bin/autopilot deprecation shim, both deliberate and both scanned for. Git history was not rewritten.",
+   "regressionTests": [
+    "BR1: no product-facing source names the old product",
+    "BR2: the CLI executable is zeus",
+    "BR3: zeus --help works and identifies the product",
+    "BR6: zeus init creates .zeus/ and never .autopilot/",
+    "BR5b: user data and config live under zeus, XDG-respecting",
+    "BR15b: it forwards to zeus and produces the real answer",
+    "BR15c: it says once, on stderr, that the command was renamed",
+    "BR11: migration moves the directory",
+    "BR11b: configuration survives",
+    "BR11c: the hash-chained event log survives byte for byte",
+    "BR11d: logs and evidence survive",
+    "BR12: migration is idempotent \u2014 a second run finds nothing to do",
+    "BR13: both layouts existing is a reported conflict, not a merge",
+    "BR13b: nothing is moved when there is a conflict",
+    "BR13c: neither copy is modified",
+    "PB13: the artifact carries no stale product branding"
+   ]
+  },
+  {
+   "id": "P1-11",
+   "severity": "P1",
+   "title": "An unevidenced projected metric survived into the README",
+   "status": "FIXED",
+   "observed": "README.md published `ZERO_TOUCH_CLEAN_RATE 92% (46/50 completed tasks: 0 interventions, 0 attributed regressions)`. This project had zero completed tasks at the time and has zero now, so the figure described no observation. It was the headline number of the product.",
+   "rootCause": "An illustrative sample of the metric's output was written into documentation as though it were a reading. Nothing contradicted it: `zeroTouchCleanRate` in src/validation/telemetry.ts was always honest and reports `n/a (no completed tasks yet)` with no data, so the defect lived entirely in prose. No gate compares a documentation claim against the log, which is why a projected number could sit in the README indefinitely while every executable check stayed green.",
+   "resolution": "The figure is replaced by this repository's real reading (`n/a`), the metric's definition, and an explicit observed-state table covering suite size, completed tasks, live-model oracle sessions and real end-to-end missions. README now states that no figure in it is projected, extrapolated or illustrative. The class of defect \u2014 documentation claiming more than the log supports \u2014 is recorded here rather than treated as a typo.",
+   "regressionTests": [
+    "ST1: zeus status survives a store that contains missions",
+    "M3-15h: a caller cannot claim more than the criteria derive"
+   ]
+  },
+  {
+   "id": "P1-12",
+   "severity": "P1",
+   "title": "zeus status crashed on any project that had ever created a mission",
+   "status": "FIXED",
+   "observed": "`zeus status` exited with an unhandled ScopeMismatchError stack trace on this repository. Reproduced directly: `zeus: ScopeMismatchError: task id expected, got a mission id \"zeus-public/M-0001\"` from Engine.task via cmdStatus. The primary status command was unusable, and the failure was permanent once a single mission existed.",
+   "rootCause": "cmdStatus passed every id from `EventStore.listTasks()` to `Engine.task()`. Missions share the store with tasks by design, and M1's scope discriminant correctly refuses a mission id where a task id is expected \u2014 loudly, which is what it is for. The discriminant was right; the caller had never been taught to filter. The defect was invisible because no test created a mission and then ran status.",
+   "resolution": "cmdStatus filters to task-scoped ids, reports the mission count with a pointer to `zeus mission list`, and refuses an explicitly supplied mission id with an actionable message and exit 2 instead of a stack trace.",
+   "regressionTests": [
+    "ST1: zeus status survives a store that contains missions",
+    "ST2: a mission id passed to zeus status is refused, not crashed on"
+   ]
+  },
+  {
+   "id": "P1-13",
+   "severity": "P1",
+   "title": "The provider CLI drift lane could never fire",
+   "status": "FIXED",
+   "observed": "`cli-version-drift` reported SKIPPED on every run of every project: 'no provider CLI versions were recorded, so drift cannot be detected'. Confirmed by grep: src/cli.ts read `providers.versions` from config and nothing anywhere in the codebase ever wrote that key.",
+   "rootCause": "The lane was written against a configuration key that was designed but never implemented. A check that cannot fire is worse than an absent one, because it still appears in the report and reads as coverage. The selftest's own report made it look like a lane was being exercised.",
+   "resolution": "The baseline moved to durable project state (`<stateRoot>/provider-versions.json`, beside the event log) in src/mission/versions.ts. First successful contact records the baseline and is explicitly not drift; a later matching version PASSES; a changed version is DRIFT and is NOT silently adopted, so it keeps reporting until a human accepts it; a CLI that will not report a version is SKIPPED rather than PASS and nothing is recorded for it. Version strings are first-line-only, whitespace-collapsed, length-bounded and passed through the event redactor, and an address-shaped token is dropped rather than stored.",
+   "regressionTests": [
+    "VB1: the lane is no longer permanently SKIPPED",
+    "VB2: first contact records the baseline and is not drift",
+    "VB3: the same version later PASSES",
+    "VB4: a changed version is DRIFT",
+    "VB5: drift does not silently adopt the new version \u2014 it keeps reporting",
+    "VB6: the baseline survives restart, because it is state and not a cache",
+    "VB8: a CLI that will not report a version is SKIPPED, never PASS",
+    "VB9: and no version is invented for it",
+    "VB11: an account-shaped token is not recorded as a version",
+    "VB14: asking the question does not answer it \u2014 compare writes nothing"
+   ]
+  },
+  {
+   "id": "P1-14",
+   "severity": "P1",
+   "title": "The live selftest cost cap measured provider topology, not cost",
+   "status": "FIXED",
+   "observed": "A healthy two-provider preflight against this project reported $0.0695 and tripped the $0.05 cap as DRIFT, which would have required a human confirmation before every unattended mission run on a correctly configured project.",
+   "rootCause": "SELFTEST_COST_CAP_USD was a single whole-preflight constant sized as though exactly one provider would be contacted. This project configures two, one of which is subscription-billed and reports no price at all, so the cap effectively measured how many providers were configured rather than whether the preflight was expensive.",
+   "resolution": "The cap scales with the work performed: `selftestCostCap(contacts)` = a per-contact ceiling derived from the single observed metered contact ($0.0695) times a stated headroom factor of 2, multiplied by providers actually contacted, with a floor of one contact. The observation and the judgement are named separately in the source so neither reads as measured. The report now carries costCapUsd, contacts and costIsLowerBound; an unpriced contact keeps the total a lower bound and is never counted as zero.",
+   "regressionTests": [
+    "SC1: one contact is capped at the observed contact price plus headroom",
+    "SC2: the cap scales with the number of providers contacted",
+    "SC4: the observed two-provider preflight is INSIDE the cap",
+    "SC4b: the unpriced contact makes the total a LOWER BOUND, not a total",
+    "SC4c: an unpriced contact is never counted as free",
+    "SC5: a preflight that really is expensive still trips the cap",
+    "SC5b: the over-cap message names the unmetered contacts it could not price"
+   ]
+  },
+  {
+   "id": "P2-1",
+   "severity": "P2",
+   "title": "Test sources are never type-checked",
+   "status": "OPEN",
+   "observed": "tsconfig.json includes only `src/**/*.ts`, and the runner is `ts-node --transpile-only`, so no type error in test/ is ever reported. Type-checking test/execution.ts by hand found M3-2f asserting `!validation.ok` on a PlanValidation that has no `ok` field: the assertion was `!undefined`, always true, and the check had been passing without testing anything. The same pass found four pre-existing type errors in test/setup.ts.",
+   "rootCause": "The suite is executed rather than compiled, and the compile step's include list stops at src/. A vacuous assertion is indistinguishable from a passing one in the report, so the suite's own green is weaker evidence than it appears.",
+   "resolution": "Not fixed in this cycle. M3-2f is corrected to assert `validation.valid` and now reports the codes it saw. Extending the type-check to test/ requires resolving the four inherited test/setup.ts errors first, which is next-cycle work rather than something to fold into a release gate.",
+   "regressionTests": []
+  }
+ ]
 }

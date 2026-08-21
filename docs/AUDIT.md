@@ -16,8 +16,48 @@ rather than quietly dropped.
 | Severity | OPEN | ACCEPTED_RISK | PARTIALLY_FIXED | FIXED | OBSOLETE |
 |---|---|---|---|---|---|
 | **P0** | **0** | 0 | 0 | 5 | 2 |
-| **P1** | **0** | 1 | 0 | 5 | 4 |
+| **P1** | **0** | 1 | 0 | 9 | 4 |
+| P2 | **1** | 0 | 0 | 0 | 0 |
 | P3 | **0** | 0 | 0 | 3 | 0 |
+
+## v1.0.0-rc.1 closure review
+
+Four P1s and one P2, all found while trying to close V1 rather than while
+building it. Three of them share a shape worth naming: **a check that cannot
+fail, and a claim nothing checks.**
+
+**P1-11 — a projected metric in the README.** `ZERO_TOUCH_CLEAN_RATE 92%
+(46/50)` was published while this project had zero completed tasks. The code
+that computes the metric was always honest — it reports `n/a` with no data —
+so nothing in the product ever contradicted the prose. No gate compares a
+documentation claim against the log, and that is the actual finding: every
+executable check was green the entire time the headline number was fiction.
+
+**P1-12 — `zeus status` crashed on any project with a mission.** M1's scope
+discriminant refused a mission id where a task id was expected, exactly as
+designed and exactly as loudly. `cmdStatus` had simply never learned to filter.
+The discriminant was right; nothing had ever run status against a store
+containing a mission.
+
+**P1-13 — the provider drift lane could never fire.** It read a config key that
+nothing writes, so it reported SKIPPED on every project forever while still
+appearing in the report as a lane. The baseline now lives in durable state
+beside the event log: first contact records, later contacts compare, drift is
+never silently adopted, and a CLI that will not answer is unevaluated rather
+than passing.
+
+**P1-14 — the selftest cost cap measured provider topology.** A single
+whole-preflight constant sized for one provider tripped on a healthy
+two-provider run. The cap now scales with contacts actually made, from an
+observed per-contact price with a stated headroom factor, and an unpriced
+contact keeps the total a lower bound rather than becoming zero.
+
+**P2-1 — test sources are never type-checked.** `tsconfig.json` covers `src/`
+only and the runner is `--transpile-only`. Type-checking the tests by hand
+found an assertion reading `!validation.ok` on an object with no `ok` field:
+always true, always passing, testing nothing. Left OPEN — closing it means
+first resolving four inherited type errors in `test/setup.ts`, which is not
+work to fold into a release gate.
 
 Every FIXED item names the regression tests that would fail if the defect
 returned; they are listed per finding in `docs/AUDIT-STATUS.json`.

@@ -267,13 +267,42 @@ that diff overlaps anything that moved in between. It stops before integrating
 
 ### The number that matters
 
+`zeus status` ends with one figure:
+
 ```
-ZERO_TOUCH_CLEAN_RATE  92%  (46/50 completed tasks: 0 interventions, 0 attributed regressions)
+ZERO_TOUCH_CLEAN_RATE  n/a (no completed tasks yet)
 ```
 
-Shown by `zeus status`. Both halves are deliberate: a task that finished
-untouched but caused a regression next week is not a success, and counting it
-as one is the self-deception the metric exists to prevent.
+That is this repository's real reading today, not an illustration. A task
+counts as zero-touch clean only if it completed with **zero human
+interventions and zero regressions later attributed to it**. Both halves are
+deliberate: a task that finished untouched but caused a regression next week
+is not a success, and counting it as one is the self-deception the metric
+exists to prevent. Until tasks complete, the honest answer is `n/a` — the
+metric reports absence of evidence as absence of evidence rather than as a
+score.
+
+### What has actually been observed
+
+Zeus makes strong claims about refusal and evidence, so its own claims are
+held to the same rule. As of this commit, from the event log:
+
+| | Observed |
+|---|---|
+| Regression suite | 1045 checks, 0 failing |
+| Completed tasks | 0 |
+| `ZERO_TOUCH_CLEAN_RATE` | `n/a` — no completed tasks |
+| Mission oracle sessions against live models | 4 (`claude` compiler, `codex` critic) |
+| Real end-to-end Mission executions | **0** |
+
+The Mission execution loop — plan, plan critic, scheduler, spawn, integrate,
+ratchet, effect verification — is covered by deterministic regression tests
+and **has not yet run against live providers**. The oracle layer has: four
+missions were compiled and independently critiqued by real models, and the
+critique escalated consent on every one of them.
+
+No number in this README is projected, extrapolated, or illustrative. If a
+figure is not derivable from the committed log, it is not here.
 
 When Zeus does need a person, the interruption carries what is needed to
 resolve it in minutes — reason code, what was already tried, evidence

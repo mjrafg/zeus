@@ -20,6 +20,7 @@ import { Provider } from '../engine/providers';
 import { ProcessSupervisor } from '../engine/exec';
 import { ExecutionPolicy } from '../engine/policy';
 import { IsolationReport } from '../engine/isolation';
+import { VersionComparison, compareVersion, normaliseVersion, readBaseline, recordBaseline } from './versions';
 
 export type LaneStatus = 'PASS' | 'DRIFT' | 'FAIL' | 'SKIPPED';
 
@@ -42,6 +43,15 @@ export interface SelftestReport {
   lanes: LaneResult[];
   /** Provider-reported total. Null when no provider reported anything. */
   costUsd: number | null;
+  /** The ceiling this run was judged against, scaled to providers contacted. */
+  costCapUsd: number;
+  /** Providers actually contacted, which is what the cap is scaled by. */
+  contacts: number;
+  /**
+   * True when at least one contact reported no price, so `costUsd` is a LOWER
+   * BOUND rather than the total. An unpriced call is unknown, never free.
+   */
+  costIsLowerBound: boolean;
   unmeteredCalls: number;
   /** True when at least one lane failed: the mission must not start. */
   refused: boolean;
@@ -51,13 +61,42 @@ export interface SelftestReport {
 }
 
 /**
- * The ceiling for the whole preflight.
+ * What one metered provider contact has actually been observed to cost.
  *
- * Small on purpose. A preflight that can cost real money is a preflight people
- * disable, and a disabled preflight is worth less than no preflight at all
- * because it is still in the docs.
+ * MEASURED, not chosen. On 2026-08-20 a two-provider preflight against this
+ * project reported $0.0695 in total, from ONE metered contact — the second
+ * provider is subscription-billed and reports no cost at all. So the observed
+ * price of a single metered contact is $0.0695, and that is the only cost
+ * number in this file that came from anywhere but a provider.
  */
-export const SELFTEST_COST_CAP_USD = 0.05;
+export const OBSERVED_CONTACT_COST_USD = 0.0695;
+
+/**
+ * Headroom over the single observation above.
+ *
+ * A judgement, and stated as one: there is exactly one measurement, so the
+ * factor exists to absorb model and pricing variation rather than to encode
+ * any distribution. Doubling keeps the cap tight enough that a preflight
+ * costing an order of magnitude more still trips it.
+ */
+export const SELFTEST_HEADROOM = 2;
+
+/** Per-contact ceiling, rounded up to the cent. */
+export const SELFTEST_PER_CONTACT_CAP_USD =
+  Math.ceil(OBSERVED_CONTACT_COST_USD * SELFTEST_HEADROOM * 100) / 100;
+
+/**
+ * The ceiling for a preflight that contacts `contacts` providers.
+ *
+ * The previous constant was a single whole-preflight figure sized as though
+ * one provider would be contacted, so adding a second provider put an entirely
+ * healthy preflight over the cap. A cap on the whole run has to scale with the
+ * work the run actually does, or it measures the project's provider topology
+ * rather than the preflight's cost.
+ */
+export function selftestCostCap(contacts: number): number {
+  return Number((SELFTEST_PER_CONTACT_CAP_USD * Math.max(1, contacts)).toFixed(2));
+}
 
 /** The smallest exchange that still exercises the whole transport. */
 const CONTRACT_PROMPT =
@@ -69,10 +108,15 @@ export interface SelftestInput {
   policy: ExecutionPolicy;
   projectId: string;
   isolation: IsolationReport;
-  /** The provider CLI versions recorded when the project was last set up. */
-  recordedVersions?: Record<string, string>;
+  /**
+   * Where the durable version baseline lives. Absent means the lane cannot
+   * record anything and says so, rather than quietly passing.
+   */
+  stateRoot?: string;
   /** Reads a provider CLI's current version string, or null if it cannot. */
   versionOf?: (providerId: string) => string | null;
+  /** Clock, injected so the baseline's timestamps are testable. */
+  now?: () => string;
   timeoutSeconds?: number;
 }
 
@@ -89,9 +133,11 @@ const lane = (id: LaneId, status: LaneStatus, detail: string,
  */
 export async function selftestLive(input: SelftestInput): Promise<SelftestReport> {
   const lanes: LaneResult[] = [];
+  const at = (input.now ?? (() => new Date().toISOString()))();
   let cost = 0;
   let metered = 0;
   let unmeteredCalls = 0;
+  let contacts = 0;
 
   /* -- auth + provider contract, in one real call per provider ------------ */
 
@@ -104,6 +150,7 @@ export async function selftestLive(input: SelftestInput): Promise<SelftestReport
       continue;
     }
 
+    contacts += 1;
     const res = await provider.invoke({
       role: 'reviewer', taskId: `${input.projectId}/selftest`, projectId: input.projectId,
       prompt: CONTRACT_PROMPT, policy: input.policy, readOnly: true,
@@ -171,27 +218,50 @@ export async function selftestLive(input: SelftestInput): Promise<SelftestReport
 
   /* -- CLI version drift ------------------------------------------------- */
 
-  const recorded = input.recordedVersions ?? {};
   const versionOf = input.versionOf;
-  if (!versionOf || !Object.keys(recorded).length) {
+  const comparisons: VersionComparison[] = [];
+  if (!versionOf || !input.stateRoot) {
     lanes.push(lane('cli-version-drift', 'SKIPPED',
-      'no provider CLI versions were recorded, so drift cannot be detected'));
+      'no durable state root, so a version baseline can neither be read nor recorded'));
   } else {
-    const drifted: string[] = [];
-    const gone: string[] = [];
-    for (const [id, was] of Object.entries(recorded)) {
-      const now = versionOf(id);
-      if (now === null) gone.push(id);
-      else if (now !== was) drifted.push(`${id}: ${was} → ${now}`);
+    const baseline = readBaseline(input.stateRoot);
+    for (const provider of input.providers) {
+      const observed = normaliseVersion(versionOf(provider.id));
+      const cmp = compareVersion(baseline, provider.id, observed);
+      comparisons.push(cmp);
+      // Recorded only on a genuine first contact. A drifted version is NOT
+      // adopted: adopting it would make the lane report drift exactly once and
+      // then forget, which is indistinguishable from never reporting it.
+      if (cmp.verdict === 'BASELINE_RECORDED' || cmp.verdict === 'MATCH') {
+        recordBaseline(input.stateRoot, provider.id, observed, at);
+      }
     }
-    if (gone.length) {
-      lanes.push(lane('cli-version-drift', 'FAIL',
-        `cannot read the version of ${gone.join(', ')}`, gone.map((g) => `provider:${g}`)));
-    } else if (drifted.length) {
+    const drifted = comparisons.filter((c) => c.verdict === 'DRIFT');
+    const unknown = comparisons.filter((c) => c.verdict === 'UNKNOWN');
+    const fresh = comparisons.filter((c) => c.verdict === 'BASELINE_RECORDED');
+    const ev = comparisons.map((c) => `${c.providerId}:${c.verdict}`);
+
+    if (drifted.length) {
       lanes.push(lane('cli-version-drift', 'DRIFT',
-        `the provider CLI changed under Zeus — ${drifted.join('; ')}`, drifted));
+        drifted.map((c) => c.detail).join('; '), ev));
+    } else if (!comparisons.length) {
+      lanes.push(lane('cli-version-drift', 'SKIPPED', 'no providers to ask', ev));
+    } else if (unknown.length) {
+      // A silence is not a verdict in either direction. It is not DRIFT —
+      // nothing was observed to change, and blocking a mission on a CLI that
+      // declined to print a version would be a refusal with no finding behind
+      // it. It is emphatically not PASS either, so the lane goes unevaluated
+      // and says which provider went quiet and what baseline is now unchecked.
+      lanes.push(lane('cli-version-drift', 'SKIPPED',
+        unknown.map((c) => c.detail).join('; ')
+        + (unknown.length < comparisons.length
+          ? ` (${comparisons.length - unknown.length} other provider(s) did answer)` : ''), ev));
+    } else if (fresh.length) {
+      lanes.push(lane('cli-version-drift', 'PASS',
+        fresh.map((c) => c.detail).join('; '), ev));
     } else {
-      lanes.push(lane('cli-version-drift', 'PASS', 'every provider CLI is the recorded version'));
+      lanes.push(lane('cli-version-drift', 'PASS',
+        `every provider CLI is the recorded baseline (${comparisons.map((c) => c.observed).join(', ')})`, ev));
     }
   }
 
@@ -210,16 +280,22 @@ export async function selftestLive(input: SelftestInput): Promise<SelftestReport
   /* -- the verdict -------------------------------------------------------- */
 
   const failed = lanes.filter((l) => l.status === 'FAIL');
-  const drifted = lanes.filter((l) => l.status === 'DRIFT');
-  const overCap = cost > SELFTEST_COST_CAP_USD;
+  const cap = selftestCostCap(contacts);
+  const overCap = cost > cap;
   if (overCap) {
     lanes.push(lane('provider-contract', 'DRIFT',
-      `the preflight itself cost $${cost.toFixed(4)}, over its $${SELFTEST_COST_CAP_USD.toFixed(2)} cap`));
+      `the preflight itself cost $${cost.toFixed(4)} across ${contacts} contact(s), `
+      + `over its $${cap.toFixed(2)} cap`
+      + (unmeteredCalls ? ` — and ${unmeteredCalls} contact(s) reported no price, so the real total is higher` : '')));
   }
+  const drifted = lanes.filter((l) => l.status === 'DRIFT');
 
   return {
     live: true, lanes,
     costUsd: metered ? Number(cost.toFixed(6)) : null,
+    costCapUsd: cap,
+    contacts,
+    costIsLowerBound: unmeteredCalls > 0,
     unmeteredCalls,
     refused: failed.length > 0,
     needsConfirmation: drifted.length > 0 || overCap,

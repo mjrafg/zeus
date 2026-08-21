@@ -23,7 +23,7 @@ import { ProcessSupervisor } from './engine/exec';
 import { defaultPolicy } from './engine/policy';
 import { readOnlyGit } from './engine/gitro';
 import { MissionRegistry } from './mission/registry';
-import { PlanGraph, ScopeMismatchError, localLabel as missionLabel } from './mission/types';
+import { PlanGraph, ScopeMismatchError, scopeOf, localLabel as missionLabel } from './mission/types';
 import { reconstructRatchet, ratchetRef, readRatchet } from './mission/ratchet';
 import { compileOracle, critiqueOracle, proposeAcceptance } from './mission/compile';
 import { evaluateCriteria, acceptedCommands } from './mission/evaluate';
@@ -548,9 +548,33 @@ function cmdStatus(argv: string[]): number {
   const ctx = requireProject();
   if (!ctx) return 2;
   const engine = engineFor(ctx.root, ctx.cfg);
-  const wanted = argv.find((a) => !a.startsWith('--'));
-  const ids = wanted ? [wanted] : engine.events.listTasks();
-  if (!ids.length) { out('no tasks yet in this project'); return 0; }
+  const raw = argv.find((a) => !a.startsWith('--'));
+  // Humans type the short label. Resolve it against the project before asking
+  // what KIND of id it is, or every scope question is answered about a string
+  // that is missing the half that carries the answer.
+  const wanted = raw && !raw.includes('/') ? `${engine.projectId}/${raw}` : raw;
+  // A mission id arriving here is a scope error, and `Engine.task` refuses it
+  // loudly — which is correct, and used to surface as a stack trace from the
+  // primary status command on any project that had ever created a mission.
+  // The discriminant was doing its job; this caller had not learned to ask it.
+  if (wanted && scopeOf(wanted) === 'MISSION') {
+    err(`${C.r}✗${C.x} ${wanted} is a mission, not a task`);
+    err(`  ${C.dim}zeus mission status ${missionLabel(wanted)}${C.x}`);
+    return 2;
+  }
+  if (wanted && scopeOf(wanted) === null) {
+    err(`${C.r}✗${C.x} "${raw}" is not a task id`);
+    return 2;
+  }
+  const known = engine.events.listTasks();
+  const missionCount = known.filter((id) => scopeOf(id) === 'MISSION').length;
+  const ids = wanted ? [wanted] : known.filter((id) => scopeOf(id) === 'TASK');
+  if (!ids.length) {
+    out(missionCount
+      ? `no tasks yet in this project  ${C.dim}(${missionCount} mission(s) — zeus mission list)${C.x}`
+      : 'no tasks yet in this project');
+    return 0;
+  }
   out(`${C.b}${ctx.cfg.project.name}${C.x} ${C.dim}${ctx.root}${C.x}`);
   const lease = engine.lock.current();
   if (lease) out(`${C.dim}owned by ${lease.instanceId} (heartbeat ${lease.heartbeatAt})${C.x}`);
@@ -572,6 +596,8 @@ function cmdStatus(argv: string[]): number {
       }
     }
   }
+
+  if (missionCount) out(`  ${C.dim}${missionCount} mission(s) — zeus mission list${C.x}`);
 
   // The product metric. Everything above is detail; this is the number.
   const metric = zeroTouchCleanRate(telemetry);
@@ -1541,8 +1567,10 @@ function renderSelftest(r: SelftestReport): void {
       : l.status === 'DRIFT' ? C.y : C.dim;
     out(`  ${colour}${l.status.padEnd(8)}${C.x} ${l.lane.padEnd(20)} ${C.dim}${l.detail.slice(0, 56)}${C.x}`);
   }
-  out(`  ${C.dim}cost ${r.costUsd === null ? 'nothing reported' : `$${r.costUsd.toFixed(4)}`}`
-    + `${r.unmeteredCalls ? `, ${r.unmeteredCalls} call(s) reported none` : ''}${C.x}`);
+  const spend = r.costUsd === null ? 'nothing reported' : `$${r.costUsd.toFixed(4)}`;
+  out(`  ${C.dim}cost ${spend}${r.costIsLowerBound ? ' (a lower bound)' : ''}`
+    + ` of a $${r.costCapUsd.toFixed(2)} cap for ${r.contacts} contact(s)`
+    + `${r.unmeteredCalls ? `; ${r.unmeteredCalls} reported no price` : ''}${C.x}`);
 }
 
 /**
@@ -1557,13 +1585,15 @@ async function runLiveSelftest(ctx: { root: string; cfg: ProjectConfig }, engine
     ? [engine.opts.providers.reviewer]
     : [...new Map([engine.opts.providers.planner, engine.opts.providers.implementer,
       engine.opts.providers.reviewer].map((p) => [p.id, p])).values()];
-  const recordedVersions = (ctx.cfg as any).providers?.versions as Record<string, string> | undefined;
   return selftestLive({
     providers, supervisor: engine.opts.supervisor,
     policy: defaultPolicy(ctx.root, ctx.root), projectId: engine.projectId,
     isolation: isolationReport(),
-    recordedVersions,
-    versionOf: recordedVersions ? (id) => providerCliVersion(id) : undefined,
+    // The baseline lives in durable project state beside the event log. The
+    // old code read a config key that nothing in the codebase ever wrote, so
+    // the lane was permanently SKIPPED on every project.
+    stateRoot: engine.stateRoot,
+    versionOf: (id) => providerCliVersion(id),
   });
 }
 

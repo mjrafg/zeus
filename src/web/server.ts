@@ -261,6 +261,16 @@ export function defaultSpawnRun(projectRoot: string, missionId: string):
  */
 export function blockedBy(missions: MissionRegistry, missionId: string): {
   reason: string; detail: string; findings: unknown[]; options: string[];
+  /**
+   * Whether planning again is something the CONSOLE can do, as opposed to
+   * something a person must decide first.
+   *
+   * Told apart explicitly rather than left to the page to infer from the
+   * prose: "plan again" was listed as an option on a mission that had budget
+   * for it and no button to do it, because the button had been removed for
+   * every case instead of the exhausted one.
+   */
+  canPlanAgain: boolean;
 } | null {
   const rec = missions.mission(missionId);
   if (!rec || rec.terminated) return null;
@@ -285,9 +295,11 @@ export function blockedBy(missions: MissionRegistry, missionId: string): {
           + `${budgets.maxPlanRecompiles} plan attempts are spent`
         : `the critic rejected plan v${version}; a rejected plan cannot be accepted by consent`,
       findings: (cp.findings ?? []),
+      canPlanAgain: !exhausted,
       options: exhausted
         ? ['raise maxPlanRecompiles and plan again', 'narrow the goal', 'cancel the mission']
-        : ['plan again', 'narrow the goal', 'cancel the mission'],
+        : ['plan again, with the critic\u2019s findings carried into it',
+          'narrow the goal', 'cancel the mission'],
     };
   }
   if (exhausted) {
@@ -295,6 +307,7 @@ export function blockedBy(missions: MissionRegistry, missionId: string): {
       reason: 'PLAN_BUDGET_EXHAUSTED',
       detail: `${usage.planRecompiles} of ${budgets.maxPlanRecompiles} plan attempts are spent`,
       findings: (cp.findings ?? []),
+      canPlanAgain: false,
       options: ['raise maxPlanRecompiles and plan again', 'narrow the goal', 'cancel the mission'],
     };
   }

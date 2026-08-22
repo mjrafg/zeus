@@ -585,14 +585,32 @@ function renderBlocked(m, b) {
   h += '<div class="acts"></div>';
   d.innerHTML = h;
   const acts = d.querySelector('.acts');
+  const short = encodeURIComponent(m.missionId.split('/').pop());
+
+  // A button for what the console CAN do, prose for what a person must decide.
+  // The first cut removed the plan button in every case rather than the
+  // exhausted one, so a mission with budget to spare listed 'plan again' as an
+  // option with no way to take it.
+  if (b.canPlanAgain) {
+    const p = document.createElement('button');
+    p.textContent = 'plan again, answering the findings';
+    p.title = 'the critic\u2019s findings are carried into the next plan';
+    p.onclick = async () => {
+      for (const x of d.querySelectorAll('button')) x.disabled = true;
+      const r = await apiPost('/missions/' + short + '/plan', {});
+      reportOperation(m, 'plan again', r);
+      loadList(); loadDetail();
+    };
+    acts.appendChild(p);
+  }
+
   const c = document.createElement('button');
   c.className = 'ghost';
   c.textContent = 'cancel mission';
   c.onclick = async () => {
     if (!confirm('Cancel ' + m.missionId + '? This terminates it.')) return;
-    c.disabled = true;
-    const r = await apiPost('/missions/'
-      + encodeURIComponent(m.missionId.split('/').pop()) + '/cancel', {});
+    for (const x of d.querySelectorAll('button')) x.disabled = true;
+    const r = await apiPost('/missions/' + short + '/cancel', {});
     reportOperation(m, 'cancel mission', r);
     loadList(); loadDetail();
   };

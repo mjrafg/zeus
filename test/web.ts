@@ -2676,8 +2676,10 @@ export async function webSuite(): Promise<void> {
       && (b.findings[0] as any).code === 'INCOMPLETE_CHROME',
       JSON.stringify(b?.findings));
     check('DE3: and the moves a person can make',
-      !!b && b.options.includes('plan again') && b.options.includes('cancel the mission'),
-      JSON.stringify(b?.options));
+      !!b && b.options.some((o) => /^plan again/.test(o))
+      && b.options.includes('cancel the mission'), JSON.stringify(b?.options));
+    check('DE3b: with budget left, planning again is something the CONSOLE can do',
+      b!.canPlanAgain === true, String(b?.canPlanAgain));
 
     // Now spend the plan budget: the option changes, because planning again is
     // no longer one of them.
@@ -2690,7 +2692,7 @@ export async function webSuite(): Promise<void> {
     const spent = blockedBy(fx.missions, id);
     check('DE4: with the plan budget spent it says so, and stops offering to plan',
       !!spent && spent.reason === 'REJECTED_AND_EXHAUSTED'
-      && !spent.options.includes('plan again')
+      && spent.canPlanAgain === false
       && spent.options.some((o) => /raise maxPlanRecompiles/.test(o)),
       JSON.stringify(spent?.options));
 
@@ -2706,6 +2708,10 @@ export async function webSuite(): Promise<void> {
     check('DE7: findings first, options second — the order every consent surface uses',
       UI_HTML.indexOf('finding(s) against the last plan') < UI_HTML.indexOf('What you can do'),
       'findings before options');
+    check('DE8: a button only for what the console can actually do',
+      /if \(b\.canPlanAgain\) \{/.test(UI_HTML)
+      && UI_HTML.includes('plan again, answering the findings'),
+      'plan button is conditional');
   }
 
   section('one runner per mission');

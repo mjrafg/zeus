@@ -1900,4 +1900,135 @@ export async function webSuite(): Promise<void> {
     check('UX4: a chat event is labelled chat, not by a stream id that reads like a mission',
       UI_HTML.includes("tail === 'CHAT' ? 'chat'"), 'chat events labelled');
   }
+
+  section('a write acts on the project the console is showing');
+  {
+    // The bug: `operations` and `spawnRun` were built ONCE around the
+    // directory `zeus web` was started in. Reads honoured `?project=`; writes
+    // did not. Compiling a mission in any other project asked the wrong
+    // registry, and the console said NO_SUCH_MISSION about a mission it was
+    // displaying on the same screen.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-wsc-'));
+    const mk = (slug: string, goal: string) => {
+      const dir = path.join(root, slug);
+      const st = path.join(dir, '.zeus', 'state');
+      fs.mkdirSync(st, { recursive: true });
+      fs.writeFileSync(path.join(dir, '.zeus', 'config.yaml'),
+        `version: 1\nproject:\n  name: ${slug}\n  adapter: node\n`);
+      const store = new EventStore(st);
+      const reg = new MissionRegistry({ events: store, projectId: slug, stateRoot: st });
+      reg.create(goal, 'base0');
+      return { dir, st };
+    };
+    const alpha = mk('alpha', 'alpha goal');
+    mk('beta', 'beta goal');
+
+    const fx = fixture();
+    fx.missions.create('the server-own goal', 'base0');
+
+    const seen: any[] = [];
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        projectsRoot: root,
+        spawnRun: (missionId, target) => {
+          seen.push({ op: 'run', missionId, target });
+          return { ok: true, pid: 4242, detail: 'spawned' };
+        },
+        operations: {
+          compile: async (missionId, target) => {
+            seen.push({ op: 'compile', missionId, target });
+            return { ok: false, kind: 'TERMINATED', detail: 'stub' } as any;
+          },
+          plan: async (missionId, target) => {
+            seen.push({ op: 'plan', missionId, target });
+            return { ok: false, kind: 'TERMINATED', detail: 'stub' } as any;
+          },
+          evaluate: async (missionId, _o, target) => {
+            seen.push({ op: 'evaluate', missionId, target });
+            return {};
+          },
+        },
+      });
+      const c = await post(server, '/api/missions/M-0001/compile?project=alpha', {});
+      const t = seen.find((x) => x.op === 'compile')?.target;
+      check('WSC1: compile acts on the SCOPED project, not the one the server sits in',
+        c.status === 200 && t && t.projectId === 'alpha' && t.root === alpha.dir,
+        JSON.stringify([c.status, t?.projectId, t?.root]));
+      check('WSC1b: and it is handed the id resolved against that same project',
+        seen.find((x) => x.op === 'compile')?.missionId === 'alpha/M-0001',
+        seen.find((x) => x.op === 'compile')?.missionId);
+      check('WSC1c: the state root travels too, so it reads that project’s log',
+        t && t.stateRoot === alpha.st, t?.stateRoot);
+
+      await post(server, '/api/missions/M-0001/plan?project=beta', {});
+      check('WSC2: a second project in the same server gets its own target',
+        seen.find((x) => x.op === 'plan')?.target.projectId === 'beta',
+        seen.find((x) => x.op === 'plan')?.target.projectId);
+
+      await post(server, '/api/missions/M-0001/compile', {});
+      const own = seen.filter((x) => x.op === 'compile')[1]?.target;
+      check('WSC3: with no project param the target is the server’s own project',
+        own && own.projectId === 'p' && own.root === fx.root,
+        JSON.stringify([own?.projectId, own?.root]));
+
+      // The dangerous one. `run` spawns a real process with a real cwd: an
+      // unscoped target would execute a mission inside the wrong repository.
+      const r = await post(server, '/api/missions/M-0001/run?project=beta', {});
+      const rt = seen.find((x) => x.op === 'run')?.target;
+      check('WSC4: run spawns against the scoped project’s root, not the server’s cwd',
+        r.status === 202 && rt && rt.root === path.join(root, 'beta'),
+        JSON.stringify([r.status, rt?.root]));
+
+      // The consent boundary is a write like any other, and it was the one
+      // call site in the UI that forgot to add the scope.
+      const conf = await post(server, '/api/missions/M-0001/confirm?project=beta',
+        { kind: 'oracle', version: 1, findingsDigest: 'nope', decision: 'ACCEPT' });
+      check('WSC5: confirm resolves against the scoped project (no NO_SUCH_MISSION)',
+        conf.status !== 404, `${conf.status} ${JSON.stringify(conf.json?.error)}`);
+
+      const bad = await post(server, '/api/missions/M-0001/compile?project=nope', {});
+      check('WSC6: an unknown project is refused rather than falling back to the server’s',
+        bad.status === 404 && bad.json.error === 'NO_SUCH_PROJECT'
+        && seen.filter((x) => x.op === 'compile').length === 2,
+        JSON.stringify([bad.status, bad.json?.error]));
+    } finally { await server?.close(); }
+
+    check('WSC7: the UI scopes writes in ONE place, so no call site can forget',
+      /async function apiPost\(p, body\) \{\s*const r = await fetch\('\/api' \+ scope\(p\)/
+        .test(UI_HTML)
+      && !/apiPost\(scope\(/.test(UI_HTML),
+      'apiPost scopes centrally and nothing double-scopes');
+  }
+
+  section('the console can advance the mission it just created');
+  {
+    // A mission made from chat sat at CREATED for ever: the card promised
+    // compile -> critic -> consent -> plan -> consent -> run and the page
+    // offered no control for any of it, though every route already existed.
+    const STEPS = [['a', 'CREATED', 'compile'], ['b', 'PLANNING', 'plan'],
+      ['c', 'RUNNING', 'run'], ['d', 'INTEGRATING', 'run'],
+      ['e', 'EVALUATING', 'run']] as const;
+    for (const [tag, phase, verb] of STEPS) {
+      check(`ACT1${tag}: phase ${phase} maps to a next step of ${verb}`,
+        new RegExp(`${phase}: \\{ id: '${verb}'`).test(UI_HTML), `${phase} -> ${verb}`);
+    }
+    check('ACT2: a terminated mission offers no step and no cancel',
+      /if \(!slot \|\| m\.terminated\) return;/.test(UI_HTML), 'terminated is inert');
+    check('ACT3: while a decision is pending there is no step button beside the findings',
+      /const step = m\.pendingDecision \? null : NEXT_STEP\[m\.phase\];/.test(UI_HTML),
+      'pending suppresses the step');
+    check('ACT4: the step posts to the mission route the server actually serves',
+      /apiPost\('\/missions\/' \+ short \+ path/.test(UI_HTML)
+      && WRITE_ROUTES.includes('POST /api/missions/:id/compile' as any),
+      'wired to a real route');
+    check('ACT5: the pressed button says it is working, so a slow step is not a dead click',
+      UI_HTML.includes("btn.textContent = label + ' …'"), 'in-flight label');
+    check('ACT6: every button in the bar is disabled while one is in flight',
+      /for \(const x of d\.querySelectorAll\('button'\)\) x\.disabled = true;/.test(UI_HTML),
+      'no double submit');
+    check('ACT7: a refusal is rendered with its findings, not reduced to a status code',
+      /for \(const f of \(j\.findings \|\| \[\]\)\)/.test(UI_HTML), 'findings shown');
+  }
 }

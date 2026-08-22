@@ -91,6 +91,11 @@ export const UI_HTML = `<!doctype html>
   .pending h3 { margin:0 0 8px; font-size:13px; color:var(--warn) }
   .pending .f { border-left:2px solid var(--line); padding:4px 0 4px 8px; margin:6px 0 }
   .pending .acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px }
+  #actslot .acts { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 }
+  #actslot button.ghost { background:transparent; color:var(--dim);
+                          border-color:var(--line) }
+  #actslot button:disabled { opacity:.55; cursor:default }
+  .f { border-left:2px solid var(--line); padding:4px 0 4px 8px; margin:6px 0 }
 </style>
 </head>
 <body>
@@ -195,6 +200,7 @@ async function loadDetail() {
       : '<br><span class="dim">nothing spent yet</span>')
     + '</td></tr></table>';
 
+  h += '<div id="actslot"></div>';
   if (o) {
     h += '<div id="pendingslot"></div>';
   h += '<h2>criteria</h2><table>';
@@ -217,7 +223,112 @@ async function loadDetail() {
     h += '</table>';
   }
   $('detail').innerHTML = h;
+  renderActions(m);
   if (m.pendingDecision) renderPending(m, m.pendingDecision);
+}
+
+/**
+ * The next step, and the way out.
+ *
+ * The console could create a mission and then not move it: the card promised
+ * compile -> critic -> consent -> plan -> consent -> run and offered no
+ * control for any of them, so every mission made from the web sat at CREATED
+ * until someone opened a terminal. The routes existed the whole time.
+ *
+ * ONE step button, because there is only ever one next step, and none at all
+ * while a consent decision is pending — the findings below are the move then,
+ * and a second button beside them would be a way to skip reading.
+ */
+const NEXT_STEP = {
+  CREATED: { id: 'compile', label: 'compile the contract',
+    detail: 'a model turns the goal into checkable criteria, and a second model reviews it' },
+  ORACLE: { id: 'compile', label: 'recompile the contract',
+    detail: 'compiled but not yet critiqued — run it again' },
+  PLANNING: { id: 'plan', label: 'plan the work',
+    detail: 'a model proposes the task graph, and a critic reviews it' },
+  RUNNING: { id: 'run', label: 'run the tasks',
+    detail: 'tasks execute one at a time, each integrated only if it stays green' },
+  INTEGRATING: { id: 'run', label: 'continue the run',
+    detail: 'pick the mission back up where it stopped' },
+  EVALUATING: { id: 'run', label: 'continue the run',
+    detail: 'pick the mission back up where it stopped' },
+};
+
+function renderActions(m) {
+  const slot = $('actslot');
+  if (!slot || m.terminated) return;
+  const step = m.pendingDecision ? null : NEXT_STEP[m.phase];
+  if (!step && !m.pendingDecision) return;
+  const d = document.createElement('div');
+  d.className = 'acts';
+  const short = encodeURIComponent(m.missionId.split('/').pop());
+
+  // Says so ON THE BUTTON THAT WAS PRESSED. A click that changes nothing on
+  // screen for the twenty seconds a model takes reads as a click that never
+  // registered, and the second click is the one that does damage.
+  const fire = async (btn, path, label) => {
+    for (const x of d.querySelectorAll('button')) x.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = label + ' …';
+    const r = await apiPost('/missions/' + short + path, {});
+    btn.textContent = was;
+    reportOperation(m, label, r);
+    loadList(); loadDetail();
+  };
+
+  if (step) {
+    const b = document.createElement('button');
+    b.textContent = step.label;
+    b.title = step.detail;
+    b.onclick = () => fire(b, '/' + step.id, step.label);
+    d.appendChild(b);
+  }
+  const c = document.createElement('button');
+  c.className = 'ghost';
+  c.textContent = 'cancel mission';
+  c.title = 'terminate this mission';
+  c.onclick = () => {
+    if (!confirm('Cancel ' + m.missionId + '? This terminates it.')) return;
+    return fire(c, '/cancel', 'cancel mission');
+  };
+  d.appendChild(c);
+  slot.appendChild(d);
+}
+
+/**
+ * What the operation answered, in full.
+ *
+ * A refusal is the interesting outcome, so it is rendered rather than reduced
+ * to a status code: REJECTED comes back with the findings that caused it, and
+ * hiding them would defeat the point of stopping.
+ */
+function reportOperation(m, label, r) {
+  const j = r.json || {};
+  const id = esc(m.missionId);
+  if (r.status >= 400) {
+    bubble('<span class="bad">' + esc(label) + ' on ' + id + ' failed: '
+      + esc(j.error || r.status) + '</span>'
+      + (j.detail ? '<br><span class="dim">' + esc(j.detail) + '</span>' : ''), false);
+    return;
+  }
+  if (j.ok === false) {
+    let h = '<span class="bad">' + esc(label) + ' stopped: ' + esc(j.kind || 'refused')
+      + '</span>';
+    if (j.detail) h += '<br><span class="dim">' + esc(j.detail) + '</span>';
+    for (const f of (j.findings || [])) {
+      h += '<div class="f"><b>' + esc(f.code || f.severity || 'finding') + '</b> '
+        + '<span class="dim">' + esc(f.detail || JSON.stringify(f)) + '</span></div>';
+    }
+    bubble(h, false);
+    return;
+  }
+  if (j.pid !== undefined) {
+    bubble(esc(label) + ' on ' + id + ': ' + esc(j.detail || 'started')
+      + '<br><span class="dim">it runs detached; watch the live events</span>', false);
+    return;
+  }
+  bubble(esc(label) + ' on ' + id + ' <span class="ok">done</span>'
+    + '<span class="dim"> — the mission page below is rebuilt from the log</span>', false);
 }
 
 /**
@@ -300,8 +411,12 @@ function connectStream() {
   });
 }
 
+// Scoped HERE rather than at each call site. The consent route was the one
+// caller that forgot, which meant an ACCEPT typed in one project was posted
+// against the project the server was started in. A rule every caller must
+// remember is a rule one caller will eventually forget.
 async function apiPost(p, body) {
-  const r = await fetch('/api' + p, {
+  const r = await fetch('/api' + scope(p), {
     method: 'POST',
     headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
     body: JSON.stringify(body || {}),
@@ -365,7 +480,7 @@ function renderCard(card) {
         goal = next;
       }
       const decision = a.id === 'edit' ? 'create' : a.id;
-      const r = await apiPost(scope('/chat/decide'),
+      const r = await apiPost('/chat/decide',
         { card, cardDigest: card.digest, decision, goal });
       for (const x of d.querySelectorAll('button')) x.disabled = true;
       if (r.status === 409) {
@@ -391,7 +506,7 @@ async function send() {
   if (!text) return;
   $('say').value = '';
   bubble(esc(text), true);
-  const r = await apiPost(scope('/chat'), { message: text });
+  const r = await apiPost('/chat', { message: text });
   if (!r.json) { bubble('<span class="bad">no answer</span>', false); return; }
   if (r.json.answer) renderAnswer(r.json.answer);
   if (r.json.card) renderCard(r.json.card);

@@ -38,7 +38,9 @@ import {
   mergeMissionBudgets, BudgetNegotiation,
 } from './mission/progress';
 import { missionStatusView, missionListView, missionReportView } from './views';
-import { startWebServer, defaultSpawnRun, zeusCliArgv } from './web/server';
+import {
+  startWebServer, defaultSpawnRun, zeusCliArgv, ProjectTarget,
+} from './web/server';
 import { defaultProjectsRoot } from './projects';
 import { compileMissionOracle, planMissionGraph } from './mission/operations';
 import { selftestLive, SelftestReport } from './mission/selftest';
@@ -1818,19 +1820,29 @@ async function cmdWeb(argv: string[]): Promise<number> {
 
   // The SAME operations the CLI's own subcommands call. Handed in rather than
   // constructed inside the server, so the server cannot acquire its own copy.
-  const opCtx = () => ({
-    missions: new MissionRegistry({
-      events: engine.events, projectId: engine.projectId, stateRoot: engine.stateRoot,
-    }),
-    engine, projectRoot: ctx.root,
-    context: projectContextFor(ctx.root, ctx.cfg),
-    policy: defaultPolicy(ctx.root, ctx.root),
-  });
+  //
+  // Built PER TARGET, not once. The first version closed over the directory
+  // `zeus web` was started in, so compiling a mission in any other project
+  // asked the wrong registry and got NO_SUCH_MISSION — and would have compiled
+  // the wrong mission entirely had the ids not been project-qualified.
+  const opCtx = (t: ProjectTarget) => {
+    const cfg = t.root === ctx.root ? ctx.cfg
+      : (readConfig(t.root) ?? defaultConfig(t.root));
+    const eng = t.root === ctx.root ? engine : engineFor(t.root, cfg);
+    return {
+      missions: new MissionRegistry({
+        events: eng.events, projectId: eng.projectId, stateRoot: eng.stateRoot,
+      }),
+      engine: eng, projectRoot: t.root,
+      context: projectContextFor(t.root, cfg),
+      policy: defaultPolicy(t.root, t.root),
+    };
+  };
 
   const server = await startWebServer({
     projectRoot: ctx.root, stateRoot: engine.stateRoot, projectId: engine.projectId,
     port, host,
-    spawnRun: (missionId) => defaultSpawnRun(ctx.root, missionId),
+    spawnRun: (missionId, target) => defaultSpawnRun(target.root, missionId),
     ...(projectsRoot ? { projectsRoot } : {}),
     // Creation steps run through the supervisor: bounded, killable, and in the
     // run registry like every other execution Zeus causes.
@@ -1852,8 +1864,8 @@ async function cmdWeb(argv: string[]): Promise<number> {
         detail: `${spec.kind} ${res.outcome}${res.exitCode === null ? '' : ` (exit ${res.exitCode})`}` };
     },
     operations: {
-      compile: (missionId) => compileMissionOracle(opCtx(), missionId),
-      plan: (missionId) => planMissionGraph(opCtx(), missionId),
+      compile: (missionId, target) => compileMissionOracle(opCtx(target), missionId),
+      plan: (missionId, target) => planMissionGraph(opCtx(target), missionId),
       evaluate: async (missionId) => ({
         error: 'NOT_WIRED',
         detail: 'evaluate over HTTP arrives with the CLI evaluate rewire; use zeus mission evaluate',

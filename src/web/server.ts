@@ -40,6 +40,22 @@ import {
 import { routeFor, carriesCredentials, draftCreationCard, CreationCard } from '../create';
 import { extractZip, DEFAULT_ZIP_LIMITS } from '../zip';
 
+/**
+ * The project a write acts on.
+ *
+ * Every capability that can spend money, spawn a process or accept a contract
+ * takes one of these. It is a parameter and not a closure on purpose: the
+ * console showed one project and compiled another, because `operations` was
+ * built once around the directory the SERVER was started in and the request
+ * scope never reached it. A capability bound to one project is a capability
+ * that acts on the wrong one as soon as a second project exists.
+ */
+export interface ProjectTarget {
+  projectId: string;
+  root: string;
+  stateRoot: string;
+}
+
 export interface WebServerOptions {
   projectRoot: string;
   stateRoot: string;
@@ -47,7 +63,8 @@ export interface WebServerOptions {
   port?: number;
   host?: string;
   /** Injected so tests drive the server without a real engine or CLI. */
-  spawnRun?: (missionId: string) => { ok: boolean; pid: number | null; detail: string };
+  spawnRun?: (missionId: string, target: ProjectTarget)
+  => { ok: boolean; pid: number | null; detail: string };
   /**
    * A directory of Zeus projects. Absent means the Projects home is off and
    * the server serves only the project it was started in.
@@ -70,9 +87,10 @@ export interface WebServerOptions {
    * copy: whatever is passed is the same function the CLI invokes.
    */
   operations?: {
-    compile(missionId: string): Promise<CompileResult>;
-    plan(missionId: string): Promise<PlanOperationResult>;
-    evaluate(missionId: string, opts: { full: boolean }): Promise<unknown>;
+    compile(missionId: string, target: ProjectTarget): Promise<CompileResult>;
+    plan(missionId: string, target: ProjectTarget): Promise<PlanOperationResult>;
+    evaluate(missionId: string, opts: { full: boolean }, target: ProjectTarget):
+    Promise<unknown>;
   };
   onLog?: (line: string) => void;
 }
@@ -222,9 +240,12 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
    * had been removed.
    */
   const scoped = (url: URL): { store: EventStore; missions: MissionRegistry;
-    projectId: string; root: string } | null => {
+    projectId: string; root: string; stateRoot: string } | null => {
     const slug = url.searchParams.get('project');
-    if (!slug) return { store, missions, projectId: opts.projectId, root: opts.projectRoot };
+    if (!slug) {
+      return { store, missions, projectId: opts.projectId,
+        root: opts.projectRoot, stateRoot: opts.stateRoot };
+    }
     if (!opts.projectsRoot) return null;
     const sc: ProjectScope | null = scopeFor(opts.projectsRoot, slug);
     if (!sc) return null;
@@ -232,9 +253,13 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     return {
       store: s2,
       missions: new MissionRegistry({ events: s2, projectId: sc.projectId, stateRoot: sc.stateRoot }),
-      projectId: sc.projectId, root: sc.root,
+      projectId: sc.projectId, root: sc.root, stateRoot: sc.stateRoot,
     };
   };
+
+  /** The scope of a request, as the thing a capability is allowed to act on. */
+  const targetOf = (sc: { projectId: string; root: string; stateRoot: string }):
+  ProjectTarget => ({ projectId: sc.projectId, root: sc.root, stateRoot: sc.stateRoot });
 
   const resolveId = (raw: string, projectId: string): string =>
     (raw.includes('/') ? raw : `${projectId}/${raw}`);
@@ -702,9 +727,10 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           detail: 'this server was started without engine operations' });
         return;
       }
-      const result = action === 'compile' ? await opts.operations.compile(id)
-        : action === 'plan' ? await opts.operations.plan(id)
-          : await opts.operations.evaluate(id, { full: body?.full === true });
+      const t = targetOf(wsc);
+      const result = action === 'compile' ? await opts.operations.compile(id, t)
+        : action === 'plan' ? await opts.operations.plan(id, t)
+          : await opts.operations.evaluate(id, { full: body?.full === true }, t);
       // Whatever the operation decided, decided. The route reports it and adds
       // nothing: an HTTP layer that could turn a stop into an acceptance would
       // be a second engine with a different opinion.
@@ -716,7 +742,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       const spawnRun = opts.spawnRun;
       if (!spawnRun) { send(res, 503, { error: 'SPAWN_UNAVAILABLE' }); return; }
       // DETACHED, always. A mission outlives the console by design.
-      const spawned = spawnRun(id);
+      const spawned = spawnRun(id, targetOf(wsc));
       send(res, spawned.ok ? 202 : 500, { missionId: id, ...spawned });
       return;
     }

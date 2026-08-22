@@ -1733,14 +1733,22 @@ export async function webSuite(): Promise<void> {
 
   section('the CLI can actually be spawned as a child');
   {
-    // The repository root, discovered rather than written down: PB5 refuses a
-    // machine-specific absolute path in a source file, and it is right to.
-    const argv = zeusCliArgv(path.resolve(__dirname, '..'));
+    const argv = zeusCliArgv();
     check('CLI1: running from source, the entry goes through ts-node, not bare node',
       argv.length === 3 && argv[0].endsWith('ts-node') && argv[1] === '--transpile-only'
       && argv[2].endsWith('cli.ts'), argv.join(' '));
     check('CLI2: bare node on the .ts entry is exactly what this prevents',
       !(argv.length === 1 && argv[0].endsWith('.ts')), 'not a bare .ts invocation');
+    // The old signature took the project root and resolved the runner inside
+    // it, so `mission run` worked in exactly one project — the one Zeus is
+    // installed in — and died with MODULE_NOT_FOUND everywhere else. This test
+    // could not have caught that: it passed the repository root, which is the
+    // one value that made the bug invisible.
+    const zeusRoot = path.resolve(__dirname, '..');
+    check('CLI3: the runner comes from Zeus\u2019s installation, not from the project worked on',
+      argv[0] === path.resolve(zeusRoot, 'node_modules/.bin/ts-node'), argv[0]);
+    check('CLI4: and there is no root to pass, so it cannot be pointed at a project',
+      zeusCliArgv.length === 0, `arity ${zeusCliArgv.length}`);
   }
 
   section('the connection status distinguishes a dead server from a stale token');

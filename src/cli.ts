@@ -1830,7 +1830,7 @@ async function cmdWeb(argv: string[]): Promise<number> {
         // import, so every created project was left without a .zeus/.
         command: spec.kind === 'init' ? process.execPath : 'git',
         args: spec.kind === 'init'
-          ? [...zeusCliArgv(ctx.root), 'init']
+          ? [...zeusCliArgv(), 'init']
           : spec.args,
         cwd: spec.cwd, inspectArgs: false, timeoutSeconds: 600,
         policy: defaultPolicy(spec.cwd, spec.cwd),

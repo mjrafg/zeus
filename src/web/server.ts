@@ -196,18 +196,27 @@ function gitDiff(from: string, to: string, cwd: string): string {
  * every `zeus init` failed silently, and cloned projects were left on disk
  * with no .zeus/ and no explanation. One helper now, so no caller has to
  * remember which of the two shapes it is in.
+ *
+ * TAKES NO ROOT. It used to resolve the runner against the project being
+ * worked on, so `ts-node` was looked for in that project's node_modules —
+ * which meant `mission run` worked in exactly one project, the one Zeus is
+ * installed in, and died with MODULE_NOT_FOUND in every other. The runner is
+ * Zeus's own dependency and comes from Zeus's own installation; the parameter
+ * existed only to be passed the wrong value, so it is gone.
  */
-export function zeusCliArgv(projectRoot: string): string[] {
+export function zeusCliArgv(): string[] {
   const ts = path.resolve(__dirname, '..', 'cli.ts');
   if (fs.existsSync(ts)) {
-    return [path.resolve(projectRoot, 'node_modules/.bin/ts-node'), '--transpile-only', ts];
+    // __dirname is <zeus>/src/web, so two levels up is the installation.
+    const zeusRoot = path.resolve(__dirname, '..', '..');
+    return [path.resolve(zeusRoot, 'node_modules/.bin/ts-node'), '--transpile-only', ts];
   }
   return [path.resolve(__dirname, '..', 'cli.js')];
 }
 
 export function defaultSpawnRun(projectRoot: string, missionId: string):
   { ok: boolean; pid: number | null; detail: string } {
-  const args = zeusCliArgv(projectRoot);
+  const args = zeusCliArgv();
   // stdio was 'ignore'. A run that died in its first second reported "spawned
   // pid 65960" to the console and then simply never happened: no events, no
   // process, and nothing written down anywhere to say why. The console cannot

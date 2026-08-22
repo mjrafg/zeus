@@ -45,11 +45,13 @@ import { detectProject, nodePackageDirs } from '../src/adapters';
 import { ZEUS_WORKTREE_EXCLUDES, ZEUS_PATHSPEC_EXCLUDES } from '../src/engine/orchestrator';
 import { splitCommand } from '../src/engine/dependencies';
 import {
-  budgetsFor, preflightBudget, planMissionGraph, liveRun, priorPlanFor,
+  budgetsFor, preflightBudget, planMissionGraph, liveRun, priorPlanFor, autoReplanState,
 } from '../src/mission/operations';
 import { planDelta } from '../src/mission/planner';
 import { classifyInfrastructure } from '../src/engine/providers';
-import { mergeMissionBudgets, checkMissionBudgets } from '../src/mission/progress';
+import {
+  mergeMissionBudgets, checkMissionBudgets, autoReplansExhausted, missionUsage,
+} from '../src/mission/progress';
 import { probePackageManager } from '../src/readiness';
 import {
   listProjects, projectBySlug, slugForUrl, slugify, freeSlug, scopeFor,
@@ -2345,7 +2347,7 @@ export async function webSuite(): Promise<void> {
 
     const b0 = budgetsFor(fx.missions, id);
     check('BG1: a mission starts on the shipped defaults',
-      b0.costCeilingUsd === 5 && b0.maxTasks === 20 && b0.maxPlanRecompiles === 2,
+      b0.costCeilingUsd === 5 && b0.maxTasks === 20 && b0.maxPlanRecompiles === 3,
       JSON.stringify([b0.costCeilingUsd, b0.maxTasks, b0.maxPlanRecompiles]));
 
     let server: RunningServer | null = null;
@@ -2681,20 +2683,21 @@ export async function webSuite(): Promise<void> {
     check('DE3b: with budget left, planning again is something the CONSOLE can do',
       b!.canPlanAgain === true, String(b?.canPlanAgain));
 
-    // Now spend the plan budget: the option changes, because planning again is
-    // no longer one of them.
-    for (let i = 0; i < 2; i += 1) {
+    // Spend Zeus's OWN replans. The mission is still affordable, so the
+    // operator keeps the option — what changes is that Zeus stops trying by
+    // itself and says whose turn it is.
+    for (let i = 0; i < 3; i += 1) {
       fx.missions.recordPlanCritique(id, {
         version: 1, acceptance: 'REJECT', contaminated: false, contaminationDetail: null,
         findings: [{ code: 'INCOMPLETE_CHROME', severity: 'BLOCKING', detail: 'again' }],
       });
     }
     const spent = blockedBy(fx.missions, id);
-    check('DE4: with the plan budget spent it says so, and stops offering to plan',
+    check('DE4: with its automatic replans spent, Zeus stops and hands the next one to you',
       !!spent && spent.reason === 'REJECTED_AND_EXHAUSTED'
-      && spent.canPlanAgain === false
-      && spent.options.some((o) => /raise maxPlanRecompiles/.test(o)),
-      JSON.stringify(spent?.options));
+      && spent.canPlanAgain === true
+      && /yours to ask for/.test(spent.detail),
+      `${spent?.reason} canPlanAgain=${spent?.canPlanAgain}`);
 
     const clean = fixture();
     const ok = clean.missions.create('a goal with no plan yet', 'base0');
@@ -2827,22 +2830,117 @@ export async function webSuite(): Promise<void> {
       UI_HTML.includes("error: 'CONNECTION_LOST'"), 'network failure has a status');
   }
 
-  section('a limit that is counted is a limit that binds');
+  section('the autonomy bound stops Zeus, not the operator');
   {
-    // planRecompiles was incremented on every rejected plan and compared
-    // against nothing. A mission reached four refused plans against a limit of
-    // two, one click at a time, because no backstop existed under the button.
+    // This limit lived in checkMissionBudgets, which is consulted before EVERY
+    // operation including the ones a person asked for — so a mission that had
+    // used its automatic attempts refused the operator who had just read the
+    // findings and asked for one more. It bounds a cascade; cost and time
+    // bound the mission.
     const b = mergeMissionBudgets();
     const usage: any = { tasksSpawned: 0, plannedTasks: 0, replans: 0, repairs: 0,
-      planRecompiles: 2, elapsedSeconds: 0, costUsd: 0, unmeteredCalls: 0, reserveDraws: [] };
-    const breach = checkMissionBudgets(b, usage);
-    check('PRL1: the plan-recompile limit is enforced, not merely counted',
-      !!breach && breach.limit === 'maxPlanRecompiles', JSON.stringify(breach));
-    check('PRL2: and it names the count and the limit, not just the fact',
-      !!breach && /2 plan\(s\).*limit 2/.test(breach.detail), breach?.detail);
-    usage.planRecompiles = 1;
-    check('PRL3: under the limit nothing is breached',
-      checkMissionBudgets(b, usage) === null, 'room to plan');
+      planRecompiles: 9, autoPlanRecompiles: 3, elapsedSeconds: 0, costUsd: 0,
+      unmeteredCalls: 0, reserveDraws: [] };
+    check('PRL1: the shipped bound is three automatic replans',
+      b.maxPlanRecompiles === 3, String(b.maxPlanRecompiles));
+    check('PRL2: three automatic replans is exhausted, and says so with both numbers',
+      autoReplansExhausted(b, usage).exhausted === true
+      && autoReplansExhausted(b, usage).used === 3
+      && autoReplansExhausted(b, usage).limit === 3,
+      JSON.stringify(autoReplansExhausted(b, usage)));
+    check('PRL3: nine HUMAN replans do not exhaust it — only the automatic ones count',
+      autoReplansExhausted(b, { ...usage, autoPlanRecompiles: 0 }).exhausted === false,
+      'humans are not rate-limited');
+    check('PRL4: and the mission budget no longer refuses on replan count at all',
+      checkMissionBudgets(b, usage) === null, JSON.stringify(checkMissionBudgets(b, usage)));
+    check('PRL5: what still refuses is spend, which is what a hard ceiling means',
+      String(checkMissionBudgets(b, { ...usage, costUsd: 999 })?.limit) === 'costCeilingUsd',
+      JSON.stringify(checkMissionBudgets(b, { ...usage, costUsd: 999 })));
+  }
+
+  section('who asked for a plan is on the log');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal that gets replanned', 'base0');
+    const id = rec.missionId;
+    const reject = (version: number, trigger: any) => {
+      fx.missions.recordPlan(id, { version, nodes: [node(`${id}/N-0001`)] } as any,
+        [], undefined, null, trigger);
+      fx.missions.recordPlanCritique(id, {
+        version, acceptance: 'REJECT', contaminated: false, contaminationDetail: null,
+        findings: [{ code: 'STILL_WRONG', severity: 'BLOCKING', detail: 'no' }],
+      });
+    };
+    const used = () => missionUsage(fx.store.read(id), Date.now(), () => ({ costUsd: 0, unmetered: 0 }));
+
+    reject(1, 'HUMAN');
+    check('TRG1: the attempt a person asked for is not charged to the autonomy bound',
+      used().autoPlanRecompiles === 0 && used().planRecompiles === 1,
+      JSON.stringify([used().autoPlanRecompiles, used().planRecompiles]));
+
+    reject(2, 'AUTO'); reject(3, 'AUTO'); reject(4, 'AUTO');
+    check('TRG2: three automatic replans exhaust it, exactly as specified',
+      autoReplanState(fx.missions, id).exhausted === true
+      && autoReplanState(fx.missions, id).used === 3,
+      JSON.stringify(autoReplanState(fx.missions, id)));
+
+    reject(5, 'HUMAN'); reject(6, 'HUMAN');
+    check('TRG3: further HUMAN replans are unbounded — the count does not move',
+      autoReplanState(fx.missions, id).used === 3 && used().planRecompiles === 6,
+      JSON.stringify([autoReplanState(fx.missions, id).used, used().planRecompiles]));
+
+    // An attempt recorded before triggers existed is read as autonomous: the
+    // conservative reading, so nothing gains unlimited retries by being old.
+    const old = fixture();
+    const r2 = old.missions.create('an older mission', 'base0');
+    old.store.append({ taskId: r2.missionId, type: 'PLAN_RECORDED',
+      payload: { version: 1, plan: { version: 1, nodes: [] }, nodes: 0 } });
+    old.store.append({ taskId: r2.missionId, type: 'PLAN_CRITIQUED',
+      payload: { version: 1, acceptance: 'REJECT', findings: [] } });
+    check('TRG4: an untriggered attempt from before this existed counts as autonomous',
+      autoReplanState(old.missions, r2.missionId).used === 1,
+      String(autoReplanState(old.missions, r2.missionId).used));
+  }
+
+  section('the console offers the next attempt once Zeus has stopped trying');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal Zeus gave up replanning', 'base0');
+    const id = rec.missionId;
+    fx.missions.recordPlan(id, { version: 1, nodes: [node(`${id}/N-0001`)] } as any,
+      [], undefined, null, 'HUMAN');
+    fx.missions.recordPlanCritique(id, {
+      version: 1, acceptance: 'REJECT', contaminated: false, contaminationDetail: null,
+      findings: [{ code: 'UNRESOLVED', severity: 'BLOCKING', detail: 'still standing' }],
+    });
+    for (const v of [2, 3, 4]) {
+      fx.missions.recordPlan(id, { version: v, nodes: [node(`${id}/N-0001`)] } as any,
+        [], undefined, null, 'AUTO');
+      fx.missions.recordPlanCritique(id, {
+        version: v, acceptance: 'REJECT', contaminated: false, contaminationDetail: null,
+        findings: [{ code: 'UNRESOLVED', severity: 'BLOCKING', detail: 'still standing' }],
+      });
+    }
+
+    const b = blockedBy(fx.missions, id)!;
+    check('HR1: with its automatic replans spent, Zeus stops and says whose turn it is',
+      b.reason === 'REJECTED_AND_EXHAUSTED' && /yours to ask for/.test(b.detail), b.detail);
+    check('HR2: and the operator may still ask, because the mission can afford it',
+      b.canPlanAgain === true, String(b.canPlanAgain));
+    check('HR3: the findings that remain unresolved are what is shown',
+      b.findings.length === 1 && (b.findings[0] as any).code === 'UNRESOLVED',
+      JSON.stringify(b.findings));
+
+    // The real ceiling: spend, not a replan count.
+    fx.missions.reviseBudget(id, { limit: 'costCeilingUsd', from: 5, to: 0.01,
+      reason: 'test', decidedBy: 'user-confirmed' });
+    fx.store.append({ taskId: id, type: 'ORACLE_COMPILED',
+      payload: { providerUsage: { totalCostUsd: 5 } } });
+    const broke = blockedBy(fx.missions, id)!;
+    check('HR4: out of money, even the human option becomes raise-the-budget-first',
+      broke.canPlanAgain === false
+      && broke.options.some((o) => /raise the mission budget/.test(o)),
+      JSON.stringify(broke.options));
   }
 
   section('the mission budget is checked before the money is spent');

@@ -19,6 +19,15 @@ export interface MissionBudgets {
   maxTasks: number;
   maxReplans: number;
   maxRepairs: number;
+  /**
+   * How many times Zeus may replan BY ITSELF after a plan is rejected.
+   *
+   * A bound on autonomy, not on planning. A person who reads the findings and
+   * asks for another attempt is not the thing this exists to stop — what it
+   * stops is a machine burning the budget on rounds nobody asked for. Human
+   * replans are counted separately and are limited by the mission's cost, time
+   * and safety budgets like any other spend.
+   */
   maxPlanRecompiles: number;
   wallClockSeconds: number;
   /** Provider-reported spend ceiling. Never estimated; see `unmeteredCalls`. */
@@ -32,7 +41,7 @@ export const DEFAULT_MISSION_BUDGETS: MissionBudgets = {
   maxTasks: 20,
   maxReplans: 2,
   maxRepairs: 5,
-  maxPlanRecompiles: 2,
+  maxPlanRecompiles: 3,
   wallClockSeconds: 6 * 60 * 60,
   costCeilingUsd: 5,
   reserveFraction: 0.4,
@@ -75,6 +84,8 @@ export interface MissionUsage {
   replans: number;
   repairs: number;
   planRecompiles: number;
+  /** Of those, the ones Zeus started on its own. The bounded kind. */
+  autoPlanRecompiles: number;
   elapsedSeconds: number;
   /** Summed from providerUsage. Provider-reported only. */
   costUsd: number;
@@ -122,6 +133,12 @@ export function providerSpendOf(taskEvents: StoredEvent[]): { costUsd: number; u
 export function missionUsage(events: StoredEvent[], now = Date.now(),
   spendOf?: (taskId: string) => { costUsd: number; unmetered: number }): MissionUsage {
   let tasksSpawned = 0, plannedTasks = 0, replans = 0, repairs = 0, planRecompiles = 0;
+  let autoPlanRecompiles = 0;
+  // Which attempt produced each plan version, so a rejection can be charged to
+  // whoever asked for it. An attempt recorded before triggers existed counts as
+  // autonomous: the conservative reading, so nothing silently gains unlimited
+  // retries by being old.
+  const triggerOf = new Map<number, string>();
   let costUsd = 0, unmeteredCalls = 0;
   const reserveDraws: Array<{ kind: string; reason: string }> = [];
   let startedAt: number | null = null;
@@ -145,14 +162,23 @@ export function missionUsage(events: StoredEvent[], now = Date.now(),
         replans += 1;
         reserveDraws.push({ kind: 'replan', reason: String(p.reason ?? 'unstated') });
         break;
-      case 'PLAN_REJECTED':
+      case 'PLAN_RECORDED':
+        triggerOf.set(Number(p.version), String(p.trigger ?? 'AUTO'));
+        break;
+      case 'PLAN_REJECTED': {
         // A plan the validator refused: the planner has to be called again.
         planRecompiles += 1;
+        const who = String(p.trigger ?? triggerOf.get(Number(p.version)) ?? 'AUTO');
+        if (who === 'AUTO') autoPlanRecompiles += 1;
         break;
+      }
       case 'PLAN_CRITIQUED':
         // A critique that rejected the plan costs another planner call too.
         // A critique that merely raised advisory findings does not.
-        if (p.acceptance === 'REJECT') planRecompiles += 1;
+        if (p.acceptance === 'REJECT') {
+          planRecompiles += 1;
+          if ((triggerOf.get(Number(p.version)) ?? 'AUTO') === 'AUTO') autoPlanRecompiles += 1;
+        }
         break;
       default: break;
     }
@@ -164,13 +190,33 @@ export function missionUsage(events: StoredEvent[], now = Date.now(),
     }
   }
   return {
-    tasksSpawned, plannedTasks, replans, repairs, planRecompiles,
+    tasksSpawned, plannedTasks, replans, repairs, planRecompiles, autoPlanRecompiles,
     elapsedSeconds: startedAt ? Math.max(0, Math.round((now - startedAt) / 1000)) : 0,
     costUsd: Number(costUsd.toFixed(6)), unmeteredCalls, reserveDraws,
   };
 }
 
 export interface MissionBreach { limit: keyof MissionBudgets; detail: string }
+
+/**
+ * Whether Zeus has used up its own replanning.
+ *
+ * NOT part of checkMissionBudgets, deliberately. That function is consulted
+ * before every operation, including the ones a person asked for — so putting
+ * the autonomy bound in it made the HUMAN the thing being rate-limited, and a
+ * mission that had exhausted its automatic attempts refused the operator who
+ * had just read the findings and asked for one more.
+ *
+ * This bounds a cascade. Cost, time and the safety guards bound the mission.
+ */
+export function autoReplansExhausted(b: MissionBudgets, u: MissionUsage):
+{ used: number; limit: number; exhausted: boolean } {
+  return {
+    used: u.autoPlanRecompiles,
+    limit: b.maxPlanRecompiles,
+    exhausted: u.autoPlanRecompiles >= b.maxPlanRecompiles,
+  };
+}
 
 export function checkMissionBudgets(b: MissionBudgets, u: MissionUsage): MissionBreach | null {
   if (u.tasksSpawned >= b.maxTasks) {
@@ -184,16 +230,6 @@ export function checkMissionBudgets(b: MissionBudgets, u: MissionUsage): Mission
   }
   if (u.elapsedSeconds >= b.wallClockSeconds) {
     return { limit: 'wallClockSeconds', detail: `${u.elapsedSeconds}s elapsed, limit ${b.wallClockSeconds}s` };
-  }
-  // Counted since the budgets were written, compared against nothing until
-  // now. A mission answered its critic four times against a limit of two,
-  // because `planRecompiles` was incremented and then never read.
-  if (u.planRecompiles >= b.maxPlanRecompiles) {
-    return {
-      limit: 'maxPlanRecompiles',
-      detail: `${u.planRecompiles} plan(s) refused by the validator or the critic, `
-        + `limit ${b.maxPlanRecompiles}`,
-    };
   }
   if (u.costUsd >= b.costCeilingUsd) {
     return {

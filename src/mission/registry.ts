@@ -12,6 +12,7 @@
  * throw is a reconstruction that turns a crash into an outage.
  */
 
+export type PlanTrigger = 'HUMAN' | 'AUTO';
 import { MissionBudgets, mergeMissionBudgets } from './progress';
 import { EventStore, StoredEvent } from '../engine/events';
 import { killRecorded } from '../engine/exec';
@@ -335,9 +336,15 @@ export class MissionRegistry {
      * answer, and what it kept, changed, added and removed. Absent on a first
      * plan, which has nothing to answer and nothing to differ from.
      */
-    revision?: { resolutions: unknown[]; delta: unknown } | null): void {
+    revision?: { resolutions: unknown[]; delta: unknown } | null,
+    /**
+     * Who asked for this attempt. HUMAN is a person pressing something; AUTO is
+     * Zeus trying again by itself after a rejection. Only AUTO is bounded, so
+     * the difference has to be on the log rather than in whoever called this.
+     */
+    trigger: PlanTrigger = 'AUTO'): void {
     this.append(missionId, 'PLAN_RECORDED', {
-      version: plan.version, plan, nodes: plan.nodes.length, scopeFindings,
+      version: plan.version, plan, nodes: plan.nodes.length, scopeFindings, trigger,
       ...(providerUsage ? { providerUsage } : {}),
       ...(revision ? { revision } : {}),
     });
@@ -564,10 +571,12 @@ export class MissionRegistry {
    */
   recordPlanRejected(missionId: string, spec: {
     version: number; nodes: unknown[]; findings: unknown[]; retryable: boolean; note?: string;
+    trigger?: PlanTrigger;
   }): void {
     this.append(missionId, 'PLAN_REJECTED', {
       version: spec.version, nodes: spec.nodes, nodeCount: spec.nodes.length,
       findings: spec.findings, retryable: spec.retryable, note: spec.note ?? null,
+      trigger: spec.trigger ?? 'AUTO',
     });
   }
 

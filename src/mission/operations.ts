@@ -13,7 +13,7 @@
  * decision that belongs to the caller.
  */
 
-import { MissionRegistry } from './registry';
+import { MissionRegistry, PlanTrigger } from './registry';
 import { Engine } from '../engine/orchestrator';
 import { ExecutionPolicy } from '../engine/policy';
 import {
@@ -27,7 +27,7 @@ import { PlanFinding } from './plan';
 import { PlanGraph } from './types';
 import {
   BudgetNegotiation, applyBudgetRevisions, mergeMissionBudgets, negotiateBudget,
-  missionUsage, providerSpendOf, checkMissionBudgets,
+  missionUsage, providerSpendOf, checkMissionBudgets, autoReplansExhausted,
 } from './progress';
 
 export interface CriticFindingRef { code: string; criterionId?: string; detail: string }
@@ -355,6 +355,18 @@ export function priorPlanFor(missions: MissionRegistry, missionId: string):
   };
 }
 
+/** How much of its OWN replanning this mission has spent. */
+export function autoReplanState(missions: MissionRegistry, missionId: string) {
+  const log = missions.events.read(missionId);
+  return autoReplansExhausted(
+    applyBudgetRevisions(mergeMissionBudgets(), log),
+    missionUsage(log, Date.now(), (taskId) => {
+      try { return providerSpendOf(missions.events.read(taskId)); }
+      catch { return { costUsd: 0, unmetered: 0 }; }
+    }),
+  );
+}
+
 /** The budget a mission is operating under, revisions replayed from its log. */
 export function budgetsFor(missions: MissionRegistry, missionId: string) {
   return applyBudgetRevisions(mergeMissionBudgets(), missions.events.read(missionId));
@@ -393,8 +405,38 @@ export function preflightBudget(missions: MissionRegistry,
  * the budget cannot pay for, happens through `acceptRecordedPlan` — an
  * explicit second act, against a version, carrying what was rendered.
  */
-export async function planMissionGraph(ctx: OperationContext,
-  missionId: string): Promise<PlanOperationResult> {
+export async function planMissionGraph(ctx: OperationContext, missionId: string,
+  opts: { trigger?: PlanTrigger } = {}): Promise<PlanOperationResult> {
+  const { missions } = ctx;
+  // The FIRST attempt of a call belongs to whoever made the call; every retry
+  // inside it is Zeus trying again by itself. That is the whole distinction
+  // maxPlanRecompiles bounds, so it is recorded rather than assumed.
+  let trigger: PlanTrigger = opts.trigger ?? 'HUMAN';
+  let last = await planOnce(ctx, missionId, trigger);
+
+  for (;;) {
+    // Only a REJECTED plan is worth another attempt. An accepted one is done,
+    // and a stop that is waiting on consent is waiting on a person.
+    const rejected = (last.ok === false && last.kind === 'REJECTED')
+      || (last.ok === true && last.acceptance.decision === 'REJECT');
+    if (!rejected) return last;
+
+    // --- the guards, checked between every round --------------------------
+    const rec = missions.mission(missionId);
+    if (!rec || rec.terminated || rec.cancelRequested) return last;
+    const held = liveRun(missions, missionId);
+    if (held && held.alive) return last;
+    if (preflightBudget(missions, missionId)) return last;
+    if (autoReplanState(missions, missionId).exhausted) return last;
+
+    trigger = 'AUTO';
+    last = await planOnce(ctx, missionId, trigger);
+  }
+}
+
+/** One attempt: plan, validate, critique, and stop. Never retries. */
+async function planOnce(ctx: OperationContext, missionId: string,
+  trigger: PlanTrigger): Promise<PlanOperationResult> {
   const { missions, engine } = ctx;
   const rec = missions.mission(missionId);
   if (!rec) return { ok: false, kind: 'NO_SUCH_MISSION', detail: `unknown mission ${missionId}` };
@@ -432,10 +474,11 @@ export async function planMissionGraph(ctx: OperationContext,
     missions.recordPlanRejected(missionId, {
       version, nodes: graph.nodes, findings: planned.validation.findings, retryable: true,
       note: 'the deterministic validator refused the plan; the mission is unchanged',
+      trigger,
     });
     return { ok: false, kind: 'REJECTED', version, findings: planned.validation.findings };
   }
-  missions.recordPlan(missionId, graph, scopeGaps, planned.providerUsage, revision);
+  missions.recordPlan(missionId, graph, scopeGaps, planned.providerUsage, revision, trigger);
 
   const critique = await critiquePlan({
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,

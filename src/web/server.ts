@@ -30,7 +30,7 @@ import {
 import {
   CompileResult, PlanOperationResult, OperationContext, budgetsFor, liveRun,
 } from '../mission/operations';
-import { missionUsage, MissionBudgets } from '../mission/progress';
+import { missionUsage, MissionBudgets, checkMissionBudgets } from '../mission/progress';
 import {
   answerFromLog, chatHistory, classifyMessage, draftCard, recordCardDecision,
   recordChatMessage, wantsTightening, MissionCard, sanitiseCeiling,
@@ -285,30 +285,44 @@ export function blockedBy(missions: MissionRegistry, missionId: string): {
 
   const budgets = budgetsFor(missions, missionId);
   const usage = missionUsage(log, Date.now(), spendReader(missions));
-  const exhausted = usage.planRecompiles >= budgets.maxPlanRecompiles;
+  // Zeus's own replanning, not the operator's. A person who has read the
+  // findings may ask again for as long as the mission can pay for it.
+  const exhausted = usage.autoPlanRecompiles >= budgets.maxPlanRecompiles;
+  const affordable = !checkMissionBudgets(budgets, usage);
 
   if (cp.acceptance === 'REJECT') {
     return {
       reason: exhausted ? 'REJECTED_AND_EXHAUSTED' : 'PLAN_REJECTED',
       detail: exhausted
-        ? `the critic rejected plan v${version}, and ${usage.planRecompiles} of `
-          + `${budgets.maxPlanRecompiles} plan attempts are spent`
+        ? `the critic rejected plan v${version}. Zeus has used all `
+          + `${budgets.maxPlanRecompiles} of its automatic replans, so the next attempt `
+          + 'is yours to ask for'
         : `the critic rejected plan v${version}; a rejected plan cannot be accepted by consent`,
       findings: (cp.findings ?? []),
-      canPlanAgain: !exhausted,
-      options: exhausted
-        ? ['raise maxPlanRecompiles and plan again', 'narrow the goal', 'cancel the mission']
-        : ['plan again, with the critic\u2019s findings carried into it',
-          'narrow the goal', 'cancel the mission'],
+      // A human may always ask again while the mission can afford it. What is
+      // exhausted is Zeus's licence to keep trying without being asked.
+      canPlanAgain: affordable,
+      options: [
+        affordable
+          ? 'plan again, with the unresolved findings carried into it'
+          : 'raise the mission budget, then plan again',
+        'narrow the goal',
+        'cancel the mission',
+      ],
     };
   }
   if (exhausted) {
     return {
       reason: 'PLAN_BUDGET_EXHAUSTED',
-      detail: `${usage.planRecompiles} of ${budgets.maxPlanRecompiles} plan attempts are spent`,
+      detail: `${usage.autoPlanRecompiles} of ${budgets.maxPlanRecompiles} automatic `
+        + 'replans are spent; further attempts are yours to ask for',
       findings: (cp.findings ?? []),
-      canPlanAgain: false,
-      options: ['raise maxPlanRecompiles and plan again', 'narrow the goal', 'cancel the mission'],
+      canPlanAgain: affordable,
+      options: [
+        affordable ? 'plan again, with the unresolved findings carried into it'
+          : 'raise the mission budget, then plan again',
+        'narrow the goal', 'cancel the mission',
+      ],
     };
   }
   return null;

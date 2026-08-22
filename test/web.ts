@@ -1857,4 +1857,47 @@ export async function webSuite(): Promise<void> {
         fs.readdirSync(proot).join(',') === 'talkbridge', fs.readdirSync(proot).join(','));
     } finally { await server?.close(); }
   }
+  section('chat: the verbs real messages actually use');
+  {
+    // Every one of these was typed at the deployed console, or is the same
+    // shape as one that was. "improve the readme" routed AMBIGUOUS and that is
+    // how the gap was found — the list grows from real use, not imagination.
+    const WORKISH = [
+      'improve the readme', 'improve the readme wording', 'enhance the error messages',
+      'clarify the setup instructions', 'simplify the parser', 'tidy up the imports',
+      'polish the CLI output', 'harden the upload path', 'reduce the bundle size',
+      'bump the node version', 'enable strict mode', 'validate the input',
+      'بهبود بده مستندات را', 'ساده کن این تابع را',
+    ];
+    const missed = WORKISH.filter((m) => classifyMessage(m).intent !== 'WORK');
+    check('VB-W1: the verbs people actually use route to WORK',
+      missed.length === 0,
+      missed.map((m) => `"${m}" -> ${classifyMessage(m).intent}`).join(' | '));
+    check('VB-W2: and each names the pattern that caught it',
+      WORKISH.every((m) => classifyMessage(m).matched.some((x) => x.startsWith('work:'))));
+
+    // The doubt direction is unchanged: adding verbs must not make the
+    // classifier greedy about things that are plainly not requests.
+    const NOT_WORK = [
+      'the readme could be better', 'improvements are needed somewhere',
+      'how do I improve the readme?', 'what would improve this?',
+    ];
+    const wrong = NOT_WORK.filter((m) => classifyMessage(m).intent === 'WORK');
+    check('VB-W3: an observation or a question about improving is still not a work order',
+      wrong.length === 0,
+      wrong.map((m) => `"${m}" -> WORK`).join(' | '));
+  }
+
+  section('the console renders spend and events legibly');
+  {
+    check('UX1: an empty cost breakdown says so rather than printing "{}"',
+      UI_HTML.includes('nothing spent yet') && !/JSON\.stringify\(m\.cost\.byPhase\)/.test(UI_HTML),
+      'empty cost has words');
+    check('UX2: a populated breakdown is rendered per phase with amounts',
+      /byPhase\)\.map\(\(\[k, v\]\)/.test(UI_HTML), 'per-phase rendering');
+    check('UX3: the live feed has room to be a feed',
+      /#feedwrap \{[^}]*min-height:120px/.test(UI_HTML), 'feed has a minimum height');
+    check('UX4: a chat event is labelled chat, not by a stream id that reads like a mission',
+      UI_HTML.includes("tail === 'CHAT' ? 'chat'"), 'chat events labelled');
+  }
 }

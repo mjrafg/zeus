@@ -94,9 +94,12 @@ const STATUS_VOCAB = [
 
 /** Imperative openers that plainly ask for work. */
 const WORK_PATTERNS: Array<{ id: string; re: RegExp }> = [
-  { id: 'en-imperative', re: /^\s*(please\s+)?(fix|add|make|create|implement|refactor|write|update|remove|delete|rename|migrate|upgrade|build|introduce|extract|split|merge|optimi[sz]e|clean\s*up|port|convert|replace|document)\b/i },
+  // "improve the readme" was routed AMBIGUOUS by real use — plainly a work
+  // request, and the list simply did not have the word. Verbs get added when
+  // a real message finds the gap, not by imagining what someone might type.
+  { id: 'en-imperative', re: /^\s*(please\s+)?(fix|add|make|create|implement|refactor|write|update|remove|delete|rename|migrate|upgrade|build|introduce|extract|split|merge|optimi[sz]e|clean\s*up|port|convert|replace|document|improve|enhance|clarify|simplify|tidy|polish|translate|harden|speed\s*up|reduce|bump|drop|enable|disable|support|handle|validate|sanitis|sanitiz)\b/i },
   { id: 'en-request', re: /\b(i\s+(want|need)\s+you\s+to|can\s+you\s+(please\s+)?(fix|add|make|write|implement|refactor|update|remove))\b/i },
-  { id: 'fa-imperative', re: /(درست\s*کن|اضافه\s*کن|بساز|بنویس|حذف\s*کن|تغییر\s*بده|رفع\s*کن|اصلاح\s*کن|پیاده\s*سازی\s*کن|بازنویسی\s*کن|به\s*روز\s*کن)/ },
+  { id: 'fa-imperative', re: /(درست\s*کن|اضافه\s*کن|بساز|بنویس|حذف\s*کن|تغییر\s*بده|رفع\s*کن|اصلاح\s*کن|پیاده\s*سازی\s*کن|بازنویسی\s*کن|به\s*روز\s*کن|بهتر\s*کن|ساده\s*کن|بهبود\s*بده)/ },
 ];
 
 const startsWith = (text: string, words: string[]): string | null => {

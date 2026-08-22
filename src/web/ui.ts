@@ -39,7 +39,7 @@ export const UI_HTML = `<!doctype html>
      #detail.innerHTML, and anything appended inside it would be destroyed on
      the next refresh. Structure, not discipline, keeps it alive. */
   #feedwrap { border-top:1px solid var(--line); padding:8px 16px 12px;
-              max-height:38%; overflow:auto; flex:0 0 auto }
+              height:34%; min-height:120px; overflow:auto; flex:0 0 auto }
   #chat { border-left:1px solid var(--line); display:flex; flex-direction:column }
   #log { flex:1; overflow:auto; margin-bottom:8px }
   .msg { margin:6px 0; padding:6px 8px; border-radius:6px; background:#161b22;
@@ -188,7 +188,12 @@ async function loadDetail() {
     + '<tr><th>cost</th><td>$' + (m.cost.totalUsd || 0).toFixed(4)
     + (m.cost.isLowerBound ? ' <span class="warn">(a lower bound — '
         + m.cost.unmeteredCalls + ' call(s) reported no price)</span>' : '')
-    + '<br><span class="dim">' + esc(JSON.stringify(m.cost.byPhase)) + '</span></td></tr></table>';
+    + (Object.keys(m.cost.byPhase || {}).length
+      ? '<br><span class="dim">'
+        + Object.entries(m.cost.byPhase).map(([k, v]) => esc(k) + ' $' + Number(v).toFixed(4)).join('  ')
+        + '</span>'
+      : '<br><span class="dim">nothing spent yet</span>')
+    + '</td></tr></table>';
 
   if (o) {
     h += '<div id="pendingslot"></div>';
@@ -281,9 +286,11 @@ function connectStream() {
     const feed = $('feed');
     if (feed) {
       const mine = SEL && (e.taskId === SEL || String(e.taskId).startsWith(SEL));
+      const tail = String(e.taskId).split('/').pop();
+      const where = mine ? '' : (tail === 'CHAT' ? 'chat' : tail);
       const row = document.createElement('div');
       row.innerHTML = '<span class="dim">' + esc(e.ts.slice(11,19)) + '</span> '
-        + (mine ? '' : '<span class="dim">' + esc(String(e.taskId).split('/').pop()) + '</span> ')
+        + (where ? '<span class="dim">' + esc(where) + '</span> ' : '')
         + esc(e.type);
       feed.prepend(row);
       while (feed.childElementCount > 200) feed.lastElementChild.remove();

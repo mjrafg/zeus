@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
-import { Engine, TaskRecord } from '../engine/orchestrator';
+import { Engine, TaskRecord, ZEUS_PATHSPEC_EXCLUDES } from '../engine/orchestrator';
 import { ProcessSupervisor } from '../engine/exec';
 import { Provider } from '../engine/providers';
 import { GitAccess, revalidateForIntegration } from '../validation/revalidate';
@@ -137,7 +137,13 @@ export function missionHost(input: MissionHostInput): LoopHost {
 
       // Commit whatever the node produced. An uncommitted worktree cannot be
       // rebased, and a node that produced nothing has not earned a commit.
-      gitSoft(rec.worktree, ['add', '-A', '--']);
+      //
+      // With the excludes, like every other place that asks what a task
+      // changed. The info/exclude file is belt; this is braces, and it is the
+      // one that matters: a bare `git add -A` here committed Zeus's own npm
+      // cache as the node's work, and the following node's rebase conflicted
+      // on it. Nothing under .zeus-cache/ or .zeus/ is ever the project's.
+      gitSoft(rec.worktree, ['add', '-A', '--', ...ZEUS_PATHSPEC_EXCLUDES]);
       const staged = gitSoft(rec.worktree, ['diff', '--cached', '--name-only']);
       const committed = gitSoft(rec.worktree, ['log', '--format=%H', `${rec.baseSha}..HEAD`]);
       if (!(staged.ok && staged.out) && !(committed.ok && committed.out)) {

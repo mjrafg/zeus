@@ -373,9 +373,17 @@ export class Engine {
   private excludeZeusArtifacts(worktree: string): void {
     try {
       const cp = require('child_process');
-      // A linked worktree keeps its metadata in a file, not a directory, so
-      // the exclude path is asked for rather than assumed.
-      const gitDir = cp.execFileSync('git', ['-C', worktree, 'rev-parse', '--git-dir'],
+      // --git-common-dir, NOT --git-dir.
+      //
+      // In a linked worktree — which is the only kind Zeus makes — --git-dir
+      // is that worktree's private metadata directory, and git does not read
+      // info/exclude from it. It reads $GIT_COMMON_DIR/info/exclude. So this
+      // wrote a correct exclude file to a path nothing consults, and every
+      // task worktree saw .zeus-cache/ as untracked project work: `git add -A`
+      // staged an npm cache, and the next node's rebase conflicted on several
+      // hundred cache index files. The comment was right that the path has to
+      // be asked for; it asked the wrong question.
+      const gitDir = cp.execFileSync('git', ['-C', worktree, 'rev-parse', '--git-common-dir'],
         { encoding: 'utf8', timeout: 30_000 }).trim();
       const abs = path.isAbsolute(gitDir) ? gitDir : path.join(worktree, gitDir);
       const info = path.join(abs, 'info');

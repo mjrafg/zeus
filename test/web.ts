@@ -40,6 +40,7 @@ const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsO
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import { detectProject, nodePackageDirs } from '../src/adapters';
+import { ZEUS_WORKTREE_EXCLUDES, ZEUS_PATHSPEC_EXCLUDES } from '../src/engine/orchestrator';
 import { splitCommand } from '../src/engine/dependencies';
 import { probePackageManager } from '../src/readiness';
 import {
@@ -2310,6 +2311,75 @@ export async function webSuite(): Promise<void> {
       nodePackageDirs(single).length === 0
       && detectProject(single).primary.commands(single).unitTest === 'npm run test',
       String(detectProject(single).primary.commands(single).unitTest));
+  }
+
+  section('Zeus scratch is never the project\u2019s work');
+  {
+    // A task worktree saw .zeus-cache/ — the npm cache the install step writes
+    // — as untracked project work. `git add -A` staged it as the node's
+    // change, and the NEXT node's rebase onto the mission green conflicted on
+    // several hundred cache index files, so the mission stopped PARTIAL with
+    // one node integrated and the rest unreachable.
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-scratch-'));
+    const git = (cwd: string, args: string[]) =>
+      execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+    git(repo, ['init', '-q', '-b', 'main']);
+    git(repo, ['config', 'user.email', 't@t']);
+    git(repo, ['config', 'user.name', 't']);
+    fs.writeFileSync(path.join(repo, 'README.md'), 'hello\n');
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-qm', 'base']);
+
+    const wt = path.join(repo, 'wt');
+    git(repo, ['worktree', 'add', '--detach', '-q', wt, 'HEAD']);
+
+    // The bug, exactly: --git-dir is the worktree's PRIVATE metadata, and git
+    // reads info/exclude from the COMMON dir. They differ, and only one works.
+    const privateDir = git(wt, ['rev-parse', '--git-dir']);
+    const commonDir = git(wt, ['rev-parse', '--git-common-dir']);
+    check('SCR1: in a linked worktree the private git dir is not the common one',
+      path.resolve(wt, privateDir) !== path.resolve(wt, commonDir),
+      `${privateDir} vs ${commonDir}`);
+
+    fs.mkdirSync(path.join(wt, '.zeus-cache', 'npm'), { recursive: true });
+    fs.writeFileSync(path.join(wt, '.zeus-cache', 'npm', 'index'), 'cache\n');
+    fs.writeFileSync(path.join(wt, 'README.md'), 'hello, changed\n');
+
+    const info = path.join(path.resolve(wt, privateDir), 'info');
+    fs.mkdirSync(info, { recursive: true });
+    fs.writeFileSync(path.join(info, 'exclude'), ZEUS_WORKTREE_EXCLUDES.join('\n') + '\n');
+    check('SCR2: an exclude written to the private dir does NOT hide the cache',
+      /\.zeus-cache/.test(git(wt, ['status', '--short'])),
+      git(wt, ['status', '--short']).replace(/\n/g, ' | '));
+
+    const cinfo = path.join(path.resolve(wt, commonDir), 'info');
+    fs.mkdirSync(cinfo, { recursive: true });
+    fs.writeFileSync(path.join(cinfo, 'exclude'), ZEUS_WORKTREE_EXCLUDES.join('\n') + '\n');
+    check('SCR3: written to the common dir, it does — which is where Zeus writes it now',
+      !/\.zeus-cache/.test(git(wt, ['status', '--short'])),
+      git(wt, ['status', '--short']).replace(/\n/g, ' | ') || '(only README)');
+
+    // Belt and braces. Even with no exclude file at all, the integration
+    // commit must not stage Zeus's scratch as the node's work.
+    fs.rmSync(path.join(cinfo, 'exclude'));
+    fs.rmSync(path.join(info, 'exclude'));
+    execFileSync('git', ['-C', wt, 'add', '-A', '--', ...ZEUS_PATHSPEC_EXCLUDES]);
+    const staged = git(wt, ['diff', '--cached', '--name-only']).split('\n').filter(Boolean);
+    check('SCR4: the integration `git add` stages the file and never the cache',
+      staged.includes('README.md') && !staged.some((f) => f.startsWith('.zeus-cache')),
+      JSON.stringify(staged));
+
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'host.ts'), 'utf8');
+    check('SCR5: and that is the call integrate actually makes',
+      /gitSoft\(rec\.worktree, \['add', '-A', '--', \.\.\.ZEUS_PATHSPEC_EXCLUDES\]\)/.test(src),
+      'integrate excludes zeus scratch');
+    const orch = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'engine', 'orchestrator.ts'), 'utf8');
+    check('SCR6: the exclude file goes to the common dir, not the private one',
+      /'rev-parse', '--git-common-dir'/.test(orch)
+      && !/'rev-parse', '--git-dir'\],\n\s+\{ encoding: 'utf8', timeout: 30_000 \}\).trim\(\);\n\s+const abs/.test(orch),
+      'common dir asked for');
   }
 
   section('a detached run that dies says where it died');

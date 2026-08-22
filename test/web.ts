@@ -41,6 +41,7 @@ import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import { detectProject, nodePackageDirs } from '../src/adapters';
 import { splitCommand } from '../src/engine/dependencies';
+import { probePackageManager } from '../src/readiness';
 import {
   listProjects, projectBySlug, slugForUrl, slugify, freeSlug, scopeFor,
 } from '../src/projects';
@@ -2263,6 +2264,18 @@ export async function webSuite(): Promise<void> {
       JSON.stringify({ scripts: { test: 'jest', build: 'tsc' } }));
     fs.mkdirSync(path.join(single, 'packages', 'inner'), { recursive: true });
     fs.writeFileSync(path.join(single, 'packages', 'inner', 'package.json'), '{}');
+    // The doctor printed "Project type detected: Node / JavaScript / TypeScript"
+    // and, two lines later, "not a node project". A report that disagrees with
+    // itself teaches the reader to skim it.
+    const pmProbe = probePackageManager(root, process.env as Record<string, string>);
+    check('PL9c: the package-manager probe agrees with the detection above it',
+      pmProbe.status !== 'SKIPPED', `${pmProbe.status} ${pmProbe.reason ?? ''}`);
+    const notNode = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-nonode-'));
+    fs.writeFileSync(path.join(notNode, 'main.go'), 'package main\n');
+    check('PL9d: and a repository with no package anywhere is still correctly skipped',
+      probePackageManager(notNode, process.env as Record<string, string>).status === 'SKIPPED',
+      probePackageManager(notNode, process.env as Record<string, string>).reason ?? '');
+
     check('PL10: a repository that IS a package is unchanged, and does not descend',
       nodePackageDirs(single).length === 0
       && detectProject(single).primary.commands(single).unitTest === 'npm run test',

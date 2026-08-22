@@ -25,7 +25,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { ProjectConfig } from './config';
-import { nodePackageManager } from './adapters';
+import { nodePackageManager, nodePackageDirs } from './adapters';
 import { buildEnv, defaultPolicy } from './engine/policy';
 import { resolveExecutable } from './engine/exec';
 import { PrepMethod, describeDependencyState, splitCommand } from './engine/dependencies';
@@ -103,15 +103,23 @@ export function supervisorEnv(root: string): Record<string, string> {
  * version" is a probe result, and only the second is worth reporting.
  */
 export function probePackageManager(root: string, env: Record<string, string>): ReadinessProbe {
-  const isNode = fs.existsSync(path.join(root, 'package.json'));
-  if (!isNode) {
+  // The packages, wherever they are. Looking only at the root made the doctor
+  // contradict itself on a repository whose packages live one level down: two
+  // lines after "Project type detected: Node / JavaScript / TypeScript" it
+  // printed "not a node project". A report that disagrees with itself teaches
+  // the reader to skim it.
+  const dirs = nodePackageDirs(root);
+  const manifestAt = fs.existsSync(path.join(root, 'package.json')) ? root
+    : (dirs.length ? path.join(root, dirs[0]) : null);
+  if (!manifestAt) {
     return {
       id: 'package-manager', label: 'Package manager', required: false, status: 'SKIPPED',
-      detail: 'no package.json, so no node package manager is involved',
+      detail: 'no package.json at the root or one level below, '
+        + 'so no node package manager is involved',
       reason: 'not a node project',
     };
   }
-  const pm = nodePackageManager(root);
+  const pm = nodePackageManager(manifestAt);
   const resolved = resolveExecutable(pm, env);
   if (!resolved.ok) {
     return {

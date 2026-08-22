@@ -185,6 +185,15 @@ export async function runMissionLoop(
       return finish('PARTIAL', 'BUDGET_EXCEEDED',
         `${reason}: already replanned ${usage.replans} time(s), the limit is ${budgets.maxReplans}`);
     }
+    // Same reason as the integration guard: replanning is the most expensive
+    // thing a stale cycle can do, and a terminated mission has no next plan.
+    const alive = missions.mission(missionId);
+    if (!alive || alive.terminated) {
+      return { missionId, cycles, terminated: true,
+        achievement: alive ? alive.achievement : 'UNEVALUATED',
+        terminationReason: (alive ? alive.terminationReason : null) as TerminationReason | null,
+        detail: 'the mission terminated before this replan; nothing was replanned', refusals };
+    }
     missions.recordReplan(missionId, { reason, detail, fromVersion: rec.acceptedPlanVersion });
     const fresh = await host.replan(reason, detail);
     if (!fresh) {
@@ -290,6 +299,23 @@ export async function runMissionLoop(
     const dependents = dependentsOf(graph, node.nodeId);
 
     /* -- integrate --------------------------------------------------------- */
+
+    // Re-read before integrating. The check at the top of the cycle is minutes
+    // old by now: a cycle spawns a task, waits for it and integrates, and in
+    // that window another process — or a cancel — can end the mission. One did.
+    // A second `zeus mission run` on the same mission finished its cycle three
+    // minutes after MISSION_TERMINATED and wrote an INTEGRATION_RESULT
+    // integrated=true, a PLAN_INVALIDATED and a MISSION_REPLAN into a mission
+    // whose achievement was already settled. A terminated mission does not
+    // move again, least of all because a process nobody knew about was slow.
+    const still = missions.mission(missionId);
+    if (!still || still.terminated) {
+      return { missionId, cycles, terminated: true,
+        achievement: still ? still.achievement : 'UNEVALUATED',
+        terminationReason: (still ? still.terminationReason : null) as TerminationReason | null,
+        detail: 'the mission terminated while this cycle was running; nothing was integrated',
+        refusals };
+    }
 
     let integration: IntegrationOutcome = { integrated: false, sha: null, touched: [], detail: exec.detail };
     if (exec.state === 'COMPLETED') {

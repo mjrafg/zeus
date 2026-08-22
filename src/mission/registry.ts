@@ -678,6 +678,41 @@ export class MissionRegistry {
     this.append(missionId, 'MISSION_BUDGET_REVISED', { ...spec });
   }
 
+  /**
+   * A `zeus mission run` process taking this mission, and letting it go.
+   *
+   * Recorded rather than held in memory because the runner is a DIFFERENT
+   * process from whatever wants to know — the console spawns it detached and
+   * then has no handle on it at all. Two runs on one mission raced: each built
+   * the same node, each paid for it, and the slower one wrote an integration
+   * into a mission the faster one had already terminated.
+   */
+  recordRunStarted(missionId: string, pid: number): void {
+    this.append(missionId, 'MISSION_RUN_STARTED', { pid, startedAt: new Date().toISOString() });
+  }
+
+  recordRunFinished(missionId: string, pid: number, outcome: string): void {
+    this.append(missionId, 'MISSION_RUN_FINISHED', {
+      pid, outcome, finishedAt: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * A long operation the console started, and how it ended.
+   *
+   * compile and plan each take minutes and used to be answered synchronously.
+   * Behind a proxy with a 100-second ceiling that is a guaranteed lie: the
+   * operation succeeded, the connection did not, and the console reported
+   * "failed: 524" over work that was on the log. Now the request returns at
+   * once and the OUTCOME is an event, so the page learns it the same way it
+   * learns everything else.
+   */
+  recordOperation(missionId: string, spec: {
+    kind: string; ok: boolean; detail: string;
+  }): void {
+    this.append(missionId, 'MISSION_OPERATION', { ...spec, at: new Date().toISOString() });
+  }
+
   /** A reconciliation between what the log says and what the world shows. */
   recordReconciliation(missionId: string, spec: {
     kind: string; expected: string; observed: string; resolution: string;

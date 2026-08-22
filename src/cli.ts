@@ -44,7 +44,7 @@ import {
 import { defaultProjectsRoot } from './projects';
 import {
   compileMissionOracle, planMissionGraph, recompileMissionOracle,
-  MAX_ORACLE_RECOMPILES, budgetsFor,
+  MAX_ORACLE_RECOMPILES, budgetsFor, liveRun,
 } from './mission/operations';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
@@ -1522,7 +1522,7 @@ async function cmdMission(argv: string[]): Promise<number> {
 
     case 'run': {
       const raw = rest.find((a) => !a.startsWith('--'));
-      if (!raw) { err('usage: zeus mission run <id> [--mock] [--yes]'); return 2; }
+      if (!raw) { err('usage: zeus mission run <id> [--mock] [--yes] [--force]'); return 2; }
       const id = resolve(raw);
       const rec = guard(() => missions.mission(id));
       if (rec === null) return 2;
@@ -1539,6 +1539,23 @@ async function cmdMission(argv: string[]): Promise<number> {
 
       const mock = rest.includes('--mock');
       const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
+
+      // ONE RUNNER PER MISSION. Two `zeus mission run` processes on one
+      // mission raced: each built the same node, each paid for it, and the
+      // slower one wrote an integration into a mission the faster one had
+      // already terminated. --force exists because a claim is a record of a
+      // process, and a machine that lost power leaves a record behind that no
+      // liveness check on a recycled pid can be trusted to resolve.
+      const held = liveRun(missions, id);
+      if (held && held.alive && !rest.includes('--force')) {
+        err(`${C.r}✗${C.x} ${id} is already being run by pid ${held.pid} (since ${held.startedAt})`);
+        err(`  ${C.dim}watch it, cancel it, or pass --force if you are certain that process is gone${C.x}`);
+        return 1;
+      }
+      if (held && !held.alive) {
+        out(`  ${C.y}!${C.x} ${C.dim}pid ${held.pid} claimed this mission and is gone; taking it over${C.x}`);
+        missions.recordRunFinished(id, held.pid, 'ABANDONED');
+      }
 
       // Project readiness comes FIRST, before the selftest, because it is free
       // and the selftest costs money. The same probes doctor runs, from the
@@ -1590,7 +1607,17 @@ async function cmdMission(argv: string[]): Promise<number> {
         onEvent: (line) => { if (!json) out(`  ${C.dim}${line}${C.x}`); },
       });
 
-      const result = await runMissionLoop(missions, host, { missionId: id, oracle });
+      missions.recordRunStarted(id, process.pid);
+      let result;
+      try {
+        result = await runMissionLoop(missions, host, { missionId: id, oracle });
+      } catch (e: any) {
+        // Released even when the loop throws. A claim that outlives its
+        // process is a mission nobody can run again.
+        missions.recordRunFinished(id, process.pid, 'THREW');
+        throw e;
+      }
+      missions.recordRunFinished(id, process.pid, result.achievement);
       if (json) { out(JSON.stringify(result, null, 1)); return result.achievement === 'ACHIEVED' ? 0 : 1; }
       out('');
       out(`${C.b}${id}${C.x} ${result.achievement} / ${result.terminationReason}`);

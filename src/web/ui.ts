@@ -104,6 +104,12 @@ export const UI_HTML = `<!doctype html>
   .node b { font-weight:600 }
   .node .meta { color:var(--dim); font-size:11px; margin-top:2px }
   .node .desc { color:var(--dim); margin-top:3px; white-space:pre-wrap }
+  .busy { border:1px solid var(--acc); border-radius:6px; padding:8px 10px;
+          margin:10px 0; background:#0d1a26 }
+  .busy b { color:var(--acc) }
+  @keyframes pulse { 0%,100% { opacity:.35 } 50% { opacity:1 } }
+  .busy .dot { display:inline-block; width:7px; height:7px; border-radius:50%;
+               background:var(--acc); margin-right:6px; animation:pulse 1.4s infinite }
   #actslot .acts { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 }
   #actslot button.ghost { background:transparent; color:var(--dim);
                           border-color:var(--line) }
@@ -411,6 +417,42 @@ const NEXT_STEP = {
 function renderActions(m) {
   const slot = $('actslot');
   if (!slot || m.terminated) return;
+
+  // NOTHING is pressable while something is running on this mission.
+  //
+  // The buttons only ever disabled themselves for the life of their own
+  // request, so a reload, a second tab, or a request the proxy cut off left
+  // them live again — and a second click spawned a second runner. Two runs
+  // raced on one mission: same node built twice, paid for twice, and the
+  // slower one wrote an integration into a mission the faster had terminated.
+  // The state comes from the server, so every tab agrees.
+  if (m.running) {
+    const b = document.createElement('div');
+    b.className = 'busy';
+    b.innerHTML = '<span class="dot"></span><b>' + esc(m.running.kind)
+      + '</b> is running on this mission'
+      + (m.running.pid ? ' <span class="dim">(pid ' + m.running.pid + ')</span>' : '')
+      + '<br><span class="dim">since ' + esc(String(m.running.since).replace('T', ' ').slice(0, 19))
+      + ' \u00b7 watch the live events; the page rebuilds itself from the log</span>';
+    slot.appendChild(b);
+    const stop = document.createElement('div');
+    stop.className = 'acts';
+    const c = document.createElement('button');
+    c.className = 'ghost';
+    c.textContent = 'cancel mission';
+    c.onclick = async () => {
+      if (!confirm('Cancel ' + m.missionId + '? This terminates it.')) return;
+      c.disabled = true;
+      const r = await apiPost('/missions/'
+        + encodeURIComponent(m.missionId.split('/').pop()) + '/cancel', {});
+      reportOperation(m, 'cancel mission', r);
+      loadList(); loadDetail();
+    };
+    stop.appendChild(c);
+    slot.appendChild(stop);
+    return;
+  }
+
   const step = m.pendingDecision ? null : NEXT_STEP[m.phase];
   if (!step && !m.pendingDecision) return;
   const d = document.createElement('div');
@@ -459,6 +501,27 @@ function renderActions(m) {
 function reportOperation(m, label, r) {
   const j = r.json || {};
   const id = esc(m.missionId);
+  // A LOST CONNECTION IS NOT A FAILED OPERATION. Compile and plan take
+  // minutes; a proxy that gives up at 100 seconds produced "failed: 524" over
+  // work that had already succeeded and was on the log — and the operator,
+  // told it failed, pressed the button again.
+  if (r.status === 0 || r.status === 502 || r.status === 503
+    || r.status === 504 || r.status === 524) {
+    bubble('<span class="warn">' + esc(label) + ' on ' + id
+      + ' lost its connection (' + r.status + ')</span>'
+      + '<br><span class="dim">the operation is still running on the server \u2014 '
+      + 'watch the live events; do not start it again</span>', false);
+    return;
+  }
+  if (r.status === 202) {
+    bubble(esc(label) + ' on ' + id + ' <span class="ok">started</span>'
+      + '<br><span class="dim">' + esc(j.detail || 'it runs on the server') + '</span>', false);
+    return;
+  }
+  if (r.status === 409 && j.error === 'ALREADY_RUNNING') {
+    bubble('<span class="warn">' + esc(j.detail || 'already running') + '</span>', false);
+    return;
+  }
   if (r.status >= 400) {
     bubble('<span class="bad">' + esc(label) + ' on ' + id + ' failed: '
       + esc(j.error || r.status) + '</span>'
@@ -570,11 +633,20 @@ function connectStream() {
 // against the project the server was started in. A rule every caller must
 // remember is a rule one caller will eventually forget.
 async function apiPost(p, body) {
-  const r = await fetch('/api' + scope(p), {
-    method: 'POST',
-    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
+  // A fetch that never came back is reported as status 0 rather than thrown.
+  // A thrown error left the caller unable to tell "the server refused" from
+  // "the connection died", and those need opposite advice: one means fix it,
+  // the other means wait and DO NOT press it again.
+  let r;
+  try {
+    r = await fetch('/api' + scope(p), {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+  } catch (e) {
+    return { status: 0, json: { error: 'CONNECTION_LOST', detail: String(e && e.message || e) } };
+  }
   return { status: r.status, json: await r.json().catch(() => null) };
 }
 

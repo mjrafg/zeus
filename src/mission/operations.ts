@@ -294,6 +294,38 @@ export type PlanOperationResult =
     accepted: boolean;
   };
 
+export interface LiveRun {
+  pid: number;
+  startedAt: string;
+  /** True when the process is still there; a crashed runner holds no lock. */
+  alive: boolean;
+}
+
+/**
+ * The run that currently owns this mission, if any.
+ *
+ * Derived from the log and then CHECKED against the world: a MISSION_RUN_STARTED
+ * with no matching MISSION_RUN_FINISHED means a runner claimed the mission, and
+ * `kill(pid, 0)` says whether it is still there. Without the liveness check a
+ * crashed runner would lock the mission for ever; without the log the question
+ * could not be asked at all, because the runner is another process.
+ */
+export function liveRun(missions: MissionRegistry, missionId: string): LiveRun | null {
+  let claim: { pid: number; startedAt: string } | null = null;
+  for (const e of missions.events.read(missionId)) {
+    const p = (e.payload ?? {}) as any;
+    if (e.type === 'MISSION_RUN_STARTED' && typeof p.pid === 'number') {
+      claim = { pid: p.pid, startedAt: String(p.startedAt ?? e.ts) };
+    } else if (e.type === 'MISSION_RUN_FINISHED' && claim && p.pid === claim.pid) {
+      claim = null;
+    }
+  }
+  if (!claim) return null;
+  let alive = false;
+  try { process.kill(claim.pid, 0); alive = true; } catch { alive = false; }
+  return { ...claim, alive };
+}
+
 /** The budget a mission is operating under, revisions replayed from its log. */
 export function budgetsFor(missions: MissionRegistry, missionId: string) {
   return applyBudgetRevisions(mergeMissionBudgets(), missions.events.read(missionId));

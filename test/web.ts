@@ -44,8 +44,9 @@ import { detectProject, nodePackageDirs } from '../src/adapters';
 import { ZEUS_WORKTREE_EXCLUDES, ZEUS_PATHSPEC_EXCLUDES } from '../src/engine/orchestrator';
 import { splitCommand } from '../src/engine/dependencies';
 import {
-  budgetsFor, preflightBudget, planMissionGraph,
+  budgetsFor, preflightBudget, planMissionGraph, liveRun,
 } from '../src/mission/operations';
+import { classifyInfrastructure } from '../src/engine/providers';
 import { mergeMissionBudgets, checkMissionBudgets } from '../src/mission/progress';
 import { probePackageManager } from '../src/readiness';
 import {
@@ -217,7 +218,7 @@ export async function webSuite(): Promise<void> {
       // derived purely from the log and rides inside the view, so the CLI and
       // the console read one object rather than two that could drift.
       delete apiCore.phase; delete apiCore.cost; delete apiCore.pendingDecision;
-      delete apiCore.usage;
+      delete apiCore.usage; delete apiCore.running;
       check('WS1: the API mission record deep-equals the CLI view — one serializer',
         JSON.stringify(apiCore) === JSON.stringify(JSON.parse(JSON.stringify(view))),
         'shapes identical');
@@ -1985,9 +1986,12 @@ export async function webSuite(): Promise<void> {
         },
       });
       const c = await post(server, '/api/missions/M-0001/compile?project=alpha', {});
+      // 202: the operation is started, not awaited. Give it a tick to reach
+      // the stub, which is the thing this test is actually about.
+      await new Promise((r) => setTimeout(r, 50));
       const t = seen.find((x) => x.op === 'compile')?.target;
       check('WSC1: compile acts on the SCOPED project, not the one the server sits in',
-        c.status === 200 && t && t.projectId === 'alpha' && t.root === alpha.dir,
+        c.status === 202 && t && t.projectId === 'alpha' && t.root === alpha.dir,
         JSON.stringify([c.status, t?.projectId, t?.root]));
       check('WSC1b: and it is handed the id resolved against that same project',
         seen.find((x) => x.op === 'compile')?.missionId === 'alpha/M-0001',
@@ -2029,8 +2033,8 @@ export async function webSuite(): Promise<void> {
     } finally { await server?.close(); }
 
     check('WSC7: the UI scopes writes in ONE place, so no call site can forget',
-      /async function apiPost\(p, body\) \{\s*const r = await fetch\('\/api' \+ scope\(p\)/
-        .test(UI_HTML)
+      /fetch\('\/api' \+ scope\(p\)/.test(UI_HTML)
+      && (UI_HTML.match(/fetch\('\/api'/g) || []).length === 2
       && !/apiPost\(scope\(/.test(UI_HTML),
       'apiPost scopes centrally and nothing double-scopes');
   }
@@ -2530,6 +2534,158 @@ export async function webSuite(): Promise<void> {
       'advertised');
     check('MBR9: the console warns before a ceiling that stops the mission at once',
       /stops this mission immediately/.test(UI_HTML), 'warned');
+  }
+
+  section('an answer that arrived is not an outage');
+  {
+    // A planner returned exit 0, subtype success, and a structured payload with
+    // all four expected keys. Zeus discarded it as PROVIDER_UNAVAILABLE because
+    // an outage keyword appeared somewhere in 376KB of the model's own text —
+    // then told the operator to retry something that had never broken.
+    const answered = classifyInfrastructure({
+      outcome: 'COMPLETED', answered: true, providerError: null,
+      stdout: 'the plan mentions rate limits, a 429 page and an overloaded queue',
+    });
+    check('PU1: a call that came back parsed is never an outage, whatever it says',
+      answered === null, String(answered));
+
+    const silent = classifyInfrastructure({
+      outcome: 'COMPLETED', answered: false, providerError: null,
+      stdout: 'Error: 529 overloaded',
+    });
+    check('PU2: with no answer at all, the keywords still mean what they meant',
+      typeof silent === 'string' && silent.startsWith('PROVIDER_UNAVAILABLE'), String(silent));
+
+    check('PU3: an outcome the supervisor already called infrastructure is believed first',
+      String(classifyInfrastructure({ outcome: 'TIMEOUT', answered: true, stdout: 'x' }))
+        .startsWith('TIMEOUT'), 'supervisor outcome wins');
+    check('PU4: and so is an error the provider reported about itself',
+      String(classifyInfrastructure({ outcome: 'COMPLETED', answered: true,
+        providerError: 'api_error 500', stdout: 'x' })).startsWith('PROVIDER_ERROR'),
+      'provider signal wins');
+
+    // The exact shape that caused it: the provider's OWN telemetry, saying the
+    // rate limit was not hit.
+    const telemetry = JSON.stringify({
+      type: 'result', subtype: 'success',
+      rate_limit: { status: 'allowed', rateLimitType: 'five_hour' },
+    });
+    check('PU5: telemetry that says the limit was ALLOWED cannot mean unavailable',
+      classifyInfrastructure({ outcome: 'COMPLETED', answered: true, stdout: telemetry }) === null,
+      'allowed is not an outage');
+  }
+
+  section('one runner per mission');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal someone runs twice', 'base0');
+    const id = rec.missionId;
+
+    check('RL1: a mission nobody is running has no claim on it',
+      liveRun(fx.missions, id) === null, 'unclaimed');
+
+    fx.missions.recordRunStarted(id, process.pid);
+    const held = liveRun(fx.missions, id);
+    check('RL2: a claim names the process holding it, and that it is alive',
+      !!held && held.pid === process.pid && held.alive === true, JSON.stringify(held));
+
+    fx.missions.recordRunFinished(id, process.pid, 'PARTIAL');
+    check('RL3: releasing it clears the claim',
+      liveRun(fx.missions, id) === null, 'released');
+
+    // A crashed runner must not lock a mission for ever, so the claim is
+    // checked against the world rather than believed.
+    const gonePid = 999_999;
+    fx.missions.recordRunStarted(id, gonePid);
+    const stale = liveRun(fx.missions, id);
+    check('RL4: a claim from a process that is gone is not alive',
+      !!stale && stale.pid === gonePid && stale.alive === false, JSON.stringify(stale));
+
+    let server: RunningServer | null = null;
+    const spawns: string[] = [];
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        spawnRun: (missionId) => { spawns.push(missionId); return { ok: true, pid: 1234, detail: 'spawned' }; },
+      });
+      const dead = await post(server, '/api/missions/M-0001/run', {});
+      check('RL5: a dead claim does not block a new run',
+        dead.status === 202 && spawns.length === 1, `${dead.status} ${spawns.length}`);
+
+      fx.missions.recordRunFinished(id, gonePid, 'ABANDONED');
+      fx.missions.recordRunStarted(id, process.pid);
+      const second = await post(server, '/api/missions/M-0001/run', {});
+      check('RL6: a LIVE run makes a second one a 409, not a second process',
+        second.status === 409 && second.json.error === 'ALREADY_RUNNING'
+        && spawns.length === 1,
+        `${second.status} ${second.json?.error} spawns=${spawns.length}`);
+      check('RL7: and it says which process has it, so the answer is actionable',
+        second.json.pid === process.pid && typeof second.json.startedAt === 'string',
+        JSON.stringify([second.json?.pid, second.json?.startedAt]));
+
+      const view = await get(`${server.url}/api/missions/M-0001`,
+        { authorization: `Bearer ${server.token}` });
+      check('RL8: the mission view says what is running, so a button can refuse',
+        view.json.running && view.json.running.kind === 'run'
+        && view.json.running.pid === process.pid, JSON.stringify(view.json?.running));
+    } finally { await server?.close(); }
+
+    check('RL9: the console renders the running state instead of the step button',
+      /if \(m\.running\) \{/.test(UI_HTML) && UI_HTML.includes('is running on this mission'),
+      'busy panel present');
+    check('RL10: and leaves only a way to stop it',
+      /slot\.appendChild\(stop\);\s*\n\s*return;/.test(UI_HTML), 'cancel only');
+  }
+
+  section('a long operation is not answered by a proxy');
+  {
+    const fx = fixture();
+    fx.missions.create('a goal that takes minutes to compile', 'base0');
+    let release: (v: any) => void = () => {};
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        operations: {
+          compile: () => new Promise((r) => { release = r; }),
+          plan: async () => ({ ok: false, kind: 'TERMINATED', detail: 'stub' }) as any,
+          evaluate: async () => ({}),
+        },
+      });
+      const started = await post(server, '/api/missions/M-0001/compile', {});
+      check('AS1: a long operation answers at once with 202, not when it finishes',
+        started.status === 202 && started.json.kind === 'compile',
+        `${started.status} ${JSON.stringify(started.json?.kind)}`);
+
+      const auth = { authorization: `Bearer ${server.token}` };
+      const mid = await get(`${server.url}/api/missions/M-0001`, auth);
+      check('AS2: while it runs, the mission says so',
+        mid.json.running && mid.json.running.kind === 'compile',
+        JSON.stringify(mid.json?.running));
+
+      const again = await post(server, '/api/missions/M-0001/compile', {});
+      check('AS3: and a second attempt is refused rather than started',
+        again.status === 409 && again.json.error === 'ALREADY_RUNNING',
+        `${again.status} ${again.json?.error}`);
+
+      release({ ok: false, kind: 'BUDGET', detail: 'the ceiling was already reached' });
+      await new Promise((r) => setTimeout(r, 50));
+      check('AS4: the OUTCOME reaches the log, so the page learns it without a response',
+        fx.store.read('p/M-0001').some((e: any) => e.type === 'MISSION_OPERATION'
+          && e.payload.ok === false && /BUDGET/.test(e.payload.detail)),
+        JSON.stringify(fx.store.read('p/M-0001')
+          .filter((e: any) => e.type === 'MISSION_OPERATION').map((e: any) => e.payload)));
+
+      const after = await get(`${server.url}/api/missions/M-0001`, auth);
+      check('AS5: and the mission stops saying it is running',
+        after.json.running === null, JSON.stringify(after.json?.running));
+    } finally { await server?.close(); }
+
+    check('AS6: a cut connection is reported as still running, never as failed',
+      /r\.status === 524/.test(UI_HTML) && UI_HTML.includes('do not start it again'),
+      'gateway timeouts explained');
+    check('AS7: a fetch that never returns becomes status 0 rather than an exception',
+      UI_HTML.includes("error: 'CONNECTION_LOST'"), 'network failure has a status');
   }
 
   section('a limit that is counted is a limit that binds');

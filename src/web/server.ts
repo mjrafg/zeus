@@ -28,7 +28,7 @@ import {
   ConsentRequest, consentSubject, evaluateConsent, pendingDecision, awaitingHuman,
 } from '../mission/consent';
 import {
-  CompileResult, PlanOperationResult, OperationContext, budgetsFor,
+  CompileResult, PlanOperationResult, OperationContext, budgetsFor, liveRun,
 } from '../mission/operations';
 import { missionUsage, MissionBudgets } from '../mission/progress';
 import {
@@ -260,6 +260,15 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
   const diff = opts.diff ?? gitDiff;
   const say = opts.onLog ?? (() => {});
   const streams = new Set<{ res: http.ServerResponse; tailer: EventTailer }>();
+  /**
+   * Operations running right now, by mission.
+   *
+   * compile and plan are minutes long. Answering them synchronously behind a
+   * proxy that gives up at 100 seconds meant the console reported a failure
+   * for work that had succeeded — and the operator, told it had failed, did it
+   * again. The request now returns 202 and this is what says it is still going.
+   */
+  const inFlight = new Map<string, { kind: string; since: string }>();
 
   /**
    * The project a request is about.
@@ -377,6 +386,16 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           // checkMissionBudgets is handed. The gauge on the page therefore
           // cannot disagree with the limit that binds.
           usage: missionUsage(sc.store.read(id), Date.now(), spendReader(sc.missions)),
+          // What is happening to this mission RIGHT NOW, so a button can refuse
+          // to be pressed twice. A run is another process and is derived from
+          // the log; compile and plan are this one, and are held in memory.
+          running: (() => {
+            const busy = inFlight.get(id);
+            if (busy) return { kind: busy.kind, since: busy.since, pid: null };
+            const held = liveRun(sc.missions, id);
+            return held && held.alive
+              ? { kind: 'run', since: held.startedAt, pid: held.pid } : null;
+          })(),
           // Reconstructed, not remembered. A refresh, a reconnect or arriving
           // an hour later all show the same thing, because it comes from the
           // log rather than from the moment the stop happened.
@@ -774,19 +793,59 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         return;
       }
       const t = targetOf(wsc);
-      const result = action === 'compile' ? await opts.operations.compile(id, t)
-        : action === 'plan' ? await opts.operations.plan(id, t)
-          : await opts.operations.evaluate(id, { full: body?.full === true }, t);
-      // Whatever the operation decided, decided. The route reports it and adds
-      // nothing: an HTTP layer that could turn a stop into an acceptance would
-      // be a second engine with a different opinion.
-      send(res, 200, result);
+      const busy = inFlight.get(id);
+      if (busy) {
+        send(res, 409, { error: 'ALREADY_RUNNING', missionId: id, kind: busy.kind,
+          since: busy.since,
+          detail: `${busy.kind} has been running on this mission since ${busy.since}` });
+        return;
+      }
+      const started = new Date().toISOString();
+      inFlight.set(id, { kind: action, since: started });
+      const ops = opts.operations;
+      // DETACHED FROM THE REQUEST, not from the process: the operation runs to
+      // completion here, and its result goes to the LOG. The response says
+      // only that it started, because that is the only thing true yet.
+      void (async () => {
+        try {
+          const result: any = action === 'compile' ? await ops.compile(id, t)
+            : action === 'plan' ? await ops.plan(id, t)
+              : await ops.evaluate(id, { full: body?.full === true }, t);
+          // Refusals the operation already recorded stay its own account of
+          // itself. This adds the ones that reach no event at all — a budget
+          // stop, a provider outage — so the page is never left guessing.
+          if (result && result.ok === false) {
+            wsc.missions.recordOperation(id, { kind: action, ok: false,
+              detail: `${result.kind}: ${result.detail ?? ''}`.trim() });
+          } else {
+            wsc.missions.recordOperation(id, { kind: action, ok: true, detail: 'completed' });
+          }
+        } catch (e: any) {
+          wsc.missions.recordOperation(id, { kind: action, ok: false,
+            detail: `THREW: ${e?.message ?? e}` });
+        } finally {
+          inFlight.delete(id);
+        }
+      })();
+      send(res, 202, { missionId: id, kind: action, started,
+        detail: 'it runs on the server; the mission page is rebuilt from the log' });
       return;
     }
 
     if (action === 'run') {
       const spawnRun = opts.spawnRun;
       if (!spawnRun) { send(res, 503, { error: 'SPAWN_UNAVAILABLE' }); return; }
+      // The console spawned a runner on every click and never asked whether one
+      // was already going. Two clicks, two processes, one mission: the same
+      // node built twice, paid for twice, and an integration written into a
+      // mission the other process had terminated.
+      const held = liveRun(wsc.missions, id);
+      if (held && held.alive) {
+        send(res, 409, { error: 'ALREADY_RUNNING', missionId: id,
+          pid: held.pid, startedAt: held.startedAt,
+          detail: `pid ${held.pid} has been running this mission since ${held.startedAt}` });
+        return;
+      }
       // DETACHED, always. A mission outlives the console by design.
       const spawned = spawnRun(id, targetOf(wsc));
       send(res, spawned.ok ? 202 : 500, { missionId: id, ...spawned });

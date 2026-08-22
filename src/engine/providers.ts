@@ -68,6 +68,36 @@ export interface Provider {
 }
 
 /** Extracts the last JSON object in a stream of agent output. */
+/**
+ * Whether a provider call failed as INFRASTRUCTURE, and why.
+ *
+ * The keyword sweep is a last resort, and it may only look at output that
+ * produced no usable answer.
+ *
+ * It used to run over stdout unconditionally — the model's own words included.
+ * A planner returned exit 0, subtype "success", and a structured payload
+ * carrying all four expected keys, and the whole thing was thrown away as
+ * PROVIDER_UNAVAILABLE because one of these words appeared somewhere in 376KB
+ * of what the model had written. Nothing was unavailable. An outage inferred
+ * from the contents of a successful answer is not an inference, it is a
+ * coincidence — and this one cost a mission its only node, then told the
+ * operator to retry something that had never broken.
+ *
+ * A call that came back parsed is not an outage, whatever it says.
+ */
+export function classifyInfrastructure(input: {
+  outcome: string; stdout: string; providerError?: string | null; answered: boolean;
+}): string | null {
+  if (['TIMEOUT', 'RESOURCE_LIMIT_EXCEEDED', 'INFRASTRUCTURE_FAILURE', 'POLICY_DENIED']
+    .includes(input.outcome)) {
+    return `${input.outcome}: ${input.stdout.slice(-300)}`;
+  }
+  if (input.providerError) return `PROVIDER_ERROR: ${input.providerError}`;
+  if (input.answered) return null;
+  return /\b(429|529|overloaded|rate.?limit|ECONNRESET|socket hang up)\b/i.test(input.stdout)
+    ? `PROVIDER_UNAVAILABLE: ${input.stdout.slice(-200)}` : null;
+}
+
 export function parseStructured(text: string): Record<string, unknown> | null {
   const objects: string[] = [];
   let depth = 0, start = -1, inStr = false, esc = false;
@@ -124,12 +154,10 @@ async function runCli(id: string, bin: string, argv: (req: AgentRequest) => stri
   // stop looking like a failed design.
   const providerError = providerReportedError(stream.controlEvent ?? structured);
 
-  const infra = ['TIMEOUT', 'RESOURCE_LIMIT_EXCEEDED', 'INFRASTRUCTURE_FAILURE', 'POLICY_DENIED'].includes(res.outcome)
-    ? `${res.outcome}: ${res.stdout.slice(-300)}`
-    : providerError
-      ? `PROVIDER_ERROR: ${providerError}`
-      : /\b(429|529|overloaded|rate.?limit|ECONNRESET|socket hang up)\b/i.test(res.stdout)
-        ? `PROVIDER_UNAVAILABLE: ${res.stdout.slice(-200)}` : null;
+  const infra = classifyInfrastructure({
+    outcome: res.outcome, stdout: res.stdout, providerError,
+    answered: structured !== null && structured !== undefined,
+  });
 
   // Diagnostics worth the name. "It didn't parse" cost a supervised session a
   // manual reproduction; the next failure explains itself.

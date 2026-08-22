@@ -2211,12 +2211,14 @@ export async function webSuite(): Promise<void> {
     fs.mkdirSync(path.join(root, 'node_modules', 'left-over'), { recursive: true });
     fs.writeFileSync(path.join(root, 'node_modules', 'left-over', 'package.json'), '{}');
     fs.writeFileSync(path.join(root, 'Dockerfile'), 'FROM node:18\n');
-    fs.writeFileSync(path.join(root, 'api', 'package.json'),
-      JSON.stringify({ scripts: { build: 'tsc', start: 'node dist/index.js' } }));
+    fs.writeFileSync(path.join(root, 'api', 'package.json'), JSON.stringify({
+      scripts: { build: 'tsc', start: 'node dist/index.js' },
+      devDependencies: { typescript: '^5.4.0' },
+    }));
     fs.writeFileSync(path.join(root, 'api', 'package-lock.json'), '{}');
     fs.writeFileSync(path.join(root, 'api', 'tsconfig.json'), '{}');
     fs.writeFileSync(path.join(root, 'app', 'package.json'),
-      JSON.stringify({ scripts: { build: 'vite build', test: 'vitest run' } }));
+      JSON.stringify({ scripts: { build: 'vite build', dev: 'vite' } }));
     fs.writeFileSync(path.join(root, 'app', 'package-lock.json'), '{}');
 
     const det = detectProject(root);
@@ -2227,13 +2229,12 @@ export async function webSuite(): Promise<void> {
       JSON.stringify(nodePackageDirs(root)));
 
     const cmds = det.primary.commands(root);
-    check('PL3: typecheck resolves from the one package that has a tsconfig',
+    check('PL3: typecheck resolves from the one package that can verify',
       cmds.typecheck === 'npx --no-install tsc --noEmit -p api', String(cmds.typecheck));
-    check('PL4: a script declared by exactly one package becomes that command',
-      cmds.unitTest === 'npm --prefix app run test', String(cmds.unitTest));
-    check('PL5: when TWO packages declare it there is no single command, and none is claimed',
-      cmds.build === null && cmds.install === null,
-      JSON.stringify([cmds.build, cmds.install]));
+    check('PL4: install comes from THAT package too, so the check has its toolchain',
+      cmds.install === 'npm --prefix api ci', String(cmds.install));
+    check('PL5: and so does everything else — commands are never mixed across packages',
+      cmds.build === 'npm --prefix api run build', String(cmds.build));
     check('PL6: no command contains shell syntax — these are argv, never a shell line',
       Object.values(cmds).every((c) => c === null || !/[&|;()]/.test(c)),
       JSON.stringify(cmds));
@@ -2245,11 +2246,37 @@ export async function webSuite(): Promise<void> {
       && det.primary.protectedPaths(root).includes('app/package-lock.json'),
       'manifests protected');
 
-    // Without a lockfile a frozen install cannot run, and a command that
-    // cannot run is worse than one that is not offered.
+    // `npx --no-install` still reaches for the registry when the binary is not
+    // there. On a package that never brings TypeScript, the inferred typecheck
+    // does not fail with a type error — it fails with EAI_AGAIN inside a
+    // sandbox with no network, and reads as "your change broke the build".
+    const noTs = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-nots-'));
+    fs.mkdirSync(path.join(noTs, 'svc'), { recursive: true });
+    fs.writeFileSync(path.join(noTs, 'svc', 'package.json'), JSON.stringify({ scripts: {} }));
+    fs.writeFileSync(path.join(noTs, 'svc', 'tsconfig.json'), '{}');
+    check('PL11: a tsconfig alone does not conjure a typecheck — typescript must be declared',
+      detectProject(noTs).primary.commands(noTs).typecheck === null,
+      String(detectProject(noTs).primary.commands(noTs).typecheck));
+
+    // Two packages that can both verify cannot be expressed as one argv, and
+    // covering half a repository silently would be a green that means less
+    // than it looks.
+    const two = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-two-'));
+    for (const d of ['a', 'b']) {
+      fs.mkdirSync(path.join(two, d), { recursive: true });
+      fs.writeFileSync(path.join(two, d, 'package.json'),
+        JSON.stringify({ scripts: { test: 'vitest run' } }));
+    }
+    const twoCmds = detectProject(two).primary.commands(two);
+    check('PL12: when two packages can verify, nothing is claimed rather than half of it',
+      Object.values(twoCmds).every((c) => c === null), JSON.stringify(twoCmds));
+    check('PL12b: but it is still a node project, so the doctor does not call it generic',
+      detectProject(two).primary.id === 'node', detectProject(two).primary.id);
+
     const loose = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-poly2-'));
     fs.mkdirSync(path.join(loose, 'svc'), { recursive: true });
-    fs.writeFileSync(path.join(loose, 'svc', 'package.json'), JSON.stringify({ scripts: {} }));
+    fs.writeFileSync(path.join(loose, 'svc', 'package.json'),
+      JSON.stringify({ scripts: { test: 'node --test' } }));
     check('PL9: without a lockfile the install is not a frozen one',
       detectProject(loose).primary.commands(loose).install === 'npm --prefix svc install',
       String(detectProject(loose).primary.commands(loose).install));
@@ -2257,13 +2284,6 @@ export async function webSuite(): Promise<void> {
       splitCommand(detectProject(loose).primary.commands(loose).install!)[0] === 'npm',
       splitCommand(detectProject(loose).primary.commands(loose).install!)[0]);
 
-    // The root path must be untouched: a repository that IS a package keeps
-    // exactly the commands it had before any of this existed.
-    const single = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-single-'));
-    fs.writeFileSync(path.join(single, 'package.json'),
-      JSON.stringify({ scripts: { test: 'jest', build: 'tsc' } }));
-    fs.mkdirSync(path.join(single, 'packages', 'inner'), { recursive: true });
-    fs.writeFileSync(path.join(single, 'packages', 'inner', 'package.json'), '{}');
     // The doctor printed "Project type detected: Node / JavaScript / TypeScript"
     // and, two lines later, "not a node project". A report that disagrees with
     // itself teaches the reader to skim it.
@@ -2276,6 +2296,13 @@ export async function webSuite(): Promise<void> {
       probePackageManager(notNode, process.env as Record<string, string>).status === 'SKIPPED',
       probePackageManager(notNode, process.env as Record<string, string>).reason ?? '');
 
+    // The root path must be untouched: a repository that IS a package keeps
+    // exactly the commands it had before any of this existed.
+    const single = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-single-'));
+    fs.writeFileSync(path.join(single, 'package.json'),
+      JSON.stringify({ scripts: { test: 'jest', build: 'tsc' } }));
+    fs.mkdirSync(path.join(single, 'packages', 'inner'), { recursive: true });
+    fs.writeFileSync(path.join(single, 'packages', 'inner', 'package.json'), '{}');
     check('PL10: a repository that IS a package is unchanged, and does not descend',
       nodePackageDirs(single).length === 0
       && detectProject(single).primary.commands(single).unitTest === 'npm run test',

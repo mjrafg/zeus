@@ -116,10 +116,29 @@ function packageCommands(root: string, dir: string): Commands {
     build: pick('build'),
     unitTest: pick('test:unit', 'test'),
     integrationTest: pick('test:e2e', 'test:integration'),
+    // The tsconfig fallback only when the package DECLARES typescript. `npx
+    // --no-install` still reaches for the registry when the binary is not
+    // there, so on a project that never installs it the check does not fail
+    // with a type error — it fails with EAI_AGAIN inside a sandbox that has no
+    // network, which reads as "your change broke the build".
     typecheck: pick('typecheck', 'tsc')
-      ?? (has(at, 'tsconfig.json') ? `npx --no-install tsc --noEmit -p ${dir}` : null),
+      ?? ((has(at, 'tsconfig.json') && declaresTypescript(at))
+        ? `npx --no-install tsc --noEmit -p ${dir}` : null),
     lint: pick('lint'),
   };
+}
+
+/** Whether a package brings its own TypeScript, rather than hoping for one. */
+function declaresTypescript(at: string): boolean {
+  const pkg = readJson(path.join(at, 'package.json')) ?? {};
+  return typeof (pkg.devDependencies ?? {}).typescript === 'string'
+    || typeof (pkg.dependencies ?? {}).typescript === 'string';
+}
+
+/** Whether a package can supply a verification floor: a typecheck or a test. */
+function canVerify(root: string, dir: string): boolean {
+  const c = packageCommands(root, dir);
+  return !!(c.typecheck || c.unitTest);
 }
 
 const nodeAdapter: ProjectAdapter = {
@@ -129,22 +148,25 @@ const nodeAdapter: ProjectAdapter = {
   commands: (root) => {
     const dirs = nodePackageDirs(root);
     if (dirs.length) {
-      const each = dirs.map((d) => packageCommands(root, d));
-      // ONE package, or none. A command is a single argv, so "typecheck both
-      // packages" has no spelling here; joining them with && produces a string
-      // that cannot run, and picking one silently would report a green that
-      // covered half the repository. When two packages declare the same
-      // script the honest answer is that this adapter cannot express it, and
-      // the doctor then says the command is not declared — which is true.
-      const only = (k: keyof Commands): string | null => {
-        const cmds = each.map((c) => c[k]).filter((c): c is string => !!c);
-        return cmds.length === 1 ? cmds[0] : null;
-      };
-      return {
-        install: only('install'), build: only('build'),
-        unitTest: only('unitTest'), integrationTest: only('integrationTest'),
-        typecheck: only('typecheck'), lint: only('lint'),
-      };
+      // ONE package supplies all of them, or none does.
+      //
+      // A command is a single argv, so "typecheck both packages" has no
+      // spelling here — joining with && produces a string that cannot run.
+      // Nor can the commands be mixed and matched across packages: an install
+      // from one and a typecheck from another means running a check whose
+      // toolchain was never installed, which is how a documentation edit came
+      // back as `npm ERR! EAI_AGAIN` and read like a broken build.
+      //
+      // So: the package that can verify, if exactly one can. Every command
+      // names its directory, so what is and is not covered is on the face of
+      // the config. When two packages can verify, this adapter cannot express
+      // the repository and says nothing rather than covering half of it.
+      const verifiable = dirs.filter((d) => canVerify(root, d));
+      if (verifiable.length !== 1) {
+        return { install: null, build: null, unitTest: null,
+          integrationTest: null, typecheck: null, lint: null };
+      }
+      return packageCommands(root, verifiable[0]);
     }
     const pm = nodePackageManager(root);
     const pkg = readJson(path.join(root, 'package.json')) ?? {};

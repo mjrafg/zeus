@@ -85,32 +85,39 @@ export function nodePackageDirs(root: string): string[] {
     .sort();
 }
 
-/** The scripts one package declares, and how to invoke them from the root. */
+/**
+ * The scripts one package declares, spelled so they run from the root.
+ *
+ * NO SHELL SYNTAX. A configured command is split on whitespace and executed as
+ * argv, never through a shell, so `(cd api && npm run build)` is not a command
+ * that does something clever — it is argv[0] = "(cd", which resolves to
+ * nothing and fails at the readiness probe before a mission starts. Each
+ * package manager has its own flag for "in that directory" and this uses it.
+ */
 function packageCommands(root: string, dir: string): Commands {
   const at = path.join(root, dir);
   const pm = nodePackageManager(at);
   const pkg = readJson(path.join(at, 'package.json')) ?? {};
   const scripts: Record<string, string> = pkg.scripts ?? {};
-  // `cd`, not a package-manager flag: --prefix, --dir and --cwd are three
-  // different spellings across npm, pnpm and yarn, and this works for all of
-  // them without asking which one is installed.
-  const wrap = (cmd: string) => `(cd ${dir} && ${cmd})`;
+  const inDir = pm === 'npm' ? `npm --prefix ${dir}`
+    : pm === 'pnpm' ? `pnpm --dir ${dir}`
+      : `yarn --cwd ${dir}`;
   const pick = (...names: string[]) => {
     const hit = names.find((n) => typeof scripts[n] === 'string');
-    return hit ? wrap(pm === 'npm' ? `npm run ${hit}` : `${pm} ${hit}`) : null;
+    return hit ? `${inDir} run ${hit}` : null;
   };
   const lock = hasAny(at, 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock');
   return {
     // A frozen install needs a lockfile. Without one `npm ci` fails outright,
     // and a command that cannot run is worse than one that is not offered.
-    install: wrap(lock
-      ? (pm === 'npm' ? 'npm ci' : `${pm} install --frozen-lockfile`)
-      : (pm === 'npm' ? 'npm install' : `${pm} install`)),
+    install: lock
+      ? (pm === 'npm' ? `${inDir} ci` : `${inDir} install --frozen-lockfile`)
+      : `${inDir} install`,
     build: pick('build'),
     unitTest: pick('test:unit', 'test'),
     integrationTest: pick('test:e2e', 'test:integration'),
     typecheck: pick('typecheck', 'tsc')
-      ?? (has(at, 'tsconfig.json') ? wrap('npx --no-install tsc --noEmit') : null),
+      ?? (has(at, 'tsconfig.json') ? `npx --no-install tsc --noEmit -p ${dir}` : null),
     lint: pick('lint'),
   };
 }
@@ -123,17 +130,20 @@ const nodeAdapter: ProjectAdapter = {
     const dirs = nodePackageDirs(root);
     if (dirs.length) {
       const each = dirs.map((d) => packageCommands(root, d));
-      // Every package that declares one, joined. A repository is typechecked
-      // when all of its packages are, and a chain that stops at the first
-      // failure is exactly the gate a floor should be.
-      const join = (k: keyof Commands): string | null => {
+      // ONE package, or none. A command is a single argv, so "typecheck both
+      // packages" has no spelling here; joining them with && produces a string
+      // that cannot run, and picking one silently would report a green that
+      // covered half the repository. When two packages declare the same
+      // script the honest answer is that this adapter cannot express it, and
+      // the doctor then says the command is not declared — which is true.
+      const only = (k: keyof Commands): string | null => {
         const cmds = each.map((c) => c[k]).filter((c): c is string => !!c);
-        return cmds.length ? cmds.join(' && ') : null;
+        return cmds.length === 1 ? cmds[0] : null;
       };
       return {
-        install: join('install'), build: join('build'),
-        unitTest: join('unitTest'), integrationTest: join('integrationTest'),
-        typecheck: join('typecheck'), lint: join('lint'),
+        install: only('install'), build: only('build'),
+        unitTest: only('unitTest'), integrationTest: only('integrationTest'),
+        typecheck: only('typecheck'), lint: only('lint'),
       };
     }
     const pm = nodePackageManager(root);

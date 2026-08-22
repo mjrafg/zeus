@@ -40,6 +40,7 @@ const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsO
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import { detectProject, nodePackageDirs } from '../src/adapters';
+import { splitCommand } from '../src/engine/dependencies';
 import {
   listProjects, projectBySlug, slugForUrl, slugify, freeSlug, scopeFor,
 } from '../src/projects';
@@ -2225,15 +2226,16 @@ export async function webSuite(): Promise<void> {
       JSON.stringify(nodePackageDirs(root)));
 
     const cmds = det.primary.commands(root);
-    check('PL3: typecheck resolves from the package that has a tsconfig',
-      cmds.typecheck === '(cd api && npx --no-install tsc --noEmit)', String(cmds.typecheck));
-    check('PL4: a declared script is preferred over an inferred one',
-      cmds.unitTest === '(cd app && npm run test)', String(cmds.unitTest));
-    check('PL5: build runs every package that declares one, in order, stopping at a failure',
-      cmds.build === '(cd api && npm run build) && (cd app && npm run build)',
-      String(cmds.build));
-    check('PL6: a lockfile means a frozen install',
-      cmds.install === '(cd api && npm ci) && (cd app && npm ci)', String(cmds.install));
+    check('PL3: typecheck resolves from the one package that has a tsconfig',
+      cmds.typecheck === 'npx --no-install tsc --noEmit -p api', String(cmds.typecheck));
+    check('PL4: a script declared by exactly one package becomes that command',
+      cmds.unitTest === 'npm --prefix app run test', String(cmds.unitTest));
+    check('PL5: when TWO packages declare it there is no single command, and none is claimed',
+      cmds.build === null && cmds.install === null,
+      JSON.stringify([cmds.build, cmds.install]));
+    check('PL6: no command contains shell syntax — these are argv, never a shell line',
+      Object.values(cmds).every((c) => c === null || !/[&|;()]/.test(c)),
+      JSON.stringify(cmds));
     check('PL7: nothing is invented — no package declares a lint script, so there is none',
       cmds.lint === null && cmds.integrationTest === null,
       JSON.stringify([cmds.lint, cmds.integrationTest]));
@@ -2248,8 +2250,11 @@ export async function webSuite(): Promise<void> {
     fs.mkdirSync(path.join(loose, 'svc'), { recursive: true });
     fs.writeFileSync(path.join(loose, 'svc', 'package.json'), JSON.stringify({ scripts: {} }));
     check('PL9: without a lockfile the install is not a frozen one',
-      detectProject(loose).primary.commands(loose).install === '(cd svc && npm install)',
+      detectProject(loose).primary.commands(loose).install === 'npm --prefix svc install',
       String(detectProject(loose).primary.commands(loose).install));
+    check('PL9b: and the readiness probe can resolve it, because argv[0] is an executable',
+      splitCommand(detectProject(loose).primary.commands(loose).install!)[0] === 'npm',
+      splitCommand(detectProject(loose).primary.commands(loose).install!)[0]);
 
     // The root path must be untouched: a repository that IS a package keeps
     // exactly the commands it had before any of this existed.

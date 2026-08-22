@@ -58,11 +58,84 @@ export function nodePackageManager(root: string): 'pnpm' | 'yarn' | 'npm' {
   return 'npm';
 }
 
+/**
+ * The packages of a repository whose ROOT is not itself a package.
+ *
+ * A repository can be several packages side by side with nothing on top:
+ * api/ + app/ + a Dockerfile, and no manifest at the root. Detection looked
+ * only at the root, called such a repository `generic`, and `zeus init` wrote
+ * a config in which every command was null. A mission there did the work and
+ * then correctly refused to integrate it, because nothing could verify it —
+ * over two dollars to reach a stop that was decided when the project was
+ * created. The repository was verifiable the whole time. Nothing had looked
+ * one directory down.
+ *
+ * ONE level, never into node_modules or a dotted directory. Anything deeper is
+ * a monorepo with a root manifest, and the root path already handles that.
+ * Empty when the root IS a package, so nothing about that case changes.
+ */
+export function nodePackageDirs(root: string): string[] {
+  if (has(root, 'package.json')) return [];
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return []; }
+  return entries
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules')
+    .map((e) => e.name)
+    .filter((name) => has(path.join(root, name), 'package.json'))
+    .sort();
+}
+
+/** The scripts one package declares, and how to invoke them from the root. */
+function packageCommands(root: string, dir: string): Commands {
+  const at = path.join(root, dir);
+  const pm = nodePackageManager(at);
+  const pkg = readJson(path.join(at, 'package.json')) ?? {};
+  const scripts: Record<string, string> = pkg.scripts ?? {};
+  // `cd`, not a package-manager flag: --prefix, --dir and --cwd are three
+  // different spellings across npm, pnpm and yarn, and this works for all of
+  // them without asking which one is installed.
+  const wrap = (cmd: string) => `(cd ${dir} && ${cmd})`;
+  const pick = (...names: string[]) => {
+    const hit = names.find((n) => typeof scripts[n] === 'string');
+    return hit ? wrap(pm === 'npm' ? `npm run ${hit}` : `${pm} ${hit}`) : null;
+  };
+  const lock = hasAny(at, 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock');
+  return {
+    // A frozen install needs a lockfile. Without one `npm ci` fails outright,
+    // and a command that cannot run is worse than one that is not offered.
+    install: wrap(lock
+      ? (pm === 'npm' ? 'npm ci' : `${pm} install --frozen-lockfile`)
+      : (pm === 'npm' ? 'npm install' : `${pm} install`)),
+    build: pick('build'),
+    unitTest: pick('test:unit', 'test'),
+    integrationTest: pick('test:e2e', 'test:integration'),
+    typecheck: pick('typecheck', 'tsc')
+      ?? (has(at, 'tsconfig.json') ? wrap('npx --no-install tsc --noEmit') : null),
+    lint: pick('lint'),
+  };
+}
+
 const nodeAdapter: ProjectAdapter = {
   id: 'node', name: 'Node / JavaScript / TypeScript', priority: 50,
   markers: ['package.json', 'pnpm-lock.yaml', 'yarn.lock', 'package-lock.json'],
-  detect: (root) => has(root, 'package.json'),
+  detect: (root) => has(root, 'package.json') || nodePackageDirs(root).length > 0,
   commands: (root) => {
+    const dirs = nodePackageDirs(root);
+    if (dirs.length) {
+      const each = dirs.map((d) => packageCommands(root, d));
+      // Every package that declares one, joined. A repository is typechecked
+      // when all of its packages are, and a chain that stops at the first
+      // failure is exactly the gate a floor should be.
+      const join = (k: keyof Commands): string | null => {
+        const cmds = each.map((c) => c[k]).filter((c): c is string => !!c);
+        return cmds.length ? cmds.join(' && ') : null;
+      };
+      return {
+        install: join('install'), build: join('build'),
+        unitTest: join('unitTest'), integrationTest: join('integrationTest'),
+        typecheck: join('typecheck'), lint: join('lint'),
+      };
+    }
     const pm = nodePackageManager(root);
     const pkg = readJson(path.join(root, 'package.json')) ?? {};
     const scripts: Record<string, string> = pkg.scripts ?? {};
@@ -82,7 +155,16 @@ const nodeAdapter: ProjectAdapter = {
       lint: pick('lint'),
     };
   },
-  protectedPaths: () => ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.github/', '.gitignore'],
+  protectedPaths: (root) => [
+    'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
+    '.github/', '.gitignore',
+    // A manifest is protected wherever it lives. Protecting only the root one
+    // would leave every package in a root-less repository unprotected.
+    ...nodePackageDirs(root).flatMap((d) => [
+      `${d}/package.json`, `${d}/package-lock.json`,
+      `${d}/pnpm-lock.yaml`, `${d}/yarn.lock`,
+    ]),
+  ],
   sourceGlobs: () => ['src/**', 'lib/**', 'packages/**'],
   testGlobs: () => ['**/*.test.*', '**/*.spec.*', 'test/**', 'tests/**', '__tests__/**'],
 };

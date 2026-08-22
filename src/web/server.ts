@@ -208,13 +208,31 @@ export function zeusCliArgv(projectRoot: string): string[] {
 export function defaultSpawnRun(projectRoot: string, missionId: string):
   { ok: boolean; pid: number | null; detail: string } {
   const args = zeusCliArgv(projectRoot);
+  // stdio was 'ignore'. A run that died in its first second reported "spawned
+  // pid 65960" to the console and then simply never happened: no events, no
+  // process, and nothing written down anywhere to say why. The console cannot
+  // hold the pipes — the child outlives it by design — so they go to a file
+  // under the project's own log directory, which is where an operator (or the
+  // next question about a mission that did nothing) will look.
+  const logDir = path.join(projectRoot, '.zeus', 'logs');
+  let out: number | 'ignore' = 'ignore';
+  let logFile: string | null = null;
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+    logFile = path.join(logDir, `mission-run-${missionId.split('/').pop()}.log`);
+    out = fs.openSync(logFile, 'a');
+  } catch { out = 'ignore'; logFile = null; }
   try {
     const child = spawn(process.execPath, [...args, 'mission', 'run', missionId], {
-      cwd: projectRoot, detached: true, stdio: 'ignore',
+      cwd: projectRoot, detached: true,
+      stdio: ['ignore', out, out],
     });
     child.unref();
-    return { ok: true, pid: child.pid ?? null, detail: `spawned pid ${child.pid}` };
+    if (typeof out === 'number') fs.closeSync(out);
+    return { ok: true, pid: child.pid ?? null,
+      detail: `spawned pid ${child.pid}${logFile ? `; output at ${logFile}` : ''}` };
   } catch (e: any) {
+    if (typeof out === 'number') { try { fs.closeSync(out); } catch { /* already gone */ } }
     return { ok: false, pid: null, detail: e?.message ?? String(e) };
   }
 }

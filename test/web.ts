@@ -39,6 +39,7 @@ const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsO
   estimatedTier: 'FAST', estimatedCost: 1, risk: 'LOW' });
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
+import { detectProject, nodePackageDirs } from '../src/adapters';
 import {
   listProjects, projectBySlug, slugForUrl, slugify, freeSlug, scopeFor,
 } from '../src/projects';
@@ -2185,5 +2186,86 @@ export async function webSuite(): Promise<void> {
       r2.missionId);
     check('RC4: a mission with no oracle cannot be recompiled into one',
       none.ok === false && none.kind === 'NO_ORACLE', none.kind);
+  }
+
+  section('a repository whose root is not a package is still a project');
+  {
+    // A real clone: api/ and app/ side by side, a Dockerfile, and no manifest
+    // at the root. Detection looked only at the root, called it `generic`, and
+    // init wrote a config where every command was null — so a mission did the
+    // work and then correctly refused to integrate it, because nothing could
+    // verify it. Over two dollars to reach a stop decided at creation time.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-poly-'));
+    fs.mkdirSync(path.join(root, 'api', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'app', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'node_modules', 'left-over'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'node_modules', 'left-over', 'package.json'), '{}');
+    fs.writeFileSync(path.join(root, 'Dockerfile'), 'FROM node:18\n');
+    fs.writeFileSync(path.join(root, 'api', 'package.json'),
+      JSON.stringify({ scripts: { build: 'tsc', start: 'node dist/index.js' } }));
+    fs.writeFileSync(path.join(root, 'api', 'package-lock.json'), '{}');
+    fs.writeFileSync(path.join(root, 'api', 'tsconfig.json'), '{}');
+    fs.writeFileSync(path.join(root, 'app', 'package.json'),
+      JSON.stringify({ scripts: { build: 'vite build', test: 'vitest run' } }));
+    fs.writeFileSync(path.join(root, 'app', 'package-lock.json'), '{}');
+
+    const det = detectProject(root);
+    check('PL1: it is detected as a node project, not as generic',
+      det.primary.id === 'node', det.primary.id);
+    check('PL2: the packages are found one level down, and node_modules is not one',
+      JSON.stringify(nodePackageDirs(root)) === '["api","app"]',
+      JSON.stringify(nodePackageDirs(root)));
+
+    const cmds = det.primary.commands(root);
+    check('PL3: typecheck resolves from the package that has a tsconfig',
+      cmds.typecheck === '(cd api && npx --no-install tsc --noEmit)', String(cmds.typecheck));
+    check('PL4: a declared script is preferred over an inferred one',
+      cmds.unitTest === '(cd app && npm run test)', String(cmds.unitTest));
+    check('PL5: build runs every package that declares one, in order, stopping at a failure',
+      cmds.build === '(cd api && npm run build) && (cd app && npm run build)',
+      String(cmds.build));
+    check('PL6: a lockfile means a frozen install',
+      cmds.install === '(cd api && npm ci) && (cd app && npm ci)', String(cmds.install));
+    check('PL7: nothing is invented — no package declares a lint script, so there is none',
+      cmds.lint === null && cmds.integrationTest === null,
+      JSON.stringify([cmds.lint, cmds.integrationTest]));
+    check('PL8: every package manifest is protected, not only a root one',
+      det.primary.protectedPaths(root).includes('api/package.json')
+      && det.primary.protectedPaths(root).includes('app/package-lock.json'),
+      'manifests protected');
+
+    // Without a lockfile a frozen install cannot run, and a command that
+    // cannot run is worse than one that is not offered.
+    const loose = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-poly2-'));
+    fs.mkdirSync(path.join(loose, 'svc'), { recursive: true });
+    fs.writeFileSync(path.join(loose, 'svc', 'package.json'), JSON.stringify({ scripts: {} }));
+    check('PL9: without a lockfile the install is not a frozen one',
+      detectProject(loose).primary.commands(loose).install === '(cd svc && npm install)',
+      String(detectProject(loose).primary.commands(loose).install));
+
+    // The root path must be untouched: a repository that IS a package keeps
+    // exactly the commands it had before any of this existed.
+    const single = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-single-'));
+    fs.writeFileSync(path.join(single, 'package.json'),
+      JSON.stringify({ scripts: { test: 'jest', build: 'tsc' } }));
+    fs.mkdirSync(path.join(single, 'packages', 'inner'), { recursive: true });
+    fs.writeFileSync(path.join(single, 'packages', 'inner', 'package.json'), '{}');
+    check('PL10: a repository that IS a package is unchanged, and does not descend',
+      nodePackageDirs(single).length === 0
+      && detectProject(single).primary.commands(single).unitTest === 'npm run test',
+      String(detectProject(single).primary.commands(single).unitTest));
+  }
+
+  section('a detached run that dies says where it died');
+  {
+    check('RUN1: the spawned run writes its output to the project log, not to nowhere',
+      /stdio: \['ignore', out, out\]/.test(
+        fs.readFileSync(path.join(__dirname, '..', 'src', 'web', 'server.ts'), 'utf8')),
+      'stdio is captured');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'web', 'server.ts'), 'utf8');
+    check('RUN2: and the console is told where, so "spawned pid N" is a lead and not a shrug',
+      /output at \$\{logFile\}/.test(src), 'the path is reported');
+    check('RUN3: a log that cannot be opened does not stop the run from starting',
+      /catch \{ out = 'ignore'; logFile = null; \}/.test(src), 'falls back');
   }
 }

@@ -250,6 +250,57 @@ export function defaultSpawnRun(projectRoot: string, missionId: string):
   }
 }
 
+/**
+ * What stands between this mission and its next step, when nothing is pending.
+ *
+ * Three ways a mission reaches PLAN_CONSENT with no decision to take: the
+ * critic REJECTED the plan (not decidable — a rejected plan cannot be accepted
+ * by consent), the plan-recompile budget is spent, or a person already refused
+ * and the next move is a fresh attempt. The console showed the same button for
+ * all three, and it could only work in the last one.
+ */
+export function blockedBy(missions: MissionRegistry, missionId: string): {
+  reason: string; detail: string; findings: unknown[]; options: string[];
+} | null {
+  const rec = missions.mission(missionId);
+  if (!rec || rec.terminated) return null;
+  const log = missions.events.read(missionId);
+  const recorded = [...log].reverse().find((e) => e.type === 'PLAN_RECORDED');
+  if (!recorded) return null;
+  const version = (recorded.payload as any)?.version;
+  const critique = [...log].reverse().find((e) => e.type === 'PLAN_CRITIQUED'
+    && (e.payload as any)?.version === version);
+  const cp = (critique?.payload ?? {}) as any;
+  if (rec.acceptedPlanVersion === version) return null;
+
+  const budgets = budgetsFor(missions, missionId);
+  const usage = missionUsage(log, Date.now(), spendReader(missions));
+  const exhausted = usage.planRecompiles >= budgets.maxPlanRecompiles;
+
+  if (cp.acceptance === 'REJECT') {
+    return {
+      reason: exhausted ? 'REJECTED_AND_EXHAUSTED' : 'PLAN_REJECTED',
+      detail: exhausted
+        ? `the critic rejected plan v${version}, and ${usage.planRecompiles} of `
+          + `${budgets.maxPlanRecompiles} plan attempts are spent`
+        : `the critic rejected plan v${version}; a rejected plan cannot be accepted by consent`,
+      findings: (cp.findings ?? []),
+      options: exhausted
+        ? ['raise maxPlanRecompiles and plan again', 'narrow the goal', 'cancel the mission']
+        : ['plan again', 'narrow the goal', 'cancel the mission'],
+    };
+  }
+  if (exhausted) {
+    return {
+      reason: 'PLAN_BUDGET_EXHAUSTED',
+      detail: `${usage.planRecompiles} of ${budgets.maxPlanRecompiles} plan attempts are spent`,
+      findings: (cp.findings ?? []),
+      options: ['raise maxPlanRecompiles and plan again', 'narrow the goal', 'cancel the mission'],
+    };
+  }
+  return null;
+}
+
 export async function startWebServer(opts: WebServerOptions): Promise<RunningServer> {
   const host = opts.host ?? '127.0.0.1';
   const store = new EventStore(opts.stateRoot);
@@ -400,6 +451,13 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           // an hour later all show the same thing, because it comes from the
           // log rather than from the moment the stop happened.
           pendingDecision: pendingDecision(sc.missions, id),
+          // Why there is no next step, when there is none.
+          //
+          // A plan the critic REJECTED is not decidable by consent, so the
+          // pending block is null — and the console filled that silence with a
+          // "plan again" button. The findings that actually stand were on the
+          // log and on no screen. A dead end has to say what it is.
+          blockedBy: blockedBy(sc.missions, id),
         });
         return;
       }

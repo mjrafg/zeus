@@ -23,7 +23,10 @@ export type PlanFindingCode =
   | 'UNREACHABLE_NODE'
   | 'UNDECLARED_INTERFERENCE'
   | 'CRITERION_UNCOVERED'
-  | 'CRITERION_SCOPE_MISMATCH';
+  | 'CRITERION_SCOPE_MISMATCH'
+  // A revision that did not say how it answers a finding that blocked the plan
+  // before it. Refused deterministically, before a critic is paid to notice.
+  | 'BLOCKING_FINDING_UNANSWERED';
 
 export interface PlanFinding {
   code: PlanFindingCode;

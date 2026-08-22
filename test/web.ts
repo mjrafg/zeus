@@ -17,6 +17,7 @@ import { EventStore } from '../src/engine/events';
 import { MissionRegistry } from '../src/mission/registry';
 import {
   startWebServer, RunningServer, routeTable, READ_ROUTES, WRITE_ROUTES, zeusCliArgv,
+  blockedBy,
 } from '../src/web/server';
 import { ensureToken, tokenMatches, tokenPath } from '../src/web/token';
 import {
@@ -44,8 +45,9 @@ import { detectProject, nodePackageDirs } from '../src/adapters';
 import { ZEUS_WORKTREE_EXCLUDES, ZEUS_PATHSPEC_EXCLUDES } from '../src/engine/orchestrator';
 import { splitCommand } from '../src/engine/dependencies';
 import {
-  budgetsFor, preflightBudget, planMissionGraph, liveRun,
+  budgetsFor, preflightBudget, planMissionGraph, liveRun, priorPlanFor,
 } from '../src/mission/operations';
+import { planDelta } from '../src/mission/planner';
 import { classifyInfrastructure } from '../src/engine/providers';
 import { mergeMissionBudgets, checkMissionBudgets } from '../src/mission/progress';
 import { probePackageManager } from '../src/readiness';
@@ -218,7 +220,7 @@ export async function webSuite(): Promise<void> {
       // derived purely from the log and rides inside the view, so the CLI and
       // the console read one object rather than two that could drift.
       delete apiCore.phase; delete apiCore.cost; delete apiCore.pendingDecision;
-      delete apiCore.usage; delete apiCore.running;
+      delete apiCore.usage; delete apiCore.running; delete apiCore.blockedBy;
       check('WS1: the API mission record deep-equals the CLI view — one serializer',
         JSON.stringify(apiCore) === JSON.stringify(JSON.parse(JSON.stringify(view))),
         'shapes identical');
@@ -2573,6 +2575,137 @@ export async function webSuite(): Promise<void> {
     check('PU5: telemetry that says the limit was ALLOWED cannot mean unavailable',
       classifyInfrastructure({ outcome: 'COMPLETED', answered: true, stdout: telemetry }) === null,
       'allowed is not an outage');
+  }
+
+  section('a replan answers its critic instead of starting again');
+  {
+    // Two plans in a row put the site chrome outside the localisation nodes,
+    // for the same reason, because the second planner had never seen the first
+    // critique. planMission has accepted a `prior` since M3; nothing passed one.
+    const fx = fixture();
+    const rec = fx.missions.create('localise the landing page', 'base0');
+    const id = rec.missionId;
+    const graph = { version: 1, nodes: [
+      node(`${id}/N-0001`), node(`${id}/N-0002`),
+    ] } as any;
+    graph.nodes[1].dependsOn = [`${id}/N-0001`];
+    fx.missions.recordPlan(id, graph, [
+      { code: 'CRITERION_SCOPE_MISMATCH', severity: 'info', detail: 'writes only part of app/src' },
+    ]);
+    fx.missions.recordPlanCritique(id, {
+      version: 1, acceptance: 'REJECT', contaminated: false, contaminationDetail: null,
+      findings: [
+        { code: 'INCOMPLETE_CHROME', severity: 'BLOCKING', nodeId: `${id}/N-0002`,
+          detail: 'the header and footer are never translated' },
+        { code: 'TIDY_UP', severity: 'ADVISORY', detail: 'a nicety' },
+      ],
+    });
+
+    const prior = priorPlanFor(fx.missions, id);
+    check('PF-P1: the previous plan is found on the log, whichever process asks',
+      !!prior && prior.prior.version === 1 && prior.prior.graph.nodes.length === 2,
+      JSON.stringify([prior?.prior?.version, prior?.prior?.graph?.nodes?.length]));
+    check('PF-P2: and it carries the critic findings, with their severity',
+      !!prior && prior.prior.critic!.length === 2
+      && prior.prior.critic!.some((f: any) => f.severity === 'BLOCKING'),
+      JSON.stringify(prior?.prior?.critic?.map((f: any) => [f.code, f.severity])));
+    check('PF-P3: and the validator findings, which are a different account',
+      !!prior && prior.prior.findings.length === 1
+      && (prior.prior.findings[0] as any).code === 'CRITERION_SCOPE_MISMATCH',
+      JSON.stringify(prior?.prior?.findings));
+
+    const none = priorPlanFor(fx.missions, fx.missions.create('a fresh goal', 'base0').missionId);
+    check('PF-P4: a first plan gets no prior — an empty one would say it was revising',
+      none === null, JSON.stringify(none));
+  }
+
+  section('a revision that ignored its critic is refused before anyone is paid');
+  {
+    // The check is on the finding CODES, because those are what the planner was
+    // handed. Prose about "addressing the feedback" answers nothing nameable.
+    const before = { version: 1, nodes: [node('p/M-0001/N-0001')] } as any;
+    const after = { version: 2, nodes: [node('p/M-0001/N-0001')] } as any;
+    const d = planDelta(before, after);
+    check('PDL1: an untouched node is KEPT, not counted as changed',
+      d.kept.length === 1 && d.changed.length === 0 && d.added.length === 0,
+      JSON.stringify(d));
+
+    const moved = { version: 2, nodes: [
+      { ...node('p/M-0001/N-0001'), writes: ['app/src/shell.jsx'] },
+      node('p/M-0001/N-0002'),
+    ] } as any;
+    const d2 = planDelta(before, moved);
+    check('PDL2: a node whose writes changed is CHANGED, and a new one is ADDED',
+      d2.changed.join() === 'N-0001' && d2.added.join() === 'N-0002',
+      JSON.stringify(d2));
+    const d3 = planDelta(before, { version: 2, nodes: [node('p/M-0001/N-0009')] } as any);
+    check('PDL3: a revision that replaced everything shows it, rather than hiding in a diff',
+      d3.kept.length === 0 && d3.removed.join() === 'N-0001' && d3.added.join() === 'N-0009',
+      JSON.stringify(d3));
+
+    check('PDL4: the planner is told a revision must resolve each blocking finding',
+      /BLOCKING_FINDING_UNANSWERED/.test(
+        fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'planner.ts'), 'utf8')),
+      'unanswered findings are a validator refusal');
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'planner.ts'), 'utf8');
+    check('PDL5: and that it is a REVISION, so the difference is exactly the fix',
+      /THIS IS A REVISION, NOT A NEW PLAN/.test(src), 'revision instruction present');
+    check('PDL6: the unanswered check runs before the critic, not after',
+      src.indexOf('BLOCKING_FINDING_UNANSWERED') < src.indexOf('The plan critic'),
+      'deterministic refusal comes first');
+  }
+
+  section('a dead end says what it is');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal whose plan was rejected', 'base0');
+    const id = rec.missionId;
+    fx.missions.recordPlan(id, { version: 1, nodes: [node(`${id}/N-0001`)] } as any, []);
+    fx.missions.recordPlanCritique(id, {
+      version: 1, acceptance: 'REJECT', contaminated: false, contaminationDetail: null,
+      findings: [{ code: 'INCOMPLETE_CHROME', severity: 'BLOCKING',
+        detail: 'the header and footer are never translated' }],
+    });
+
+    const b = blockedBy(fx.missions, id);
+    check('DE1: a rejected plan is reported as a dead end, not as nothing',
+      !!b && b.reason === 'PLAN_REJECTED', JSON.stringify(b?.reason));
+    check('DE2: with the findings that actually stand',
+      !!b && b.findings.length === 1
+      && (b.findings[0] as any).code === 'INCOMPLETE_CHROME',
+      JSON.stringify(b?.findings));
+    check('DE3: and the moves a person can make',
+      !!b && b.options.includes('plan again') && b.options.includes('cancel the mission'),
+      JSON.stringify(b?.options));
+
+    // Now spend the plan budget: the option changes, because planning again is
+    // no longer one of them.
+    for (let i = 0; i < 2; i += 1) {
+      fx.missions.recordPlanCritique(id, {
+        version: 1, acceptance: 'REJECT', contaminated: false, contaminationDetail: null,
+        findings: [{ code: 'INCOMPLETE_CHROME', severity: 'BLOCKING', detail: 'again' }],
+      });
+    }
+    const spent = blockedBy(fx.missions, id);
+    check('DE4: with the plan budget spent it says so, and stops offering to plan',
+      !!spent && spent.reason === 'REJECTED_AND_EXHAUSTED'
+      && !spent.options.includes('plan again')
+      && spent.options.some((o) => /raise maxPlanRecompiles/.test(o)),
+      JSON.stringify(spent?.options));
+
+    const clean = fixture();
+    const ok = clean.missions.create('a goal with no plan yet', 'base0');
+    check('DE5: a mission with no plan is not a dead end',
+      blockedBy(clean.missions, ok.missionId) === null, 'no plan, no dead end');
+
+    check('DE6: the console renders the dead end instead of a button that cannot work',
+      /if \(m\.blockedBy\) \{/.test(UI_HTML)
+      && UI_HTML.includes('This mission cannot go forward as planned'),
+      'dead end rendered');
+    check('DE7: findings first, options second — the order every consent surface uses',
+      UI_HTML.indexOf('finding(s) against the last plan') < UI_HTML.indexOf('What you can do'),
+      'findings before options');
   }
 
   section('one runner per mission');

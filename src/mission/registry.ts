@@ -329,10 +329,17 @@ export class MissionRegistry {
    * nobody re-reads at the point of decision.
    */
   recordPlan(missionId: string, plan: PlanGraph, scopeFindings: unknown[] = [],
-    providerUsage?: unknown): void {
+    providerUsage?: unknown,
+    /**
+     * A revision's own account of itself: which blocking findings it claims to
+     * answer, and what it kept, changed, added and removed. Absent on a first
+     * plan, which has nothing to answer and nothing to differ from.
+     */
+    revision?: { resolutions: unknown[]; delta: unknown } | null): void {
     this.append(missionId, 'PLAN_RECORDED', {
       version: plan.version, plan, nodes: plan.nodes.length, scopeFindings,
       ...(providerUsage ? { providerUsage } : {}),
+      ...(revision ? { revision } : {}),
     });
   }
 

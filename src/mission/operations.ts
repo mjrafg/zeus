@@ -326,6 +326,35 @@ export function liveRun(missions: MissionRegistry, missionId: string): LiveRun |
   return { ...claim, alive };
 }
 
+/**
+ * The last plan and everything said against it, for the next attempt.
+ *
+ * Read from the log rather than passed along, because a replan can happen in a
+ * different process from the one that produced the plan being revised.
+ * Returns nothing when there is no previous plan — a first plan has nothing to
+ * answer, and inventing an empty `prior` would tell the planner it was revising.
+ */
+export function priorPlanFor(missions: MissionRegistry, missionId: string):
+{ prior: NonNullable<Parameters<typeof planMission>[0]['prior']> } | null {
+  const log = missions.events.read(missionId);
+  const recorded = [...log].reverse().find((e) => e.type === 'PLAN_RECORDED');
+  if (!recorded) return null;
+  const p = (recorded.payload ?? {}) as any;
+  const graph = p.plan as PlanGraph | undefined;
+  if (!graph || !Array.isArray(graph.nodes)) return null;
+  const version = Number(p.version ?? graph.version ?? 0);
+  const critique = [...log].reverse().find((e) => e.type === 'PLAN_CRITIQUED'
+    && (e.payload as any)?.version === version);
+  const critic = ((critique?.payload as any)?.findings ?? []) as PlanCriticFinding[];
+  return {
+    prior: {
+      graph, version,
+      findings: (p.scopeFindings ?? []) as PlanFinding[],
+      critic: Array.isArray(critic) ? critic : [],
+    },
+  };
+}
+
 /** The budget a mission is operating under, revisions replayed from its log. */
 export function budgetsFor(missions: MissionRegistry, missionId: string) {
   return applyBudgetRevisions(mergeMissionBudgets(), missions.events.read(missionId));
@@ -383,6 +412,11 @@ export async function planMissionGraph(ctx: OperationContext,
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,
     context: ctx.context, provider: engine.opts.providers.planner,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha,
+    // The previous attempt AND what was said against it. Without this a replan
+    // starts from the goal alone and repeats the last plan's mistakes: two
+    // plans in a row left the site chrome outside the localisation nodes,
+    // because the second planner had never seen the first critique.
+    ...(priorPlanFor(missions, missionId) ?? {}),
   });
   if (planned.infrastructureFailure) {
     return { ok: false, kind: 'INFRASTRUCTURE', detail: planned.infrastructureFailure };
@@ -390,6 +424,9 @@ export async function planMissionGraph(ctx: OperationContext,
   const graph: PlanGraph = { version, nodes: planned.graph.nodes };
   const scopeGaps = planned.validation.findings
     .filter((f) => f.code === 'CRITERION_SCOPE_MISMATCH');
+  const revision = (planned.resolutions?.length || planned.delta)
+    ? { resolutions: planned.resolutions ?? [], delta: planned.delta ?? null }
+    : null;
 
   if (!planned.validation.valid) {
     missions.recordPlanRejected(missionId, {
@@ -398,7 +435,7 @@ export async function planMissionGraph(ctx: OperationContext,
     });
     return { ok: false, kind: 'REJECTED', version, findings: planned.validation.findings };
   }
-  missions.recordPlan(missionId, graph, scopeGaps, planned.providerUsage);
+  missions.recordPlan(missionId, graph, scopeGaps, planned.providerUsage, revision);
 
   const critique = await critiquePlan({
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,

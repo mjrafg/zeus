@@ -453,6 +453,15 @@ function renderActions(m) {
     return;
   }
 
+  // A DEAD END SAYS WHAT IT IS. A plan the critic rejected is not decidable by
+  // consent, so nothing is pending — and this slot used to fill that silence
+  // with a 'plan again' button that could not help, while the findings that
+  // actually stood were on the log and on no screen.
+  if (m.blockedBy) {
+    slot.appendChild(renderBlocked(m, m.blockedBy));
+    return;
+  }
+
   const step = m.pendingDecision ? null : NEXT_STEP[m.phase];
   if (!step && !m.pendingDecision) return;
   const d = document.createElement('div');
@@ -546,6 +555,49 @@ function reportOperation(m, label, r) {
   }
   bubble(esc(label) + ' on ' + id + ' <span class="ok">done</span>'
     + '<span class="dim"> — the mission page below is rebuilt from the log</span>', false);
+}
+
+/**
+ * Why there is no next step, and what can actually be done about it.
+ *
+ * The findings first and in full, then the options — the same order every
+ * surface in this product uses. The only action offered here is the one that
+ * needs no new decision from the engine; raising a limit and narrowing a goal
+ * are things a person does, and saying so is more use than a button that
+ * spends money to reach the identical refusal.
+ */
+function renderBlocked(m, b) {
+  const d = document.createElement('div');
+  d.className = 'pending';
+  let h = '<h3>This mission cannot go forward as planned</h3>';
+  h += '<p class="dim">' + esc(b.detail) + '</p>';
+  if (b.findings && b.findings.length) {
+    h += '<b>' + b.findings.length + ' finding(s) against the last plan</b>';
+    for (const f of b.findings) {
+      h += '<div class="f"><b>' + esc(f.code || 'finding') + '</b> '
+        + (f.severity ? '<span class="warn">' + esc(f.severity) + '</span> ' : '')
+        + esc(f.nodeId ? String(f.nodeId).split('/').pop() : '')
+        + '<br><span class="dim">' + esc(f.detail || '') + '</span></div>';
+    }
+  }
+  h += '<b>What you can do</b><ul class="dim">'
+    + b.options.map((o) => '<li>' + esc(o) + '</li>').join('') + '</ul>';
+  h += '<div class="acts"></div>';
+  d.innerHTML = h;
+  const acts = d.querySelector('.acts');
+  const c = document.createElement('button');
+  c.className = 'ghost';
+  c.textContent = 'cancel mission';
+  c.onclick = async () => {
+    if (!confirm('Cancel ' + m.missionId + '? This terminates it.')) return;
+    c.disabled = true;
+    const r = await apiPost('/missions/'
+      + encodeURIComponent(m.missionId.split('/').pop()) + '/cancel', {});
+    reportOperation(m, 'cancel mission', r);
+    loadList(); loadDetail();
+  };
+  acts.appendChild(c);
+  return d;
 }
 
 /**

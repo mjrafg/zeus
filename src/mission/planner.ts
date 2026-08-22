@@ -143,8 +143,23 @@ export interface PlanInput {
   supervisor: ProcessSupervisor;
   policy: ExecutionPolicy;
   baseSha: string;
-  /** A previous attempt and what the critic said, for the fix loop. */
-  prior?: { graph: PlanGraph; findings: PlanFinding[]; version: number };
+  /**
+   * The previous attempt and everything said against it.
+   *
+   * `blocking` is kept separate because those are the findings the next plan
+   * must ANSWER, one by one and on the record. A replan that starts from the
+   * goal alone repeats the last plan's mistakes: two plans in a row put the
+   * site chrome outside the localisation nodes, because the second planner
+   * never saw the first critique.
+   */
+  prior?: {
+    graph: PlanGraph;
+    version: number;
+    /** Validator findings — scope gaps and coverage holes. */
+    findings: PlanFinding[];
+    /** Critic findings, with severity. */
+    critic?: PlanCriticFinding[];
+  };
 }
 
 export interface PlanResult {
@@ -153,6 +168,10 @@ export interface PlanResult {
   infrastructureFailure: string | null;
   graph: PlanGraph;
   validation: PlanValidation;
+  /** One per blocking finding this revision claims to answer. Empty on a first plan. */
+  resolutions?: PlanResolution[];
+  /** What this revision kept, changed, added and removed. Null on a first plan. */
+  delta?: PlanDelta | null;
   plannerProviderId: string;
   providerUsage?: unknown;
   raw: string;
@@ -225,11 +244,39 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
     criterionId: c.criterionId, slug: c.slug, required: c.required,
     statement: c.statement, type: c.type,
   }));
+  const blocking = (input.prior?.critic ?? []).filter((f) => f.severity === 'BLOCKING');
+  const advisory = (input.prior?.critic ?? []).filter((f) => f.severity !== 'BLOCKING');
   const priorSections = input.prior ? [
     `--- your previous plan (v${input.prior.version}) ---\n${JSON.stringify(input.prior.graph.nodes, null, 1)}`,
-    `--- findings against that plan ---\n${input.prior.findings.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')}`,
-    'Answer these findings. Produce the FULL node set again.',
-  ] : [];
+    blocking.length
+      ? `--- BLOCKING findings against that plan (each MUST be resolved) ---\n${
+        blocking.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')}`
+      : '',
+    advisory.length
+      ? `--- advisory findings ---\n${
+        advisory.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')}`
+      : '',
+    input.prior.findings.length
+      ? `--- validator findings ---\n${
+        input.prior.findings.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')}`
+      : '',
+    '',
+    'THIS IS A REVISION, NOT A NEW PLAN.',
+    'Keep every node that no finding objects to, with its slug unchanged, so the',
+    'difference between the two plans is exactly the fix. Change dependencies,',
+    'write sets and descriptions only where a finding requires it, and add or',
+    'remove nodes only where a finding requires that. Reproducing an unrelated',
+    'node with a new slug is not a revision; it destroys the reviewer\'s ability',
+    'to see what actually changed.',
+    '',
+    ...(blocking.length ? [
+      'Reply with {"nodes":[...], "resolutions":[...]} where resolutions has one',
+      'entry per BLOCKING finding:',
+      '  {"finding":"<the finding CODE>","how":"what changed in the plan, and where"}',
+      'A blocking finding with no resolution is a plan that has not answered its',
+      'critic, and it is refused before anyone reads it.',
+    ] : []),
+  ].filter(Boolean) : [];
 
   const prompt = [
     PLAN_HEADER, '',
@@ -265,12 +312,81 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
 
   const nodes = normaliseNodes(input.missionId, (res.structured as any).nodes, input.criteria);
   const graph: PlanGraph = { version: (input.prior?.version ?? 0) + 1, nodes };
+  const resolutions = normaliseResolutions((res.structured as any).resolutions);
+  const validation = validatePlanForOracle(graph, required, scopeInputs);
+
+  // A revision that did not answer its critic is refused HERE, deterministically
+  // and for free, rather than after another critic call. The check is on the
+  // codes because that is what the planner was given; prose about "addressing
+  // the feedback" is not an answer to a named finding.
+  const unanswered = blocking.filter((f) =>
+    !resolutions.some((r) => r.finding.toUpperCase() === f.code.toUpperCase()));
+  if (unanswered.length) {
+    validation.valid = false;
+    validation.findings = [...validation.findings, ...unanswered.map((f): PlanFinding => ({
+      code: 'BLOCKING_FINDING_UNANSWERED',
+      severity: 'error',
+      ...(f.nodeId ? { nodeId: f.nodeId } : {}),
+      detail: `the revision does not say how it resolves ${f.code}`
+        + `${f.nodeId ? ` on ${f.nodeId}` : ''}, which blocked plan v${input.prior?.version}`,
+    }))];
+  }
+
   return {
     ok: true, infrastructureFailure: null, graph,
-    validation: validatePlanForOracle(graph, required, scopeInputs),
+    validation,
+    resolutions,
+    delta: input.prior ? planDelta(input.prior.graph, graph) : null,
     plannerProviderId: input.provider.id,
     ...(res.providerUsage ? { providerUsage: res.providerUsage } : {}),
     raw: res.raw ?? '',
+  };
+}
+
+export interface PlanResolution { finding: string; how: string }
+
+function normaliseResolutions(raw: unknown): PlanResolution[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object')
+    .map((r) => ({ finding: String(r.finding ?? '').trim(), how: String(r.how ?? '').trim() }))
+    .filter((r) => r.finding.length > 0);
+}
+
+export interface PlanDelta {
+  kept: string[];
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
+/**
+ * How much of the previous plan survived, by slug.
+ *
+ * A revision cannot be FORCED to be minimal — a model writes what it writes.
+ * It can be measured, and a revision that replaced every node while claiming to
+ * fix two findings is visible in one line instead of a diff nobody reads.
+ */
+export function planDelta(before: PlanGraph, after: PlanGraph): PlanDelta {
+  const slug = (n: TaskNode) => String(n.nodeId).split('/').pop() as string;
+  const b = new Map(before.nodes.map((n) => [slug(n), n]));
+  const a = new Map(after.nodes.map((n) => [slug(n), n]));
+  const same = (x: TaskNode, y: TaskNode) =>
+    x.description === y.description
+    && JSON.stringify(x.dependsOn) === JSON.stringify(y.dependsOn)
+    && JSON.stringify(x.writes) === JSON.stringify(y.writes)
+    && JSON.stringify(x.reads) === JSON.stringify(y.reads);
+  const kept: string[] = []; const changed: string[] = [];
+  for (const [k, node] of a) {
+    const was = b.get(k);
+    if (!was) continue;
+    (same(was, node) ? kept : changed).push(k);
+  }
+  return {
+    kept: kept.sort(),
+    changed: changed.sort(),
+    added: [...a.keys()].filter((k) => !b.has(k)).sort(),
+    removed: [...b.keys()].filter((k) => !a.has(k)).sort(),
   };
 }
 

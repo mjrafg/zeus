@@ -32,6 +32,7 @@ import {
 } from '../src/mission/operations';
 import {
   classifyMessage, draftCard, wantsTightening, chatHistory,
+  sanitiseCeiling, MAX_CARD_CEILING_USD,
 } from '../src/mission/chat';
 import { scopeOf, TaskNode } from '../src/mission/types';
 const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsOn: [],
@@ -243,7 +244,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 11 && WRITE_ROUTES.length === 11,
+      READ_ROUTES.length === 11 && WRITE_ROUTES.length === 12,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -584,10 +585,17 @@ export async function webSuite(): Promise<void> {
       check('CC3: the card keeps the user’s own words, unrewritten',
         work.json.card.originalGoal === 'fix the failing unit tests'
         && work.json.card.proposedGoal === null, work.json.card.originalGoal);
-      check('CC4: it says what happens next, and what that is expected to cost',
+      // This asserted that the line quoted `audits/missions/...` — paths in
+      // ZEUS's repository, recited on every project's card. A talkbridge
+      // operator was told "the only figures on record are
+      // audits/missions/M-0004.md" about a file their project does not have.
+      // What a card owes the reader is the ceiling THIS mission will stop at.
+      check('CC4: it says what happens next, and the ceiling it will stop at',
         work.json.card.whatHappensNext.length === 6
-        && /audits\/missions/.test(work.json.card.costExpectation),
-        work.json.card.costExpectation.slice(0, 60));
+        && /stops at \$\d+\.\d\d of provider-reported spend/
+          .test(work.json.card.costExpectation)
+        && !/audits\/missions/.test(work.json.card.costExpectation),
+        work.json.card.costExpectation.slice(0, 80));
       check('CC5: no silent model call — no cost is attributed to drafting it',
         work.json.card.proposalCostUsd === null);
 
@@ -849,8 +857,10 @@ export async function webSuite(): Promise<void> {
       desc.whatHappensNext.join(' | '));
     check('PC5b: it says plainly there is no shortcut',
       desc.warnings.some((w) => /no scaffolding shortcut/i.test(w)), desc.warnings.join(' | '));
-    check('PC5c: and cites committed cost evidence rather than an invented average',
-      /audits\/missions/.test(desc.costExpectation), desc.costExpectation.slice(0, 60));
+    check('PC5c: and states the ceiling rather than reciting Zeus\u2019s own audit files',
+      /stops at \$\d+\.\d\d of provider-reported spend/.test(desc.costExpectation)
+      && !/audits\/missions/.test(desc.costExpectation),
+      desc.costExpectation.slice(0, 80));
 
     const ask = draftCreationCard({
       route: 'ASK', source: 'clone the repo on github', projectsRoot: '/tmp/roots', targetSlug: 'x',
@@ -2354,6 +2364,172 @@ export async function webSuite(): Promise<void> {
       /spend[\s\S]{0,80}costCeilingUsd/.test(UI_HTML), 'gauge present');
     check('BG6: and says the unmetered calls are NOT inside the number the ceiling checks',
       UI_HTML.includes('reported no price and are not in it'), 'lower bound explained');
+  }
+
+  section('a mission can be created with a budget of its own');
+  {
+    const fx = fixture();
+    const under = fx.missions.create('a cheap goal', 'base0', { costCeilingUsd: 2 });
+    const over = fx.missions.create('an expensive goal', 'base0',
+      { costCeilingUsd: 40, maxTasks: 60 });
+    const plain = fx.missions.create('an ordinary goal', 'base0');
+
+    check('CB1: a ceiling BELOW the default is honoured',
+      budgetsFor(fx.missions, under.missionId).costCeilingUsd === 2,
+      String(budgetsFor(fx.missions, under.missionId).costCeilingUsd));
+    check('CB2: and one ABOVE it — the default is a starting value, not a maximum',
+      budgetsFor(fx.missions, over.missionId).costCeilingUsd === 40
+      && budgetsFor(fx.missions, over.missionId).maxTasks === 60,
+      JSON.stringify([budgetsFor(fx.missions, over.missionId).costCeilingUsd,
+        budgetsFor(fx.missions, over.missionId).maxTasks]));
+    check('CB3: a mission created without one keeps the shipped default',
+      budgetsFor(fx.missions, plain.missionId).costCeilingUsd === 5,
+      String(budgetsFor(fx.missions, plain.missionId).costCeilingUsd));
+
+    // The whole point of recording it as a revision: budgets are recomputed
+    // from the log every cycle, so anything stored elsewhere would be undone.
+    const revs = fx.store.read(over.missionId)
+      .filter((e: any) => e.type === 'MISSION_BUDGET_REVISED');
+    check('CB4: the choice is on the log as MISSION_BUDGET_REVISED, not a field',
+      revs.length === 2 && revs.every((e: any) => e.payload.decidedBy === 'user-confirmed'),
+      JSON.stringify(revs.map((e: any) => [e.payload.limit, e.payload.from, e.payload.to])));
+    check('CB5: and it says whether it went above or below the default',
+      revs.some((e: any) => /above the default/.test(e.payload.reason)),
+      JSON.stringify(revs.map((e: any) => e.payload.reason)));
+    check('CB6: an unchanged limit records nothing — no event that says nothing',
+      fx.store.read(plain.missionId)
+        .filter((e: any) => e.type === 'MISSION_BUDGET_REVISED').length === 0,
+      'no empty revisions');
+
+    // A budget on the card is a budget in the digest. Otherwise it could be
+    // changed between rendering and approval and confirm-with-hash would not
+    // notice, which is the entire purpose of that rule.
+    const cheap = draftCard({ intent: 'WORK', message: 'do a thing', costCeilingUsd: 3 });
+    const dear = draftCard({ intent: 'WORK', message: 'do a thing', costCeilingUsd: 30 });
+    check('CB7: the ceiling is part of the card',
+      cheap.budget.costCeilingUsd === 3 && dear.budget.costCeilingUsd === 30,
+      JSON.stringify([cheap.budget.costCeilingUsd, dear.budget.costCeilingUsd]));
+    check('CB8: and part of its DIGEST — a different ceiling is a different proposal',
+      cheap.digest !== dear.digest, 'digests differ');
+    check('CB9: a card above the default says so, in the text the digest covers',
+      dear.budget.aboveDefault === true && /ABOVE the default/.test(dear.costExpectation)
+      && /authorises the higher ceiling/.test(dear.costExpectation),
+      dear.costExpectation);
+    check('CB10: a card at or below the default does not cry wolf',
+      cheap.budget.aboveDefault === false && !/ABOVE the default/.test(cheap.costExpectation),
+      cheap.costExpectation);
+    check('CB11: every card states the ceiling it will stop at',
+      /stops at \$3\.00 of provider-reported spend/.test(cheap.costExpectation),
+      cheap.costExpectation);
+    check('CB12: and no longer quotes audit files from Zeus\u2019s own repository',
+      !/audits\/missions\//.test(cheap.costExpectation), cheap.costExpectation);
+
+    check('CB13: a ceiling that is not a number falls back to the default rather than NaN',
+      sanitiseCeiling('abc') === 5 && sanitiseCeiling(-4) === 5 && sanitiseCeiling(null) === 5,
+      JSON.stringify([sanitiseCeiling('abc'), sanitiseCeiling(-4), sanitiseCeiling(null)]));
+    check('CB14: and an absurd one is capped rather than accepted',
+      sanitiseCeiling(1e9) === MAX_CARD_CEILING_USD, String(sanitiseCeiling(1e9)));
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+
+      const drafted = await post(server, '/api/chat',
+        { message: 'add a spanish translation', costCeilingUsd: 25 });
+      const cardOut = drafted.json.card;
+      check('CB15: the chat route drafts the card at the requested ceiling',
+        cardOut.budget.costCeilingUsd === 25 && cardOut.budget.aboveDefault === true,
+        JSON.stringify(cardOut?.budget));
+
+      const tampered = JSON.parse(JSON.stringify(cardOut));
+      tampered.budget.costCeilingUsd = 500;
+      const bad = await post(server, '/api/chat/decide',
+        { card: tampered, cardDigest: cardOut.digest, decision: 'create' });
+      check('CB16: raising the ceiling after the card was rendered is REFUSED',
+        bad.status === 409 && bad.json.error === 'CARD_DIGEST_MISMATCH',
+        `${bad.status} ${JSON.stringify(bad.json?.error)}`);
+
+      const good = await post(server, '/api/chat/decide',
+        { card: cardOut, cardDigest: cardOut.digest, decision: 'create' });
+      check('CB17: approving the card creates the mission AT the ceiling it showed',
+        good.status === 201
+        && budgetsFor(fx.missions, good.json.missionId).costCeilingUsd === 25,
+        JSON.stringify([good.status,
+          good.json && budgetsFor(fx.missions, good.json.missionId).costCeilingUsd]));
+
+      const direct = await post(server, '/api/missions',
+        { goal: 'a goal posted straight to the route', costCeilingUsd: 7.5 });
+      check('CB18: the plain create route honours a ceiling too',
+        direct.status === 201 && direct.json.budgets.costCeilingUsd === 7.5,
+        JSON.stringify(direct.json?.budgets?.costCeilingUsd));
+    } finally { await server?.close(); }
+
+    check('CB19: the console lets the ceiling be chosen before the card is approved',
+      UI_HTML.includes('cardceilset') && UI_HTML.includes('use this ceiling'),
+      'card control present');
+    check('CB20: and changing it REDRAWS the card, because the digest changed',
+      /apiPost\('\/chat', \{ message: card\.originalGoal, costCeilingUsd: want \}\)/
+        .test(UI_HTML), 'redraw not in-place edit');
+  }
+
+  section('the budget decision is not CLI-only');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal whose budget moves', 'base0');
+    const id = rec.missionId;
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+
+      const up = await post(server, '/api/missions/M-0001/budget',
+        { limit: 'costCeilingUsd', to: 25 });
+      check('MBR1: the ceiling can be raised from the console',
+        up.status === 200 && up.json.budgets.costCeilingUsd === 25,
+        JSON.stringify([up.status, up.json?.budgets?.costCeilingUsd]));
+      check('MBR2: recorded as MISSION_BUDGET_REVISED, by a person',
+        fx.store.read(id).some((e: any) => e.type === 'MISSION_BUDGET_REVISED'
+          && e.payload.to === 25 && e.payload.decidedBy === 'user-confirmed'),
+        'on the log');
+
+      const down = await post(server, '/api/missions/M-0001/budget',
+        { limit: 'costCeilingUsd', to: 1 });
+      check('MBR3: and lowered — the ceiling moves both ways',
+        down.status === 200 && down.json.budgets.costCeilingUsd === 1,
+        String(down.json?.budgets?.costCeilingUsd));
+
+      const same = await post(server, '/api/missions/M-0001/budget',
+        { limit: 'costCeilingUsd', to: 1 });
+      check('MBR4: setting it to what it already is records nothing',
+        same.json.unchanged === true
+        && fx.store.read(id).filter((e: any) => e.type === 'MISSION_BUDGET_REVISED').length === 2,
+        'no empty revision');
+
+      const nonsense = await post(server, '/api/missions/M-0001/budget',
+        { limit: 'costCeilingUsd', to: -3 });
+      check('MBR5: a negative ceiling is refused, not stored',
+        nonsense.status === 400 && nonsense.json.error === 'BAD_LIMIT',
+        JSON.stringify(nonsense.json?.error));
+      const unknown = await post(server, '/api/missions/M-0001/budget',
+        { limit: 'notALimit', to: 5 });
+      check('MBR6: and an unknown limit is named, not invented',
+        unknown.status === 400 && unknown.json.error === 'NO_SUCH_LIMIT'
+        && /known limits are/.test(unknown.json.detail), unknown.json?.detail);
+
+      const other = await post(server, '/api/missions/M-0001/budget',
+        { limit: 'maxTasks', to: 40 });
+      check('MBR7: any mission limit is reachable, not only the money one',
+        other.status === 200 && other.json.budgets.maxTasks === 40,
+        String(other.json?.budgets?.maxTasks));
+    } finally { await server?.close(); }
+
+    check('MBR8: the route is advertised in the table it belongs to',
+      (WRITE_ROUTES as readonly string[]).includes('POST /api/missions/:id/budget'),
+      'advertised');
+    check('MBR9: the console warns before a ceiling that stops the mission at once',
+      /stops this mission immediately/.test(UI_HTML), 'warned');
   }
 
   section('a limit that is counted is a limit that binds');

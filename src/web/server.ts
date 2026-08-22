@@ -30,10 +30,10 @@ import {
 import {
   CompileResult, PlanOperationResult, OperationContext, budgetsFor,
 } from '../mission/operations';
-import { missionUsage } from '../mission/progress';
+import { missionUsage, MissionBudgets } from '../mission/progress';
 import {
   answerFromLog, chatHistory, classifyMessage, draftCard, recordCardDecision,
-  recordChatMessage, wantsTightening, MissionCard,
+  recordChatMessage, wantsTightening, MissionCard, sanitiseCeiling,
 } from '../mission/chat';
 import { EventTailer, cursorFromLastId, eventId, SSE_CHANNEL } from './tail';
 import { UI_HTML } from './ui';
@@ -131,6 +131,7 @@ export const WRITE_ROUTES = [
   'POST /api/missions/:id/run',
   'POST /api/missions/:id/cancel',
   'POST /api/missions/:id/confirm',
+  'POST /api/missions/:id/budget',
   'POST /api/missions/:id/evaluate',
   'POST /api/chat',
   'POST /api/chat/decide',
@@ -512,7 +513,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
 
   /** The one place a mission is created. Chat calls this; so does the route. */
   function createMission(goal: string,
-    sc: { missions: MissionRegistry; root: string }) {
+    sc: { missions: MissionRegistry; root: string },
+    budgets: Partial<MissionBudgets> = {}) {
     const head = (() => {
       try {
         return require('child_process').execFileSync('git',
@@ -520,7 +522,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           { encoding: 'utf8', timeout: 15_000 }).trim();
       } catch { return 'unknown'; }
     })();
-    return sc.missions.create(goal, head);
+    return sc.missions.create(goal, head, budgets);
   }
 
   async function handleWrite(url: URL, body: any, res: http.ServerResponse): Promise<void> {
@@ -535,7 +537,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     if (url.pathname === '/api/missions') {
       const goal = typeof body?.goal === 'string' ? body.goal.trim() : '';
       if (!goal) { send(res, 400, { error: 'GOAL_REQUIRED' }); return; }
-      const rec = createMission(goal, wsc);
+      const rec = createMission(goal, wsc, body?.costCeilingUsd === undefined
+        ? {} : { costCeilingUsd: sanitiseCeiling(body.costCeilingUsd) });
       send(res, 201, missionStatusView(wsc.missions, wsc.root, rec.missionId));
       return;
     }
@@ -682,7 +685,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         return;
       }
 
-      const card = draftCard({ intent: classification.intent, message });
+      const card = draftCard({ intent: classification.intent, message,
+        costCeilingUsd: body?.costCeilingUsd ?? null });
       recordChatMessage(wsc.store, wsc.projectId, {
         message, classification, led: 'CARD_DRAFTED', cardDigest: card.digest,
       });
@@ -704,9 +708,14 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       // The confirm-with-hash rule, third deployment. The card the user
       // answered must be the card that exists; a re-drafted card is a
       // different proposal and answering the old one approves nothing.
+      // Re-drafted from the CARD's own budget, not from anything the request
+      // sent alongside it. That is what makes the ceiling part of what was
+      // confirmed: a budget raised between rendering and approval produces a
+      // different digest, and this refuses it.
       const fresh = draftCard({
         intent: card.intent, message: card.originalGoal,
         proposedGoal: card.proposedGoal, proposalCostUsd: card.proposalCostUsd,
+        costCeilingUsd: card.budget ? card.budget.costCeilingUsd : null,
       });
       if (fresh.digest !== digest || card.digest !== digest) {
         recordCardDecision(wsc.store, wsc.projectId, {
@@ -740,7 +749,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       const goal = (typeof body?.goal === 'string' && body.goal.trim())
         ? body.goal.trim() : (card.proposedGoal ?? card.originalGoal);
       // THE SAME create path W1b built. Chat has no private route to a mission.
-      const rec = createMission(goal, wsc);
+      const rec = createMission(goal, wsc,
+        { costCeilingUsd: card.budget.costCeilingUsd });
       recordCardDecision(wsc.store, wsc.projectId, {
         cardDigest: digest, decision: 'CREATED', missionId: rec.missionId,
       });
@@ -749,7 +759,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       return;
     }
 
-    const m = /^\/api\/missions\/([^/]+)\/(compile|plan|run|cancel|confirm|evaluate)$/
+    const m = /^\/api\/missions\/([^/]+)\/(compile|plan|run|cancel|confirm|evaluate|budget)$/
       .exec(url.pathname);
     if (!m) { send(res, 404, { error: 'NO_SUCH_ROUTE', path: url.pathname }); return; }
     const id = resolveId(decodeURIComponent(m[1]), wsc.projectId);
@@ -780,6 +790,40 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       // DETACHED, always. A mission outlives the console by design.
       const spawned = spawnRun(id, targetOf(wsc));
       send(res, spawned.ok ? 202 : 500, { missionId: id, ...spawned });
+      return;
+    }
+
+    // ---- budget: raising or lowering a limit, on the record ---------------
+    //
+    // The only way to change a budget was `zeus mission confirm --raise-budget`,
+    // which raises the ceiling to exactly the planner's estimate. A console
+    // that can spend money and cannot say how much is allowed to leaves the
+    // one decision that bounds the spending in a terminal.
+    if (action === 'budget') {
+      const limit = String(body?.limit ?? 'costCeilingUsd');
+      const before = budgetsFor(wsc.missions, id) as unknown as Record<string, number>;
+      if (!(limit in before) || typeof before[limit] !== 'number') {
+        send(res, 400, { error: 'NO_SUCH_LIMIT', limit,
+          detail: `not a mission budget; known limits are ${Object.keys(before).join(', ')}` });
+        return;
+      }
+      const to = Number(body?.to);
+      if (!Number.isFinite(to) || to <= 0) {
+        send(res, 400, { error: 'BAD_LIMIT',
+          detail: 'a limit must be a positive, finite number' });
+        return;
+      }
+      const reason = typeof body?.reason === 'string' && body.reason.trim()
+        ? body.reason.trim() : 'revised from the control center';
+      if (to === before[limit]) {
+        send(res, 200, { missionId: id, limit, unchanged: true, budgets: before });
+        return;
+      }
+      wsc.missions.reviseBudget(id, {
+        limit, from: before[limit], to, reason, decidedBy: 'user-confirmed',
+      });
+      send(res, 200, { missionId: id, limit, from: before[limit], to,
+        budgets: budgetsFor(wsc.missions, id) });
       return;
     }
 

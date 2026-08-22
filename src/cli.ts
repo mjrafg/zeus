@@ -34,8 +34,8 @@ import {
 import { runMissionLoop } from './mission/loop';
 import { missionHost, ledgerFrom } from './mission/host';
 import {
-  missionUsage, progressFrom, providerSpendOf, negotiateBudget, applyBudgetRevisions,
-  mergeMissionBudgets, BudgetNegotiation,
+  missionUsage, progressFrom, providerSpendOf, negotiateBudget,
+  mergeMissionBudgets, BudgetNegotiation, MissionBudgets,
 } from './mission/progress';
 import { missionStatusView, missionListView, missionReportView } from './views';
 import {
@@ -44,7 +44,7 @@ import {
 import { defaultProjectsRoot } from './projects';
 import {
   compileMissionOracle, planMissionGraph, recompileMissionOracle,
-  MAX_ORACLE_RECOMPILES,
+  MAX_ORACLE_RECOMPILES, budgetsFor,
 } from './mission/operations';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
@@ -949,16 +949,44 @@ async function cmdMission(argv: string[]): Promise<number> {
   switch (sub) {
     case 'create': {
       const goal = rest.find((a) => !a.startsWith('--'));
-      if (!goal) { err('usage: zeus mission create "<goal>"'); return 2; }
+      if (!goal) {
+        err('usage: zeus mission create "<goal>" [--budget <usd>] [--max-tasks <n>]');
+        return 2;
+      }
       const head = (() => {
         try { return readOnlyGit(ctx.root, { timeoutMs: 15_000 })(['rev-parse', 'HEAD']); }
         catch { return 'unknown'; }
       })();
-      const rec = missions.create(goal, head);
-      if (json) { out(JSON.stringify(rec, null, 1)); return 0; }
+      // The default is a safe STARTING value, not a maximum. Above or below is
+      // a decision the operator may take, and either way it is recorded as
+      // MISSION_BUDGET_REVISED rather than stored as a field.
+      const numFlag = (flag: string): number | null => {
+        const i = rest.indexOf(flag);
+        if (i < 0) return null;
+        const v = Number(rest[i + 1]);
+        return Number.isFinite(v) && v > 0 ? v : null;
+      };
+      for (const flag of ['--budget', '--max-tasks']) {
+        if (rest.includes(flag) && numFlag(flag) === null) {
+          err(`${C.r}✗${C.x} ${flag} needs a positive number`);
+          return 2;
+        }
+      }
+      const budgets: Partial<MissionBudgets> = {};
+      const budgetFlag = numFlag('--budget');
+      const tasksFlag = numFlag('--max-tasks');
+      if (budgetFlag !== null) budgets.costCeilingUsd = budgetFlag;
+      if (tasksFlag !== null) budgets.maxTasks = Math.floor(tasksFlag);
+      const rec = missions.create(goal, head, budgets);
+      const live = budgetsFor(missions, rec.missionId);
+      const shipped = mergeMissionBudgets();
+      if (json) { out(JSON.stringify({ ...rec, budgets: live }, null, 1)); return 0; }
       out(`${C.g}✓${C.x} ${C.b}${rec.missionId}${C.x}`);
       out(`  goal      ${rec.goal}`);
       out(`  base      ${rec.baseSha.slice(0, 12)}`);
+      out(`  budget    $${live.costCeilingUsd.toFixed(2)} ceiling, ${live.maxTasks} task(s)`
+        + (live.costCeilingUsd > shipped.costCeilingUsd
+          ? ` ${C.y}(above the $${shipped.costCeilingUsd.toFixed(2)} default)${C.x}` : ''));
       out(`  ${C.dim}no plan yet — mission create records a goal; planning arrives with the execution loop${C.x}`);
       return 0;
     }
@@ -1670,10 +1698,9 @@ async function cmdMission(argv: string[]): Promise<number> {
 
 
 
-/** The budget a mission is actually operating under, revisions included. */
-function budgetsFor(missions: MissionRegistry, missionId: string) {
-  return applyBudgetRevisions(mergeMissionBudgets(), missions.events.read(missionId));
-}
+// budgetsFor lives in the engine — see ./mission/operations. This file used
+// to carry a byte-identical copy, which is two implementations of "what is
+// this mission's budget" waiting to disagree.
 
 function negotiationFor(missions: MissionRegistry, missionId: string, graph: PlanGraph): BudgetNegotiation {
   return negotiateBudget(graph.nodes, budgetsFor(missions, missionId));

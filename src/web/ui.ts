@@ -97,6 +97,8 @@ export const UI_HTML = `<!doctype html>
   .bar i { display:block; height:100%; background:var(--acc) }
   .bar i.warn { background:var(--warn) }
   .bar i.bad { background:var(--bad) }
+  .budgetpick input { width:88px }
+  .budgetpick { margin:8px 0 }
   .node { border-left:2px solid var(--line); padding:6px 0 6px 10px; margin:8px 0 }
   .node.done { border-left-color:var(--ok) }
   .node b { font-weight:600 }
@@ -228,6 +230,7 @@ async function loadDetail() {
     h += '</table>';
   }
   $('detail').innerHTML = h;
+  wireBudgetControl(m);
   renderActions(m);
   if (m.pendingDecision) renderPending(m, m.pendingDecision);
 }
@@ -285,7 +288,54 @@ function budgetCell(m) {
     h += '<div class="dim">the ceiling is checked against provider-reported spend; '
       + m.cost.unmeteredCalls + ' call(s) reported no price and are not in it</div>';
   }
+  if (!m.terminated) {
+    h += '<div class="gauge budgetpick"><span>set ceiling $</span>'
+      + '<input id="setceil" type="number" min="0.5" step="0.5" value="'
+      + Number(b.costCeilingUsd).toFixed(2) + '">'
+      + '<button class="ghost" id="setceilgo">revise</button></div>';
+  }
   return h;
+}
+
+/**
+ * Revising a limit from the page.
+ *
+ * The only way to change a budget was zeus mission confirm --raise-budget,
+ * which raises the ceiling to exactly the planner's estimate and lives in a
+ * terminal. A console that can spend money should be able to say how much it
+ * is allowed to spend. The change is a MISSION_BUDGET_REVISED event like every
+ * other, so it survives a restart and appears in the log next to what it paid
+ * for.
+ */
+function wireBudgetControl(m) {
+  const go = $('setceilgo');
+  if (!go) return;
+  go.onclick = async () => {
+    const to = Number($('setceil').value);
+    if (!(to > 0)) {
+      bubble('<span class="bad">a ceiling must be a positive number of dollars</span>', false);
+      return;
+    }
+    const from = m.budgets.costCeilingUsd;
+    if (to < (m.usage.costUsd || 0)) {
+      if (!confirm('$' + (m.usage.costUsd || 0).toFixed(4)
+        + ' is already spent. A ceiling of $' + to.toFixed(2)
+        + ' stops this mission immediately. Continue?')) return;
+    }
+    go.disabled = true;
+    const r = await apiPost('/missions/' + encodeURIComponent(m.missionId.split('/').pop())
+      + '/budget', { limit: 'costCeilingUsd', to });
+    if (r.status >= 400) {
+      bubble('<span class="bad">' + esc((r.json && (r.json.detail || r.json.error)) || r.status)
+        + '</span>', false);
+    } else if (r.json && r.json.unchanged) {
+      bubble('The ceiling is already $' + to.toFixed(2) + '.', false);
+    } else {
+      bubble('Ceiling on <b>' + esc(m.missionId) + '</b> $' + Number(from).toFixed(2)
+        + ' &rarr; <b>$' + to.toFixed(2) + '</b>, recorded as MISSION_BUDGET_REVISED.', false);
+    }
+    loadList(); loadDetail();
+  };
 }
 
 /**
@@ -570,8 +620,34 @@ function renderCard(card) {
   }
   h += '<b>What happens next</b><ol>'
     + card.whatHappensNext.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ol>';
-  h += '<p class="dim">' + esc(card.costExpectation) + '</p><div class="acts"></div>';
+  h += '<p class="dim">' + esc(card.costExpectation) + '</p>';
+  if (card.budget) {
+    h += '<div class="gauge budgetpick"><span>ceiling $</span>'
+      + '<input id="cardceil" type="number" min="0.5" step="0.5" value="'
+      + Number(card.budget.costCeilingUsd).toFixed(2) + '">'
+      + '<button class="ghost" id="cardceilset">use this ceiling</button>'
+      + (card.budget.aboveDefault
+        ? '<span class="warn">above the $'
+          + Number(card.budget.defaultCeilingUsd).toFixed(2) + ' default</span>'
+        : '')
+      + '</div>';
+  }
+  h += '<div class="acts"></div>';
   d.innerHTML = h;
+  // Changing the ceiling REDRAWS the card rather than editing it in place.
+  // The budget is inside the digest, so a card whose number was changed after
+  // it was rendered is a different proposal and has to be read again.
+  const setBtn = d.querySelector('#cardceilset');
+  if (setBtn) {
+    setBtn.onclick = async () => {
+      const want = Number(d.querySelector('#cardceil').value);
+      if (!(want > 0)) { bubble('<span class="bad">a ceiling must be a positive number of dollars</span>', false); return; }
+      for (const x of d.querySelectorAll('button')) x.disabled = true;
+      const r = await apiPost('/chat', { message: card.originalGoal, costCeilingUsd: want });
+      if (r.json && r.json.card) renderCard(r.json.card);
+      else bubble('<span class="bad">the card could not be redrawn</span>', false);
+    };
+  }
   const acts = d.querySelector('.acts');
   for (const a of card.actions) {
     const b = document.createElement('button');

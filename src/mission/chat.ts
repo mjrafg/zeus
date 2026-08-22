@@ -15,6 +15,7 @@
  * misreading.
  */
 
+import { DEFAULT_MISSION_BUDGETS } from './progress';
 import * as crypto from 'crypto';
 import { MissionRegistry } from './registry';
 import { EventStore, StoredEvent } from '../engine/events';
@@ -161,6 +162,20 @@ export function classifyMessage(raw: string): Classification {
 
 export interface CardAction { id: string; label: string }
 
+/**
+ * The ceiling a mission is being created with.
+ *
+ * Inside the card, therefore inside the digest, therefore inside what the
+ * operator confirmed. A budget that travelled beside the card instead of in
+ * it could be changed between rendering and approval, and the confirm-with-
+ * hash rule would not notice — which is the whole thing that rule is for.
+ */
+export interface CardBudget {
+  costCeilingUsd: number;
+  defaultCeilingUsd: number;
+  aboveDefault: boolean;
+}
+
 export interface MissionCard {
   intent: Intent;
   /** The user's own words, trimmed. V1 does not rewrite goals silently. */
@@ -171,6 +186,7 @@ export interface MissionCard {
   proposalCostUsd: number | null;
   whatHappensNext: string[];
   costExpectation: string;
+  budget: CardBudget;
   actions: CardAction[];
   digest: string;
 }
@@ -190,19 +206,45 @@ export function wantsTightening(text: string): boolean {
  * what the card says. Quoting an average that no artifact contains would be
  * exactly the invented number this product refuses elsewhere.
  */
-export function costExpectationLine(): string {
-  return 'Cost is not yet predictable from a committed baseline. The only figures on '
-    + 'record are audits/missions/M-0004.md ($1.3814 across two tasks, terminated '
-    + 'PARTIAL/BLOCKED) and audits/missions/BC-2-rerun.md (stopped at plan time on an '
-    + 'estimate of ~$89 for 14 nodes). Expect the compile and plan steps alone to cost '
-    + 'real money before any task runs.';
+/**
+ * The ceiling a request may set, or the default.
+ *
+ * The default is a safe STARTING value, not a maximum: a mission that needs
+ * more may be created with more, and the card says so in the sentence the
+ * digest covers. What is refused is a number that is not one — NaN, negative,
+ * or large enough to be a typo rather than a decision.
+ */
+export const MAX_CARD_CEILING_USD = 1000;
+
+export function sanitiseCeiling(v: unknown): number {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MISSION_BUDGETS.costCeilingUsd;
+  return Math.min(Math.round(n * 100) / 100, MAX_CARD_CEILING_USD);
+}
+
+export function costExpectationLine(ceilingUsd: number = DEFAULT_MISSION_BUDGETS.costCeilingUsd): string {
+  // The old line quoted two audit files by path — from Zeus's own repository.
+  // Every project's card recited them, so a talkbridge operator was shown
+  // "the only figures on record are audits/missions/M-0004.md" about a file
+  // that does not exist in their project and records nothing about their work.
+  const base = 'Cost is not predictable before the contract is compiled. The compile '
+    + 'and plan steps each call a model and cost real money before any task runs.';
+  const ceiling = ` This mission stops at $${ceilingUsd.toFixed(2)} of provider-reported `
+    + 'spend, counted from the first compile.';
+  const above = ceilingUsd > DEFAULT_MISSION_BUDGETS.costCeilingUsd
+    ? ` That is ABOVE the default of $${DEFAULT_MISSION_BUDGETS.costCeilingUsd.toFixed(2)}`
+      + ' — creating this mission authorises the higher ceiling.'
+    : '';
+  return base + ceiling + above;
 }
 
 export function draftCard(input: {
   intent: Intent; message: string;
   proposedGoal?: string | null; proposalCostUsd?: number | null;
+  costCeilingUsd?: number | null;
 }): MissionCard {
   const originalGoal = input.message.trim();
+  const ceiling = sanitiseCeiling(input.costCeilingUsd);
   const actions: CardAction[] = [
     { id: 'create', label: 'Create mission' },
     { id: 'edit', label: 'Edit goal' },
@@ -225,7 +267,12 @@ export function draftCard(input: {
       'consent — scope mismatches and budget shortfalls stop here for you',
       'run — tasks execute one at a time, each integrated only if it stays green',
     ],
-    costExpectation: costExpectationLine(),
+    costExpectation: costExpectationLine(ceiling),
+    budget: {
+      costCeilingUsd: ceiling,
+      defaultCeilingUsd: DEFAULT_MISSION_BUDGETS.costCeilingUsd,
+      aboveDefault: ceiling > DEFAULT_MISSION_BUDGETS.costCeilingUsd,
+    },
     actions,
   };
   return { ...card, digest: canonicalDigest(card) };

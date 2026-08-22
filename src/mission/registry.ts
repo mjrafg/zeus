@@ -12,6 +12,7 @@
  * throw is a reconstruction that turns a crash into an outage.
  */
 
+import { MissionBudgets, mergeMissionBudgets } from './progress';
 import { EventStore, StoredEvent } from '../engine/events';
 import { killRecorded } from '../engine/exec';
 import {
@@ -282,12 +283,32 @@ export class MissionRegistry {
     this.events.append({ taskId: missionId, type, payload });
   }
 
-  create(goal: string, baseSha: string): MissionRecord {
+  create(goal: string, baseSha: string,
+    budgets: Partial<MissionBudgets> = {}): MissionRecord {
     const missionId = this.nextMissionId();
     const createdAt = new Date().toISOString();
     this.events.append({ taskId: missionId, type: 'MISSION_CREATED', payload: {
       goal, projectId: this.projectId, createdAt, baseSha,
     } });
+    // A chosen budget is REVISIONS, not a field on the mission.
+    //
+    // applyBudgetRevisions already replays these from the log on every cycle,
+    // which is the only reason budgets survive a restart. A ceiling stored
+    // anywhere else would be undone by the same mechanism that makes the rest
+    // of the budget trustworthy — so setting one at creation writes the same
+    // events raising one later does, and budgetsFor needs no change at all.
+    const defaults = mergeMissionBudgets();
+    for (const [limit, to] of Object.entries(budgets)) {
+      if (typeof to !== 'number' || !Number.isFinite(to)) continue;
+      const from = (defaults as any)[limit];
+      if (typeof from !== 'number' || to === from) continue;
+      this.reviseBudget(missionId, {
+        limit, from, to, decidedBy: 'user-confirmed',
+        reason: to > from
+          ? `set above the default of ${from} when the mission was created`
+          : `set below the default of ${from} when the mission was created`,
+      });
+    }
     return this.mission(missionId)!;
   }
 

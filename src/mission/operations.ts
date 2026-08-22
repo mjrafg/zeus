@@ -25,7 +25,10 @@ import {
 } from './planner';
 import { PlanFinding } from './plan';
 import { PlanGraph } from './types';
-import { BudgetNegotiation, applyBudgetRevisions, mergeMissionBudgets, negotiateBudget } from './progress';
+import {
+  BudgetNegotiation, applyBudgetRevisions, mergeMissionBudgets, negotiateBudget,
+  missionUsage, providerSpendOf, checkMissionBudgets,
+} from './progress';
 
 export interface CriticFindingRef { code: string; criterionId?: string; detail: string }
 
@@ -73,6 +76,8 @@ export async function recompileMissionOracle(ctx: OperationContext,
   if (rec.oracleAccepted) {
     return { ok: false, kind: 'ALREADY_ACCEPTED', detail: `${missionId} is already accepted` };
   }
+  const roomToRecompile = preflightBudget(missions, missionId);
+  if (roomToRecompile) return { ok: false, kind: 'BUDGET', detail: roomToRecompile.detail };
   if (rec.recompiles >= MAX_ORACLE_RECOMPILES) {
     return { ok: false, kind: 'RECOMPILE_LIMIT',
       detail: `${missionId} has already been recompiled ${rec.recompiles} time(s); the limit is `
@@ -159,7 +164,7 @@ export type CompileResult =
   | {
     ok: false;
     kind: 'NO_SUCH_MISSION' | 'TERMINATED' | 'NO_ORACLE' | 'ALREADY_ACCEPTED'
-    | 'RECOMPILE_LIMIT';
+    | 'RECOMPILE_LIMIT' | 'BUDGET';
     detail: string;
   }
   | { ok: false; kind: 'INFRASTRUCTURE'; detail: string }
@@ -198,6 +203,9 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
   if (rec.oracle && !rec.oracleAccepted) {
     return recompileMissionOracle(ctx, missionId);
   }
+
+  const room = preflightBudget(missions, missionId);
+  if (room) return { ok: false, kind: 'BUDGET', detail: room.detail };
 
   const compiled = await compileOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, context: ctx.context,
@@ -269,7 +277,11 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
  * ------------------------------------------------------------------------ */
 
 export type PlanOperationResult =
-  | { ok: false; kind: 'NO_SUCH_MISSION' | 'TERMINATED' | 'ORACLE_NOT_ACCEPTED'; detail: string }
+  | {
+    ok: false;
+    kind: 'NO_SUCH_MISSION' | 'TERMINATED' | 'ORACLE_NOT_ACCEPTED' | 'BUDGET';
+    detail: string;
+  }
   | { ok: false; kind: 'INFRASTRUCTURE'; detail: string }
   | { ok: false; kind: 'REJECTED'; version: number; findings: PlanFinding[] }
   | {
@@ -285,6 +297,30 @@ export type PlanOperationResult =
 /** The budget a mission is operating under, revisions replayed from its log. */
 export function budgetsFor(missions: MissionRegistry, missionId: string) {
   return applyBudgetRevisions(mergeMissionBudgets(), missions.events.read(missionId));
+}
+
+/**
+ * The mission budget, checked BEFORE a provider is called.
+ *
+ * checkMissionBudgets had exactly one caller — the execution loop — so the
+ * ceiling governed execution and nothing else. Everything spent before the
+ * first task ran (compile, critique, recompile, plan, plan-critique) was
+ * unbounded: one mission reached $2.38 across five plans without the ceiling
+ * ever being consulted, because it never got as far as running a task. A
+ * spend ceiling that only applies after the expensive part is not a ceiling.
+ *
+ * Returns the breach, or null when there is room.
+ */
+export function preflightBudget(missions: MissionRegistry,
+  missionId: string): { limit: string; detail: string } | null {
+  const budgets = budgetsFor(missions, missionId);
+  const usage = missionUsage(missions.events.read(missionId), Date.now(),
+    (taskId) => {
+      try { return providerSpendOf(missions.events.read(taskId)); }
+      catch { return { costUsd: 0, unmetered: 0 }; }
+    });
+  const breach = checkMissionBudgets(budgets, usage);
+  return breach ? { limit: String(breach.limit), detail: breach.detail } : null;
 }
 
 /**
@@ -305,6 +341,9 @@ export async function planMissionGraph(ctx: OperationContext,
 
   const gate = requireAcceptedOracle(missions, missionId);
   if (!gate.ok) return { ok: false, kind: 'ORACLE_NOT_ACCEPTED', detail: gate.message };
+
+  const room = preflightBudget(missions, missionId);
+  if (room) return { ok: false, kind: 'BUDGET', detail: room.detail };
 
   const version = (rec.planVersion ?? 0) + 1;
   const baseSha = rec.ratchetSha ?? rec.baseSha;

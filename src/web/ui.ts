@@ -91,6 +91,17 @@ export const UI_HTML = `<!doctype html>
   .pending h3 { margin:0 0 8px; font-size:13px; color:var(--warn) }
   .pending .f { border-left:2px solid var(--line); padding:4px 0 4px 8px; margin:6px 0 }
   .pending .acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px }
+  .gauge { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap }
+  .bar { flex:1; min-width:120px; height:6px; border-radius:3px; background:#21262d;
+         overflow:hidden }
+  .bar i { display:block; height:100%; background:var(--acc) }
+  .bar i.warn { background:var(--warn) }
+  .bar i.bad { background:var(--bad) }
+  .node { border-left:2px solid var(--line); padding:6px 0 6px 10px; margin:8px 0 }
+  .node.done { border-left-color:var(--ok) }
+  .node b { font-weight:600 }
+  .node .meta { color:var(--dim); font-size:11px; margin-top:2px }
+  .node .desc { color:var(--dim); margin-top:3px; white-space:pre-wrap }
   #actslot .acts { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 }
   #actslot button.ghost { background:transparent; color:var(--dim);
                           border-color:var(--line) }
@@ -190,15 +201,8 @@ async function loadDetail() {
     + '<tr><th>plan</th><td>' + (m.acceptedPlanVersion == null ? 'none accepted'
       : 'v' + m.acceptedPlanVersion + (m.acceptedPlan ? '' : ' (invalidated)')) + '</td></tr>'
     + '<tr><th>ratchet</th><td>' + esc(m.ratchetSha ? m.ratchetSha.slice(0,12) : 'never advanced') + '</td></tr>'
-    + '<tr><th>cost</th><td>$' + (m.cost.totalUsd || 0).toFixed(4)
-    + (m.cost.isLowerBound ? ' <span class="warn">(a lower bound — '
-        + m.cost.unmeteredCalls + ' call(s) reported no price)</span>' : '')
-    + (Object.keys(m.cost.byPhase || {}).length
-      ? '<br><span class="dim">'
-        + Object.entries(m.cost.byPhase).map(([k, v]) => esc(k) + ' $' + Number(v).toFixed(4)).join('  ')
-        + '</span>'
-      : '<br><span class="dim">nothing spent yet</span>')
-    + '</td></tr></table>';
+    + '<tr><th>cost</th><td>' + costCell(m) + '</td></tr>'
+    + '<tr><th>budget</th><td>' + budgetCell(m) + '</td></tr></table>';
 
   h += '<div id="actslot"></div>';
   if (o) {
@@ -212,6 +216,7 @@ async function loadDetail() {
     }
     h += '</table>';
   }
+  h += planSection(m);
   if (rep.integrations.length) {
     h += '<h2>integrations</h2><table>';
     for (const i of rep.integrations) {
@@ -225,6 +230,99 @@ async function loadDetail() {
   $('detail').innerHTML = h;
   renderActions(m);
   if (m.pendingDecision) renderPending(m, m.pendingDecision);
+}
+
+function costCell(m) {
+  let h = '$' + (m.cost.totalUsd || 0).toFixed(4);
+  if (m.cost.isLowerBound) {
+    h += ' <span class="warn">(a lower bound \u2014 ' + m.cost.unmeteredCalls
+      + ' call(s) reported no price)</span>';
+  }
+  h += Object.keys(m.cost.byPhase || {}).length
+    ? '<br><span class="dim">'
+      + Object.entries(m.cost.byPhase).map(([k, v]) => esc(k) + ' $' + Number(v).toFixed(4)).join('  ')
+      + '</span>'
+    : '<br><span class="dim">nothing spent yet</span>';
+  return h;
+}
+
+/**
+ * Spend against the ceiling, and the counts against their limits.
+ *
+ * The console used to show money going out with nothing to measure it
+ * against: the $5.00 default appeared nowhere until the moment a stop
+ * announced you had passed it. These are the numbers the engine enforces, not
+ * a second opinion about them — the server sends what budgetsFor and
+ * missionUsage produce, which is exactly what checkMissionBudgets is handed.
+ */
+function budgetCell(m) {
+  const b = m.budgets, u = m.usage;
+  if (!b || !u) return '<span class="dim">not reported</span>';
+  const rows = [
+    { label: 'spend', now: u.costUsd || 0, max: b.costCeilingUsd,
+      fmt: (v) => '$' + Number(v).toFixed(4) },
+    { label: 'tasks', now: u.tasksSpawned, max: b.maxTasks, fmt: (v) => String(v) },
+    { label: 'plans refused', now: u.planRecompiles, max: b.maxPlanRecompiles,
+      fmt: (v) => String(v) },
+    { label: 'replans', now: u.replans, max: b.maxReplans, fmt: (v) => String(v) },
+  ];
+  let h = '';
+  for (const r of rows) {
+    // Only the spend line is worth showing when nothing has happened yet; the
+    // rest are noise on a mission that has not started.
+    if (r.now === 0 && r.label !== 'spend') continue;
+    const frac = r.max > 0 ? Math.min(1, r.now / r.max) : 0;
+    const cls = r.now >= r.max ? 'bad' : frac >= 0.75 ? 'warn' : '';
+    h += '<div class="gauge">'
+      + '<span>' + esc(r.label) + ' <b>' + r.fmt(r.now) + '</b>'
+      + ' <span class="dim">of ' + r.fmt(r.max) + '</span></span>'
+      + '<span class="bar"><i class="' + cls + '" style="width:'
+      + Math.round(frac * 100) + '%"></i></span>'
+      + (r.now >= r.max ? '<span class="bad">reached</span>' : '')
+      + '</div>';
+  }
+  if (m.cost.isLowerBound) {
+    h += '<div class="dim">the ceiling is checked against provider-reported spend; '
+      + m.cost.unmeteredCalls + ' call(s) reported no price and are not in it</div>';
+  }
+  return h;
+}
+
+/**
+ * The task graph, which the console has never shown.
+ *
+ * The plan has been on the mission view since W1a and nothing rendered it, so
+ * the only way to see what a mission proposed to DO was to read the event log
+ * by hand. A plan is the thing you are consenting to; it belongs on the page.
+ */
+function planSection(m) {
+  const p = m.plan;
+  if (!p || !Array.isArray(p.nodes) || !p.nodes.length) return '';
+  const accepted = m.acceptedPlanVersion === p.version;
+  const doneIds = {};
+  for (const s of (m.spawned || [])) if (s && s.nodeId) doneIds[s.nodeId] = s.taskId || true;
+  let h = '<h2>plan v' + p.version + ' <span class="dim">'
+    + p.nodes.length + ' node(s), '
+    + (accepted ? 'accepted' : 'not accepted') + '</span></h2>';
+  for (const n of p.nodes) {
+    const short = String(n.nodeId || '').split('/').pop();
+    const deps = (n.dependsOn || []).map((d) => String(d).split('/').pop());
+    h += '<div class="node' + (doneIds[n.nodeId] ? ' done' : '') + '">'
+      + '<b>' + esc(short) + '</b> ' + esc(n.slug || '')
+      + '<div class="meta">'
+      + esc(n.estimatedTier || '') + ' \u00b7 risk ' + esc(n.risk || '')
+      + ' \u00b7 est $' + Number(n.estimatedCost || 0).toFixed(2)
+      + (deps.length ? ' \u00b7 after ' + esc(deps.join(', ')) : '')
+      + (n.writes && n.writes.length ? ' \u00b7 writes ' + esc(n.writes.join(' ')) : '')
+      + '</div>'
+      + '<div class="desc">' + esc(String(n.description || '').slice(0, 400))
+      + (String(n.description || '').length > 400 ? '\u2026' : '') + '</div>'
+      + '</div>';
+  }
+  const est = p.nodes.reduce((a, n) => a + (Number(n.estimatedCost) || 0), 0);
+  h += '<p class="dim">the planner estimates $' + est.toFixed(2)
+    + ' across ' + p.nodes.length + ' node(s)</p>';
+  return h;
 }
 
 /**

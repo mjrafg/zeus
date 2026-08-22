@@ -42,6 +42,10 @@ import { extractZip } from '../src/zip';
 import { detectProject, nodePackageDirs } from '../src/adapters';
 import { ZEUS_WORKTREE_EXCLUDES, ZEUS_PATHSPEC_EXCLUDES } from '../src/engine/orchestrator';
 import { splitCommand } from '../src/engine/dependencies';
+import {
+  budgetsFor, preflightBudget, planMissionGraph,
+} from '../src/mission/operations';
+import { mergeMissionBudgets, checkMissionBudgets } from '../src/mission/progress';
 import { probePackageManager } from '../src/readiness';
 import {
   listProjects, projectBySlug, slugForUrl, slugify, freeSlug, scopeFor,
@@ -208,7 +212,11 @@ export async function webSuite(): Promise<void> {
       // SERIALIZER REUSE: the API must not have grown its own shape.
       const view = missionStatusView(fx.missions, fx.root, rec.missionId)!;
       const apiCore = { ...one.json };
+      // Only LIVE READINGS are deleted. `budgets` is not among them: it is
+      // derived purely from the log and rides inside the view, so the CLI and
+      // the console read one object rather than two that could drift.
       delete apiCore.phase; delete apiCore.cost; delete apiCore.pendingDecision;
+      delete apiCore.usage;
       check('WS1: the API mission record deep-equals the CLI view — one serializer',
         JSON.stringify(apiCore) === JSON.stringify(JSON.parse(JSON.stringify(view))),
         'shapes identical');
@@ -2311,6 +2319,108 @@ export async function webSuite(): Promise<void> {
       nodePackageDirs(single).length === 0
       && detectProject(single).primary.commands(single).unitTest === 'npm run test',
       String(detectProject(single).primary.commands(single).unitTest));
+  }
+
+  section('the console shows what the ceiling is, not only that you passed it');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal with a budget', 'base0');
+    const id = rec.missionId;
+
+    const b0 = budgetsFor(fx.missions, id);
+    check('BG1: a mission starts on the shipped defaults',
+      b0.costCeilingUsd === 5 && b0.maxTasks === 20 && b0.maxPlanRecompiles === 2,
+      JSON.stringify([b0.costCeilingUsd, b0.maxTasks, b0.maxPlanRecompiles]));
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const v = await get(`${server.url}/api/missions/M-0001`, auth);
+      check('BG2: the mission view carries the budget, so the page has something to measure against',
+        v.json.budgets && v.json.budgets.costCeilingUsd === 5,
+        JSON.stringify(v.json?.budgets?.costCeilingUsd));
+      check('BG3: and the usage it is enforced against, from the same source the engine uses',
+        v.json.usage && typeof v.json.usage.costUsd === 'number'
+        && typeof v.json.usage.planRecompiles === 'number',
+        JSON.stringify(v.json?.usage));
+      check('BG4: the gauge and the limit cannot disagree — one number, sent once',
+        Math.abs(v.json.usage.costUsd - v.json.cost.totalUsd) < 1e-6,
+        `${v.json.usage.costUsd} vs ${v.json.cost.totalUsd}`);
+    } finally { await server?.close(); }
+
+    check('BG5: the console renders spend against the ceiling',
+      /spend[\s\S]{0,80}costCeilingUsd/.test(UI_HTML), 'gauge present');
+    check('BG6: and says the unmetered calls are NOT inside the number the ceiling checks',
+      UI_HTML.includes('reported no price and are not in it'), 'lower bound explained');
+  }
+
+  section('a limit that is counted is a limit that binds');
+  {
+    // planRecompiles was incremented on every rejected plan and compared
+    // against nothing. A mission reached four refused plans against a limit of
+    // two, one click at a time, because no backstop existed under the button.
+    const b = mergeMissionBudgets();
+    const usage: any = { tasksSpawned: 0, plannedTasks: 0, replans: 0, repairs: 0,
+      planRecompiles: 2, elapsedSeconds: 0, costUsd: 0, unmeteredCalls: 0, reserveDraws: [] };
+    const breach = checkMissionBudgets(b, usage);
+    check('PRL1: the plan-recompile limit is enforced, not merely counted',
+      !!breach && breach.limit === 'maxPlanRecompiles', JSON.stringify(breach));
+    check('PRL2: and it names the count and the limit, not just the fact',
+      !!breach && /2 plan\(s\).*limit 2/.test(breach.detail), breach?.detail);
+    usage.planRecompiles = 1;
+    check('PRL3: under the limit nothing is breached',
+      checkMissionBudgets(b, usage) === null, 'room to plan');
+  }
+
+  section('the mission budget is checked before the money is spent');
+  {
+    // checkMissionBudgets had one caller — the execution loop — so the ceiling
+    // governed execution and nothing else. A mission reached $2.38 across five
+    // plans without it ever being consulted, because it never ran a task.
+    const fx = fixture();
+    const rec = fx.missions.create('an expensive goal', 'base0');
+    const id = rec.missionId;
+    check('PF1: with room, the preflight passes',
+      preflightBudget(fx.missions, id) === null, 'room to start');
+
+    fx.missions.reviseBudget(id, { limit: 'costCeilingUsd', from: 5, to: 0.01,
+      reason: 'test', decidedBy: 'user-confirmed' });
+    fx.store.append({ taskId: id, type: 'ORACLE_COMPILED',
+      payload: { providerUsage: { totalCostUsd: 0.5 } } });
+    const breach = preflightBudget(fx.missions, id);
+    check('PF2: spend BEFORE any task counts against the ceiling',
+      !!breach && breach.limit === 'costCeilingUsd', JSON.stringify(breach));
+
+    const ctx: any = { missions: fx.missions, engine: null, projectRoot: fx.root,
+      context: { commands: {}, failingChecks: [], findings: [] }, policy: null };
+    const compiled: any = await compileMissionOracle(ctx, id);
+    check('PF3: compile refuses on the budget rather than calling a provider',
+      compiled.ok === false && compiled.kind === 'BUDGET', compiled.kind);
+    const planned: any = await planMissionGraph(ctx, id);
+    check('PF4: plan refuses too — the same ceiling, checked at the same point',
+      planned.ok === false && (planned.kind === 'BUDGET'
+        || planned.kind === 'ORACLE_NOT_ACCEPTED'), planned.kind);
+  }
+
+  section('the console can show what a mission proposes to do');
+  {
+    check('PV1: the plan is rendered, not just carried in the payload',
+      /function planSection\(m\)/.test(UI_HTML) && UI_HTML.includes('planSection(m)'),
+      'plan section present');
+    check('PV2: each node shows its dependencies and what it writes',
+      UI_HTML.includes('after ') && UI_HTML.includes('writes '), 'node meta shown');
+    check('PV3: and the estimate that the budget stop compares against',
+      UI_HTML.includes('the planner estimates $'), 'estimate shown');
+    // The UI is one template literal. A backtick anywhere inside it ends the
+    // string early, and the file still looks fine to read.
+    const uiSrc = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'web', 'ui.ts'), 'utf8');
+    const open = uiSrc.indexOf('`', uiSrc.indexOf('export const UI_HTML'));
+    const close = uiSrc.lastIndexOf('`');
+    check('PV4: no stray backtick inside the UI template — it would truncate the page',
+      !uiSrc.slice(open + 1, close).includes('`'), 'template intact');
   }
 
   section('Zeus scratch is never the project\u2019s work');

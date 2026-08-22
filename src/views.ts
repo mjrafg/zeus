@@ -15,7 +15,10 @@ import * as path from 'path';
 import { MissionRegistry } from './mission/registry';
 import { MissionRecord } from './mission/types';
 import { Oracle } from './mission/oracle';
-import { missionUsage, progressFrom, providerSpendOf, MissionUsage, ProgressScore } from './mission/progress';
+import {
+  missionUsage, progressFrom, providerSpendOf, MissionUsage, ProgressScore,
+  applyBudgetRevisions, mergeMissionBudgets, MissionBudgets,
+} from './mission/progress';
 import { ratchetRef, readRatchet } from './mission/ratchet';
 import { StoredEvent } from './engine/events';
 
@@ -30,6 +33,15 @@ export function spendReader(missions: MissionRegistry) {
 export interface MissionStatusView extends MissionRecord {
   ratchetRef: string;
   ratchetRefSha: string | null;
+  /**
+   * The limits this mission is operating under, revisions replayed.
+   *
+   * Part of the RECORD, not a decoration the web adds: it is derived purely
+   * from the log, it is the same object checkMissionBudgets is handed, and
+   * both callers need it — the console had nothing to draw a gauge against
+   * and `mission status --json` never mentioned a ceiling either.
+   */
+  budgets: MissionBudgets;
 }
 
 /** Exactly what `zeus mission status --json` prints. */
@@ -37,7 +49,10 @@ export function missionStatusView(missions: MissionRegistry, root: string,
   missionId: string): MissionStatusView | null {
   const rec = missions.mission(missionId);
   if (!rec) return null;
-  return { ...rec, ratchetRef: ratchetRef(missionId), ratchetRefSha: readRatchet(root, missionId) };
+  return {
+    ...rec, ratchetRef: ratchetRef(missionId), ratchetRefSha: readRatchet(root, missionId),
+    budgets: applyBudgetRevisions(mergeMissionBudgets(), missions.events.read(missionId)),
+  };
 }
 
 /** Exactly what `zeus mission list --json` prints. */

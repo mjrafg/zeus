@@ -21,13 +21,16 @@ import { MissionRegistry } from '../mission/registry';
 import { isMissionId, isTaskId, scopeOf } from '../mission/types';
 import {
   missionListView, missionReportView, missionStatusView, missionPhase,
-  costBreakdown, integrationLine,
+  costBreakdown, integrationLine, spendReader,
 } from '../views';
 import { ensureToken, offeredToken, tokenMatches } from './token';
 import {
   ConsentRequest, consentSubject, evaluateConsent, pendingDecision, awaitingHuman,
 } from '../mission/consent';
-import { CompileResult, PlanOperationResult, OperationContext } from '../mission/operations';
+import {
+  CompileResult, PlanOperationResult, OperationContext, budgetsFor,
+} from '../mission/operations';
+import { missionUsage } from '../mission/progress';
 import {
   answerFromLog, chatHistory, classifyMessage, draftCard, recordCardDecision,
   recordChatMessage, wantsTightening, MissionCard,
@@ -367,6 +370,12 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           ...view,
           phase: missionPhase(sc.store.read(id)),
           cost: costBreakdown(sc.missions, id),
+          // `budgets` rides in the view itself, because it is part of the
+          // record. Usage is a LIVE READING — it carries elapsed wall-clock —
+          // so it is a decoration like phase and cost, and it is exactly what
+          // checkMissionBudgets is handed. The gauge on the page therefore
+          // cannot disagree with the limit that binds.
+          usage: missionUsage(sc.store.read(id), Date.now(), spendReader(sc.missions)),
           // Reconstructed, not remembered. A refresh, a reconnect or arriving
           // an hour later all show the same thing, because it comes from the
           // log rather than from the moment the stop happened.

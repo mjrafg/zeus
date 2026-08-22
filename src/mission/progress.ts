@@ -185,6 +185,16 @@ export function checkMissionBudgets(b: MissionBudgets, u: MissionUsage): Mission
   if (u.elapsedSeconds >= b.wallClockSeconds) {
     return { limit: 'wallClockSeconds', detail: `${u.elapsedSeconds}s elapsed, limit ${b.wallClockSeconds}s` };
   }
+  // Counted since the budgets were written, compared against nothing until
+  // now. A mission answered its critic four times against a limit of two,
+  // because `planRecompiles` was incremented and then never read.
+  if (u.planRecompiles >= b.maxPlanRecompiles) {
+    return {
+      limit: 'maxPlanRecompiles',
+      detail: `${u.planRecompiles} plan(s) refused by the validator or the critic, `
+        + `limit ${b.maxPlanRecompiles}`,
+    };
+  }
   if (u.costUsd >= b.costCeilingUsd) {
     return {
       limit: 'costCeilingUsd',

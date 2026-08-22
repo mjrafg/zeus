@@ -2230,7 +2230,10 @@ export async function webSuite(): Promise<void> {
 
     const cmds = det.primary.commands(root);
     check('PL3: typecheck resolves from the one package that can verify',
-      cmds.typecheck === 'npx --no-install tsc --noEmit -p api', String(cmds.typecheck));
+      cmds.typecheck === 'npm --prefix api exec -- tsc --noEmit -p api',
+      String(cmds.typecheck));
+    check('PL3b: and it looks for the binary in THAT package, not in the root',
+      !/^npx /.test(cmds.typecheck ?? ''), String(cmds.typecheck));
     check('PL4: install comes from THAT package too, so the check has its toolchain',
       cmds.install === 'npm --prefix api ci', String(cmds.install));
     check('PL5: and so does everything else — commands are never mixed across packages',

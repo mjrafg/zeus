@@ -116,14 +116,19 @@ function packageCommands(root: string, dir: string): Commands {
     build: pick('build'),
     unitTest: pick('test:unit', 'test'),
     integrationTest: pick('test:e2e', 'test:integration'),
-    // The tsconfig fallback only when the package DECLARES typescript. `npx
-    // --no-install` still reaches for the registry when the binary is not
-    // there, so on a project that never installs it the check does not fail
-    // with a type error — it fails with EAI_AGAIN inside a sandbox that has no
-    // network, which reads as "your change broke the build".
+    // The tsconfig fallback only when the package DECLARES typescript, and
+    // spelled through the package manager rather than through npx.
+    //
+    // `npx` looks for the binary under the CURRENT directory's node_modules,
+    // which for a package one level down is the wrong directory: after a
+    // successful `npm --prefix api ci` it still could not find tsc, and
+    // reached for the registry instead — EAI_AGAIN inside a sandbox with no
+    // network, recorded as "typecheck reported a real failure against the
+    // change". `exec` in the package's own prefix finds what was installed
+    // there, and argv[0] is still an executable the readiness probe resolves.
     typecheck: pick('typecheck', 'tsc')
       ?? ((has(at, 'tsconfig.json') && declaresTypescript(at))
-        ? `npx --no-install tsc --noEmit -p ${dir}` : null),
+        ? `${inDir} exec -- tsc --noEmit -p ${dir}` : null),
     lint: pick('lint'),
   };
 }

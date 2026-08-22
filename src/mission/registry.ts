@@ -154,7 +154,17 @@ export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): Mi
           rec.acceptedBy = null;
           rec.acceptedDespite = [];
         }
-        if (p.findingsForwarded === true) rec.recompiles += 1;
+        break;
+      }
+      // The count the recompile limit is enforced against.
+      //
+      // It was derived from `findingsForwarded === true` on ORACLE_COMPILED —
+      // a field nothing writes (recordRecompile writes a COUNT, on a different
+      // event, which nothing reduced). So `recompiles` was permanently 0 and
+      // MAX_ORACLE_RECOMPILES could never bind: an unbounded number of rounds,
+      // each a real model call, behind a guard that read like a limit.
+      case 'ORACLE_RECOMPILED': {
+        rec.recompiles += 1;
         break;
       }
       case 'ORACLE_ACCEPTED': {
@@ -618,10 +628,19 @@ export class MissionRegistry {
   recordPlanStopDecision(missionId: string, spec: {
     version: number; rendered: string[]; decision: string;
     decidedBy: string; deferred?: boolean;
+    /**
+     * The digest of the findings this decision answered.
+     *
+     * Without it a recorded refusal cannot be matched to the stop it answered,
+     * so the stop was re-derived for ever and the console asked the same
+     * question after every answer.
+     */
+    findingsDigest?: string;
   }): void {
     this.append(missionId, 'PLAN_STOP_DECISION', {
       version: spec.version, rendered: spec.rendered, decision: spec.decision,
       decidedBy: spec.decidedBy, deferred: spec.deferred === true,
+      ...(spec.findingsDigest ? { findingsDigest: spec.findingsDigest } : {}),
     });
   }
 

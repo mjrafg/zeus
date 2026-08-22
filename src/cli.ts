@@ -42,7 +42,10 @@ import {
   startWebServer, defaultSpawnRun, zeusCliArgv, ProjectTarget,
 } from './web/server';
 import { defaultProjectsRoot } from './projects';
-import { compileMissionOracle, planMissionGraph } from './mission/operations';
+import {
+  compileMissionOracle, planMissionGraph, recompileMissionOracle,
+  MAX_ORACLE_RECOMPILES,
+} from './mission/operations';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -777,7 +780,6 @@ function acceptDespite(missions: MissionRegistry, missionId: string, proposal: a
 }
 
 /** How many times a mission may send a critique back to the compiler. */
-const MAX_ORACLE_RECOMPILES = 2;
 
 /**
  * The fix loop: show the compiler what the critic said, compile again.
@@ -790,82 +792,55 @@ const MAX_ORACLE_RECOMPILES = 2;
  */
 async function recompileOracle(ctx: { root: string; cfg: ProjectConfig }, missions: MissionRegistry,
   eng: Engine, missionId: string, json: boolean): Promise<number> {
-  const rec = missions.mission(missionId);
-  if (!rec || !rec.oracle) { err(`${C.r}✗${C.x} ${missionId} has no compiled oracle to recompile`); return 1; }
-  if (rec.oracleAccepted) { err(`${C.r}✗${C.x} ${missionId} is already accepted`); return 1; }
-  if (rec.recompiles >= MAX_ORACLE_RECOMPILES) {
-    err(`${C.r}✗${C.x} ${missionId} has already been recompiled ${rec.recompiles} time(s); the limit is ${MAX_ORACLE_RECOMPILES}`);
-    err(`  ${C.dim}a compiler that cannot answer the critique in ${MAX_ORACLE_RECOMPILES} rounds needs a person, not another round${C.x}`);
-    return 1;
-  }
-  const prior = rec.oracle as Oracle;
-  const findings = latestFindings(missions, missionId);
-  const context = projectContextFor(ctx.root, ctx.cfg);
-  const policy = defaultPolicy(ctx.root, ctx.root);
+  // The OPERATION, not a second copy of it. This function used to carry its
+  // own compile-critique-record sequence, which is how the console ended up
+  // with no recompile at all: the capability was locked inside the CLI.
+  const before = missions.mission(missionId);
+  const res = await recompileMissionOracle({
+    missions, engine: eng, projectRoot: ctx.root,
+    context: projectContextFor(ctx.root, ctx.cfg),
+    policy: defaultPolicy(ctx.root, ctx.root),
+  }, missionId);
 
-  missions.recordRecompile(missionId, {
-    fromVersion: prior.version, findingsForwarded: findings.length,
-    attempt: rec.recompiles + 1, limit: MAX_ORACLE_RECOMPILES,
-  });
-
-  const compiled = await compileOracle({
-    missionId, projectId: eng.projectId, goal: rec.goal, context,
-    provider: eng.opts.providers.planner, supervisor: eng.opts.supervisor,
-    policy, baseSha: rec.baseSha,
-    prior: { criteria: prior.criteria, findings, version: prior.version },
-  });
-  if (!compiled.ok) {
-    err(`${C.r}✗${C.x} compiler unavailable: ${compiled.infrastructureFailure}`);
-    return 3;
-  }
-  if (!compiled.validation.valid) {
-    missions.recordCompileRejected(missionId, {
-      findings: compiled.validation.findings, criteria: compiled.criteria,
-      compilerProviderId: compiled.compilerProviderId, structuredHash: compiled.structuredHash,
-    });
-    out(`${C.r}✗${C.x} the recompiled criteria are not a contract:`);
-    for (const f of compiled.validation.findings) out(`  ${C.r}${f.code}${C.x} ${C.dim}${f.detail}${C.x}`);
+  if (!res.ok) {
+    if (res.kind === 'RECOMPILE_LIMIT') {
+      const [first, ...rest] = res.detail.split('. ');
+      err(`${C.r}✗${C.x} ${first}`);
+      if (rest.length) err(`  ${C.dim}${rest.join('. ')}${C.x}`);
+      return 1;
+    }
+    if (res.kind === 'INFRASTRUCTURE') {
+      err(`${C.r}✗${C.x} compiler unavailable: ${res.detail}`);
+      return 3;
+    }
+    if (res.kind === 'REJECTED') {
+      out(`${C.r}✗${C.x} the recompiled criteria are not a contract:`);
+      for (const f of res.findings) out(`  ${C.r}${f.code}${C.x} ${C.dim}${f.detail}${C.x}`);
+      return 1;
+    }
+    err(`${C.r}✗${C.x} ${res.detail}`);
     return 1;
   }
 
-  // A FRESH critique. Same policy, no prior verdict anywhere in its payload.
-  const critique = await critiqueOracle({
-    missionId, projectId: eng.projectId, goal: rec.goal, criteria: compiled.criteria,
-    context, provider: eng.opts.providers.reviewer, supervisor: eng.opts.supervisor,
-    policy, baseSha: rec.baseSha,
-  });
-  const nextFindings: CriticFindingRef[] = critique.valid ? critique.findings : [];
-  const proposal = proposeAcceptance(compiled.criteria, context,
-    critique.valid ? critique.modeOpinion : null, nextFindings);
-  const oracle: Oracle = {
-    missionId, version: prior.version + 1, criteria: compiled.criteria,
-    acceptanceMode: proposal.mode, compiledAt: new Date().toISOString(),
-    compilerProviderId: compiled.compilerProviderId, criticProviderId: critique.criticProviderId,
-  };
-  missions.recordOracle(missionId, oracle, compiled.structuredHash, compiled.validation,
-    compiled.providerUsage);
-  missions.recordCritique(missionId, {
-    valid: critique.valid, findings: critique.findings, modeOpinion: critique.modeOpinion,
-    promptHash: critique.payload.promptHash, hashes: critique.payload.hashes,
-    violations: critique.payload.violations, criticProviderId: critique.criticProviderId,
-    reconciliation: critique.reconciliation,
-  });
-
+  const { oracle, proposal } = res;
+  const nextFindings = res.critique.findings;
+  const forwarded = res.recompiledFrom?.findingsForwarded ?? 0;
   if (json) {
-    out(JSON.stringify({ oracle, findingsForwarded: findings.length,
-      critique: { findings: critique.findings }, mode: proposal }, null, 1));
+    out(JSON.stringify({ oracle, findingsForwarded: forwarded,
+      critique: { findings: nextFindings }, mode: proposal }, null, 1));
     return 0;
   }
-  out(`${C.b}${missionId}${C.x} oracle v${oracle.version} ${C.dim}(recompiled with ${findings.length} finding(s) forwarded)${C.x}`);
+  out(`${C.b}${missionId}${C.x} oracle v${oracle.version} ${C.dim}(recompiled with ${forwarded} finding(s) forwarded)${C.x}`);
   for (const c of oracle.criteria) {
     const ev = c.evaluator as any;
     out(`  ${missionLabel(c.criterionId).padEnd(8)} ${c.type.padEnd(14)} ${c.statement.slice(0, 60)}`);
     out(`           ${C.dim}${ev.kind === 'rubric' ? `rubric: ${String(ev.rubric).slice(0, 55)}` : ev.command}${ev.repeat ? ` ×${ev.repeat}` : ''}${C.x}`);
   }
-  // The FRESH critique's round number. `rec` was read before the recompile was
-  // recorded, so rec.recompiles is the count BEFORE this attempt: the critique
+  // The FRESH critique's round number. `before` was read before the recompile
+  // was recorded, so its count is the one BEFORE this attempt: the critique
   // that follows attempt N is round N+1.
-  out(`  ${C.b}round ${rec.recompiles + 2}${C.x} critique (a fresh one — it has not seen round ${rec.recompiles + 1}):`);
+  const priorRounds = before?.recompiles ?? 0;
+  out(`  ${C.b}round ${priorRounds + 2}${C.x} critique (a fresh one — it has not seen round ${priorRounds + 1}):`);
   renderFindings(nextFindings);
   out(`  ${C.b}acceptance mode${C.x} ${proposal.mode}`);
   out(nextFindings.length

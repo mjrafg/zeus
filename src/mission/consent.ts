@@ -50,6 +50,31 @@ export interface ConsentSubject {
 }
 
 /** What a human would currently be shown, derived from the log. */
+/**
+ * Whether a PERSON already refused this exact stop.
+ *
+ * `decidable` used to mean only "a critique exists and nothing accepted it",
+ * which stays true after a refusal — so the console recorded the answer and
+ * then asked the identical question again, for ever, with no way forward.
+ *
+ * Keyed on version AND the digest of the findings, because a refusal answers
+ * the findings that were on screen; a fresh critique of the same version is a
+ * different question and deserves to be asked. `decidedBy` must be a person:
+ * the engine records REFUSED_NO_CONSENT with 'nobody yet' when it stops for
+ * want of a decision, and treating that as an answer would hide the stop.
+ */
+function refusedByAPerson(log: StoredEvent[], version: number, digest: string): boolean {
+  return [...log].reverse().some((e) => {
+    if (e.type !== 'PLAN_STOP_DECISION') return false;
+    const p = (e.payload ?? {}) as any;
+    if (p.version !== version) return false;
+    if (p.decidedBy !== 'user-confirmed') return false;
+    if (p.findingsDigest && p.findingsDigest !== digest) return false;
+    return String(p.decision ?? '').startsWith('REFUSED')
+      || String(p.decision ?? '') === 'ORACLE_REFUSED';
+  });
+}
+
 export function consentSubject(missions: MissionRegistry, missionId: string,
   kind: ConsentKind): ConsentSubject | null {
   const log: StoredEvent[] = missions.events.read(missionId);
@@ -60,13 +85,19 @@ export function consentSubject(missions: MissionRegistry, missionId: string,
     const critique = [...log].reverse().find((e) => e.type === 'ORACLE_CRITIQUED');
     const version = rec.oracleVersion ?? 0;
     const findings = (critique?.payload as any)?.findings ?? [];
+    const digest = findingsDigest(findings);
+    const answered = refusedByAPerson(log, version, digest);
     return {
-      kind, version, findings, digest: findingsDigest(findings),
-      decidable: !rec.terminated && !!critique && !!rec.oracle && !rec.oracleAccepted,
+      kind, version, findings, digest,
+      decidable: !rec.terminated && !!critique && !!rec.oracle && !rec.oracleAccepted
+        && !answered,
       detail: !rec.oracle ? 'no oracle has been compiled'
         : rec.oracleAccepted ? 'this oracle is already accepted'
           : !critique ? 'no critique on the log — there is no second opinion to consent over'
-            : `${findings.length} finding(s) stand against oracle v${version}`,
+            : answered
+              ? `oracle v${version} was refused; the next move is a recompile that answers `
+                + `its ${findings.length} finding(s)`
+              : `${findings.length} finding(s) stand against oracle v${version}`,
     };
   }
 
@@ -77,16 +108,21 @@ export function consentSubject(missions: MissionRegistry, missionId: string,
   const cp = (critique?.payload ?? {}) as any;
   const scope = ((recorded?.payload as any)?.scopeFindings ?? []) as unknown[];
   const findings = [...((cp.findings ?? []) as unknown[]), ...scope];
+  const planDigest = findingsDigest(findings);
+  const planAnswered = refusedByAPerson(log, version, planDigest);
   return {
-    kind, version, findings, digest: findingsDigest(findings),
+    kind, version, findings, digest: planDigest,
     decidable: !rec.terminated && !!recorded && !!critique && !cp.contaminated
-      && cp.acceptance !== 'REJECT' && rec.acceptedPlanVersion !== version,
+      && cp.acceptance !== 'REJECT' && rec.acceptedPlanVersion !== version
+      && !planAnswered,
     detail: !recorded ? 'no plan has been recorded'
       : !critique ? `plan v${version} has no critique on the log; there is no second opinion to consent over`
         : cp.contaminated ? `the critique of plan v${version} was contaminated, so it is not a second opinion`
           : cp.acceptance === 'REJECT' ? `the critique REJECTED plan v${version}; it cannot be accepted by consent`
             : rec.acceptedPlanVersion === version ? `plan v${version} is already accepted`
-              : `${findings.length} finding(s) stand against plan v${version}`,
+              : planAnswered
+                ? `plan v${version} was refused; the next move is a new plan`
+                : `${findings.length} finding(s) stand against plan v${version}`,
   };
 }
 

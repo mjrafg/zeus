@@ -781,7 +781,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       // path `zeus cancel` uses so a live run is actually reached.
       const outcome = wsc.missions.cancel(id, `cancelled at the ${subject.kind} consent stop`);
       wsc.missions.recordPlanStopDecision(id, {
-        version: subject.version, rendered,
+        version: subject.version, rendered, findingsDigest: subject.digest,
         decision: 'ABORTED', decidedBy: 'user-confirmed', deferred: false,
       });
       send(res, 200, { missionId: id, decision: 'ABORT', kind: subject.kind,
@@ -791,7 +791,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
 
     if (req.decision === 'REFUSE') {
       wsc.missions.recordPlanStopDecision(id, {
-        version: subject.version, rendered,
+        version: subject.version, rendered, findingsDigest: subject.digest,
         decision: subject.kind === 'plan' ? 'REFUSED_NO_CONSENT' : 'ORACLE_REFUSED',
         decidedBy: 'user-confirmed', deferred: false,
       });

@@ -896,16 +896,22 @@ export async function oracleSuite(): Promise<void> {
     missions.recordOracle(bounded.missionId,
       { ...oracleOf([criterion({ criterionId: `${bounded.missionId}/C-0001` })]),
         missionId: bounded.missionId }, 'sha256:y', { valid: true });
+    // Through the RECORDING PATH, not a hand-built payload. This test used to
+    // append an ORACLE_COMPILED carrying `findingsForwarded: true`, a shape
+    // nothing in the product writes — so it passed while the real counter sat
+    // at 0 and the bound below could never be reached by anything but this
+    // test. A fixture that manufactures the state under test proves the
+    // assertion, not the product.
     for (let i = 0; i < 2; i += 1) {
       missions.recordOracle(bounded.missionId,
         { ...oracleOf([criterion({ criterionId: `${bounded.missionId}/C-0001` })]),
           missionId: bounded.missionId, version: i + 2 }, 'sha256:y', { valid: true });
-      store.append({ taskId: bounded.missionId, type: 'ORACLE_COMPILED',
-        payload: { oracle: { missionId: bounded.missionId, version: i + 2, criteria: [] },
-          findingsForwarded: true } });
+      missions.recordRecompile(bounded.missionId,
+        { fromVersion: i + 1, findingsForwarded: 1, attempt: i + 1, limit: 2 });
     }
     check('OR166: the log counts how many times the critique was sent back',
-      missions.mission(bounded.missionId)!.recompiles === 2);
+      missions.mission(bounded.missionId)!.recompiles === 2,
+      String(missions.mission(bounded.missionId)!.recompiles));
     const overBound = await run('mission', 'recompile', 'M-0004', '--mock');
     check('OR167: recompiling past the bound is refused, and says why',
       overBound === 1 && /limit is 2/.test(said()), said().trim().split('\n')[0]);

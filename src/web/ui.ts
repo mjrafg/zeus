@@ -244,6 +244,12 @@ const NEXT_STEP = {
     detail: 'a model turns the goal into checkable criteria, and a second model reviews it' },
   ORACLE: { id: 'compile', label: 'recompile the contract',
     detail: 'compiled but not yet critiqued — run it again' },
+  // Reached by refusing a contract: the stop is answered, and what is left to
+  // do is a second round that answers the findings rather than repeating them.
+  CONSENT: { id: 'compile', label: 'recompile, answering the findings',
+    detail: 'the critic\u2019s findings go back to the compiler, and a fresh critic reviews the result' },
+  PLAN_CONSENT: { id: 'plan', label: 'plan again',
+    detail: 'the refused plan is replaced by a new one' },
   PLANNING: { id: 'plan', label: 'plan the work',
     detail: 'a model proposes the task graph, and a critic reviews it' },
   RUNNING: { id: 'run', label: 'run the tasks',

@@ -28,6 +28,9 @@ import {
   findingsDigest, pendingDecision, awaitingHuman, consentSubject,
 } from '../src/mission/consent';
 import {
+  compileMissionOracle, recompileMissionOracle, MAX_ORACLE_RECOMPILES,
+} from '../src/mission/operations';
+import {
   classifyMessage, draftCard, wantsTightening, chatHistory,
 } from '../src/mission/chat';
 import { scopeOf, TaskNode } from '../src/mission/types';
@@ -2030,5 +2033,157 @@ export async function webSuite(): Promise<void> {
       'no double submit');
     check('ACT7: a refusal is rendered with its findings, not reduced to a status code',
       /for \(const f of \(j\.findings \|\| \[\]\)\)/.test(UI_HTML), 'findings shown');
+    check('ACT8: after a refusal the phase offers a recompile that answers the findings',
+      /CONSENT: \{ id: 'compile', label: 'recompile, answering the findings'/.test(UI_HTML),
+      'refusal leaves a move');
+  }
+
+  section('answering a consent stop ends it');
+  {
+    // The loop: refusing recorded the decision and changed nothing derivable,
+    // so `decidable` stayed true and the console asked the identical question
+    // again, for ever, with no way forward from the web.
+    const withCritique = (goal: string, findings: unknown[]) => {
+      const fx2 = fixture();
+      const rec = fx2.missions.create(goal, 'base0');
+      const oracle = {
+        missionId: rec.missionId, version: 1, acceptanceMode: 'REQUIRED_CONSENT',
+        compiledAt: 'now', compilerProviderId: 'mock', criticProviderId: 'mock',
+        criteria: [{ criterionId: `${rec.missionId}/C-0001`, type: 'EXECUTABLE', statement: 's',
+          evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' },
+          affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'] }],
+      };
+      fx2.missions.recordOracle(rec.missionId, oracle as any, 'h', { ok: true });
+      fx2.missions.recordCritique(rec.missionId, {
+        valid: true, findings, modeOpinion: null, promptHash: 'p', hashes: {},
+        violations: [], criticProviderId: 'mock', reconciliation: {},
+      });
+      return { fx: fx2, id: rec.missionId };
+    };
+
+    const a = withCritique('a goal that gets refused',
+      [{ code: 'CRITERION_BEYOND_GOAL', detail: 'wider than asked' }]);
+    const before = pendingDecision(a.fx.missions, a.id);
+    check('RF1: before any answer the stop is pending, as it should be',
+      !!before && before.layer === 'oracle', String(before?.layer));
+
+    a.fx.missions.recordPlanStopDecision(a.id, {
+      version: 1, rendered: ['CRITERION_BEYOND_GOAL: wider than asked'],
+      findingsDigest: before!.digest, decision: 'ORACLE_REFUSED',
+      decidedBy: 'user-confirmed', deferred: false,
+    });
+    check('RF2: a refusal a PERSON made ends the stop it answered',
+      pendingDecision(a.fx.missions, a.id) === null,
+      JSON.stringify(pendingDecision(a.fx.missions, a.id)?.layer ?? null));
+    check('RF2b: and the subject says what the next move is, not just that it is over',
+      /was refused; the next move is a recompile/
+        .test(consentSubject(a.fx.missions, a.id, 'oracle')!.detail),
+      consentSubject(a.fx.missions, a.id, 'oracle')!.detail);
+    check('RF2c: the list stops marking it as waiting on a human',
+      awaitingHuman(a.fx.missions, a.id) === false, 'no longer waiting');
+
+    // The engine records REFUSED_NO_CONSENT with 'nobody yet' when it stops
+    // for want of a decision. Treating that as an answer would HIDE a stop.
+    const b = withCritique('a goal nobody has answered',
+      [{ code: 'WEAK_RUBRIC', detail: 'no threshold' }]);
+    b.fx.missions.recordPlanStopDecision(b.id, {
+      version: 1, rendered: ['WEAK_RUBRIC: no threshold'],
+      decision: 'REFUSED_NO_CONSENT', decidedBy: 'nobody yet', deferred: true,
+    });
+    check('RF3: the engine stopping for want of consent is NOT an answer',
+      pendingDecision(b.fx.missions, b.id) !== null, 'still waiting on a person');
+
+    // A refusal answers the findings that were on screen. A different critique
+    // of the same version is a different question and gets asked.
+    const c = withCritique('a goal recritiqued',
+      [{ code: 'WEAK_RUBRIC', detail: 'first round' }]);
+    const firstDigest = pendingDecision(c.fx.missions, c.id)!.digest;
+    c.fx.missions.recordPlanStopDecision(c.id, {
+      version: 1, rendered: ['WEAK_RUBRIC: first round'], findingsDigest: firstDigest,
+      decision: 'ORACLE_REFUSED', decidedBy: 'user-confirmed', deferred: false,
+    });
+    check('RF4: that refusal ends that stop',
+      pendingDecision(c.fx.missions, c.id) === null, 'ended');
+    c.fx.missions.recordCritique(c.id, {
+      valid: true, findings: [{ code: 'EVALUATOR_DOES_NOT_PROVE_STATEMENT', detail: 'new objection' }],
+      modeOpinion: null, promptHash: 'p2', hashes: {}, violations: [],
+      criticProviderId: 'mock', reconciliation: {},
+    });
+    const after = pendingDecision(c.fx.missions, c.id);
+    check('RF5: but a NEW critique of the same version is a new question, and is asked',
+      !!after && after.digest !== firstDigest
+      && after.findings[0].code === 'EVALUATOR_DOES_NOT_PROVE_STATEMENT',
+      JSON.stringify(after?.findings?.map((f: any) => f.code)));
+
+    // Over HTTP, end to end: refuse, then confirm the stop is gone from the view.
+    const d = withCritique('a goal refused over http',
+      [{ code: 'WEAK_RUBRIC', detail: 'no threshold given' }]);
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: d.fx.root, stateRoot: d.fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const view = await get(`${server.url}/api/missions/M-0001`, auth);
+      const r = await post(server, '/api/missions/M-0001/confirm', {
+        kind: 'oracle', version: 1,
+        findingsDigest: view.json.pendingDecision.digest, decision: 'REFUSE',
+      });
+      const again = await get(`${server.url}/api/missions/M-0001`, auth);
+      check('RF6: refusing over HTTP clears the pending block from the mission view',
+        r.status === 200 && again.json.pendingDecision === null,
+        `${r.status} ${JSON.stringify(again.json?.pendingDecision?.layer ?? null)}`);
+      check('RF6b: the recorded decision carries the digest of what was answered',
+        d.fx.missions.events.read(d.id).some((e: any) => e.type === 'PLAN_STOP_DECISION'
+          && e.payload.findingsDigest === view.json.pendingDecision.digest),
+        'digest recorded with the decision');
+    } finally { await server?.close(); }
+  }
+
+  section('a second compile answers the critic rather than repeating itself');
+  {
+    // `compileMissionOracle` compiled from scratch every time, so the console's
+    // 'send the findings back' sent them nowhere. The compiler has always had a
+    // prompt for answering findings; nothing reached it from the web.
+    const fx3 = fixture();
+    const rec = fx3.missions.create('a goal already compiled', 'base0');
+    const oracle = {
+      missionId: rec.missionId, version: 1, acceptanceMode: 'REQUIRED_CONSENT',
+      compiledAt: 'now', compilerProviderId: 'mock', criticProviderId: 'mock',
+      criteria: [{ criterionId: `${rec.missionId}/C-0001`, type: 'EXECUTABLE', statement: 's',
+        evaluator: { kind: 'command', command: 'unitTest', expect: 'PASSED' },
+        affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'] }],
+    };
+    fx3.missions.recordOracle(rec.missionId, oracle as any, 'h', { ok: true });
+    fx3.missions.recordCritique(rec.missionId, {
+      valid: true, findings: [{ code: 'WEAK_RUBRIC', detail: 'no threshold' }],
+      modeOpinion: null, promptHash: 'p', hashes: {}, violations: [],
+      criticProviderId: 'mock', reconciliation: {},
+    });
+    // Two rounds already spent. The guard is reached BEFORE any provider is
+    // invoked, so this proves the delegation without calling a model.
+    for (const attempt of [1, 2]) {
+      fx3.missions.recordRecompile(rec.missionId, {
+        fromVersion: 1, findingsForwarded: 1, attempt, limit: MAX_ORACLE_RECOMPILES,
+      });
+    }
+    const ctx = { missions: fx3.missions, engine: null as any, projectRoot: fx3.root,
+      context: { commands: {}, failingChecks: [], findings: [] }, policy: null as any };
+    const res: any = await compileMissionOracle(ctx as any, rec.missionId);
+    check('RC1: a compile over an unaccepted oracle IS a recompile',
+      res.ok === false && res.kind === 'RECOMPILE_LIMIT',
+      `${res.kind}`);
+    check('RC2: and the limit is explained, not just enforced',
+      /needs a person, not another round/.test(res.detail), res.detail);
+
+    const direct: any = await recompileMissionOracle(ctx as any, rec.missionId);
+    check('RC3: the CLI and the console reach the SAME operation, with the same limit',
+      direct.ok === false && direct.kind === 'RECOMPILE_LIMIT', direct.kind);
+
+    const fresh = fixture();
+    const r2 = fresh.missions.create('never compiled', 'base0');
+    const none: any = await recompileMissionOracle({ ...ctx, missions: fresh.missions } as any,
+      r2.missionId);
+    check('RC4: a mission with no oracle cannot be recompiled into one',
+      none.ok === false && none.kind === 'NO_ORACLE', none.kind);
   }
 }

@@ -508,6 +508,8 @@ const NEXT_STEP = {
     detail: 'pick the mission back up where it stopped' },
 };
 
+const a2s = (v) => (v == null ? 'unknown' : String(v));
+
 function renderActions(m) {
   const slot = $('actslot');
   if (!slot || m.terminated) return;
@@ -520,6 +522,27 @@ function renderActions(m) {
   // raced on one mission: same node built twice, paid for twice, and the
   // slower one wrote an integration into a mission the faster had terminated.
   // The state comes from the server, so every tab agrees.
+  // Said before anything else, because it changes what every other control on
+  // this page means. A mission whose runner was killed is not idle; it is
+  // stopped mid-task, and the page used to look exactly like one that was
+  // merely slow.
+  if (m.abandonedRun) {
+    const a = document.createElement('div');
+    a.className = 'pending';
+    a.innerHTML = '<h3>The runner for this mission is gone</h3>'
+      + '<p class="dim">pid ' + esc(a2s(m.abandonedRun.pid)) + ' claimed it at '
+      + esc(String(m.abandonedRun.since).replace('T', ' ').slice(0, 19))
+      + ' and is no longer running'
+      + (m.abandonedRun.stranded.length
+        ? ', leaving ' + m.abandonedRun.stranded.length
+          + ' task(s) mid-flight: ' + esc(m.abandonedRun.stranded
+            .map((t) => String(t).split('/').pop()).join(', '))
+        : '')
+      + '.<br>Nothing was lost — the log is the record. Starting the run again '
+      + 'picks it up from there.</p>';
+    slot.appendChild(a);
+  }
+
   if (m.running) {
     const b = document.createElement('div');
     b.className = 'busy';

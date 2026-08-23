@@ -14,7 +14,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AddressInfo } from 'net';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { EventStore, StoredEvent } from '../engine/events';
 import { readConfig, writeConfig } from '../config';
 import { MissionRegistry } from '../mission/registry';
@@ -37,6 +37,7 @@ import {
 } from '../mission/chat';
 import { EventTailer, cursorFromLastId, eventId, SSE_CHANNEL } from './tail';
 import { UI_HTML } from './ui';
+import { systemdUserEnv } from '../engine/isolation';
 import {
   listProjects, freeSlug, slugForUrl, slugify, isProject, scopeFor, ProjectScope,
 } from '../projects';
@@ -219,6 +220,43 @@ export function zeusCliArgv(): string[] {
   return [path.resolve(__dirname, '..', 'cli.js')];
 }
 
+/**
+ * Starts a mission runner that OUTLIVES the console.
+ *
+ * `detached: true` calls setsid(), which leaves the terminal session. systemd
+ * does not track sessions — it tracks cgroups — so a supposedly detached
+ * runner stayed inside zeus-web's control group, and one `systemctl restart`
+ * SIGKILLed a mission four minutes into its first task. The design says a
+ * mission outlives the console; the implementation only outlived a terminal.
+ *
+ * A transient user unit genuinely leaves: it belongs to the user manager, not
+ * to whatever started it. Where there is no user bus to reach — no lingering
+ * session, no /run/user/<uid> — the plain detached spawn is still used, and
+ * the caller is told which of the two happened rather than left to assume the
+ * stronger one.
+ */
+function spawnInOwnUnit(projectRoot: string, missionId: string, argv: string[],
+  out: number | 'ignore'): { ok: boolean; pid: number | null; detail: string } | null {
+  const env = systemdUserEnv();
+  if (!env.XDG_RUNTIME_DIR) return null;
+  const unit = `zeus-run-${missionId.replace(/[^A-Za-z0-9]+/g, '-')}-${Date.now()}`;
+  const r = spawnSync('systemd-run', [
+    '--user', '--quiet', '--collect', `--unit=${unit}`,
+    `--working-directory=${projectRoot}`,
+    ...argv, 'mission', 'run', missionId,
+  ], { encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
+    stdio: ['ignore', out, out] });
+  if (r.error || r.status !== 0) return null;
+  const shown = spawnSync('systemctl', ['--user', 'show', unit, '-p', 'MainPID'],
+    { encoding: 'utf8', timeout: 15_000, env: { ...process.env, ...env } });
+  const pid = Number((shown.stdout ?? '').trim().split('=')[1]);
+  return {
+    ok: true,
+    pid: Number.isFinite(pid) && pid > 0 ? pid : null,
+    detail: `started as ${unit}, a unit of its own — it survives a restart of this console`,
+  };
+}
+
 export function defaultSpawnRun(projectRoot: string, missionId: string):
   { ok: boolean; pid: number | null; detail: string } {
   const args = zeusCliArgv();
@@ -237,6 +275,12 @@ export function defaultSpawnRun(projectRoot: string, missionId: string):
     out = fs.openSync(logFile, 'a');
   } catch { out = 'ignore'; logFile = null; }
   try {
+    const own = spawnInOwnUnit(projectRoot, missionId, [process.execPath, ...args], out);
+    if (own) {
+      if (typeof out === 'number') fs.closeSync(out);
+      return { ...own,
+        detail: `${own.detail}${logFile ? `; output at ${logFile}` : ''}` };
+    }
     const child = spawn(process.execPath, [...args, 'mission', 'run', missionId], {
       cwd: projectRoot, detached: true,
       stdio: ['ignore', out, out],
@@ -244,7 +288,9 @@ export function defaultSpawnRun(projectRoot: string, missionId: string):
     child.unref();
     if (typeof out === 'number') fs.closeSync(out);
     return { ok: true, pid: child.pid ?? null,
-      detail: `spawned pid ${child.pid}${logFile ? `; output at ${logFile}` : ''}` };
+      detail: `spawned pid ${child.pid} as a child of this console — no user bus to `
+        + 'give it a unit of its own, so restarting the console will kill it'
+        + `${logFile ? `; output at ${logFile}` : ''}` };
   } catch (e: any) {
     if (typeof out === 'number') { try { fs.closeSync(out); } catch { /* already gone */ } }
     return { ok: false, pid: null, detail: e?.message ?? String(e) };
@@ -496,6 +542,20 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
             const held = liveRun(sc.missions, id);
             return held && held.alive
               ? { kind: 'run', since: held.startedAt, pid: held.pid } : null;
+          })(),
+          // A runner that claimed this mission and is gone.
+          //
+          // A killed run leaves a mission indistinguishable from a slow one:
+          // phase RUNNING, nothing pending, nothing blocked, and a task frozen
+          // wherever it stood. The claim is on the log and the process is not,
+          // which is a fact worth saying rather than a silence to sit in.
+          abandonedRun: (() => {
+            const held = liveRun(sc.missions, id);
+            if (!held || held.alive) return null;
+            const rec = sc.missions.mission(id);
+            if (!rec || rec.terminated) return null;
+            const stranded = rec.spawned.filter((t) => !t.outcome).map((t) => t.taskId);
+            return { pid: held.pid, since: held.startedAt, stranded };
           })(),
           // Reconstructed, not remembered. A refresh, a reconnect or arriving
           // an hour later all show the same thing, because it comes from the

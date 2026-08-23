@@ -223,6 +223,7 @@ export async function webSuite(): Promise<void> {
       // the console read one object rather than two that could drift.
       delete apiCore.phase; delete apiCore.cost; delete apiCore.pendingDecision;
       delete apiCore.usage; delete apiCore.running; delete apiCore.blockedBy;
+      delete apiCore.abandonedRun;
       check('WS1: the API mission record deep-equals the CLI view — one serializer',
         JSON.stringify(apiCore) === JSON.stringify(JSON.parse(JSON.stringify(view))),
         'shapes identical');
@@ -2793,6 +2794,82 @@ export async function webSuite(): Promise<void> {
       'busy panel present');
     check('RL10: and leaves only a way to stop it',
       /slot\.appendChild\(stop\);\s*\n\s*return;/.test(UI_HTML), 'cancel only');
+  }
+
+  section('a mission whose runner was killed says so');
+  {
+    // `detached: true` calls setsid(), which leaves the terminal SESSION.
+    // systemd tracks cgroups, not sessions, so the runner stayed inside
+    // zeus-web's control group and one `systemctl restart` SIGKILLed a mission
+    // four minutes into its first task. On the page it looked exactly like a
+    // mission that was merely slow: phase RUNNING, nothing pending, nothing
+    // blocked, and a task frozen in DESIGN.
+    const fx = fixture();
+    const rec = fx.missions.create('a goal whose runner was killed', 'base0');
+    const id = rec.missionId;
+    fx.missions.recordRunStarted(id, 999_999);
+    fx.missions.taskSpawned(id, 'p/T-0001', `${id}/N-0001`, 1);
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const v = await get(`${server.url}/api/missions/M-0001`, auth);
+      check('ORP1: the mission reports the claim nobody is holding',
+        v.json.abandonedRun && v.json.abandonedRun.pid === 999_999,
+        JSON.stringify(v.json?.abandonedRun));
+      check('ORP2: and which tasks it left mid-flight',
+        v.json.abandonedRun.stranded.length === 1
+        && v.json.abandonedRun.stranded[0] === 'p/T-0001',
+        JSON.stringify(v.json?.abandonedRun?.stranded));
+      check('ORP3: it is NOT reported as running — the process is gone',
+        v.json.running === null, JSON.stringify(v.json?.running));
+
+      // A claim that was released is not an abandonment.
+      fx.missions.recordRunFinished(id, 999_999, 'PARTIAL');
+      const after = await get(`${server.url}/api/missions/M-0001`, auth);
+      check('ORP4: a released claim leaves nothing to report',
+        after.json.abandonedRun === null, JSON.stringify(after.json?.abandonedRun));
+
+      // Nor is a mission that ended: its runner is supposed to be gone.
+      const fx2 = fixture();
+      const r2 = fx2.missions.create('a finished mission', 'base0');
+      fx2.missions.recordRunStarted(r2.missionId, 999_998);
+      fx2.missions.cancel(r2.missionId, 'done with it');
+      let s2: RunningServer | null = null;
+      try {
+        s2 = await startWebServer({
+          projectRoot: fx2.root, stateRoot: fx2.state, projectId: 'p', port: 0 });
+        const t = await get(`${s2.url}/api/missions/M-0001`,
+          { authorization: `Bearer ${s2.token}` });
+        check('ORP5: a terminated mission is not an abandoned one',
+          t.json.abandonedRun === null, JSON.stringify(t.json?.abandonedRun));
+      } finally { await s2?.close(); }
+    } finally { await server?.close(); }
+
+    // Against the RENDERED string, not the phrase — the first version matched
+    // a comment forty lines above the code it was trying to order.
+    check('ORP6: the console says it before anything else on the page',
+      UI_HTML.indexOf('The runner for this mission is gone')
+        < UI_HTML.indexOf('</b> is running on this mission'), 'stated first');
+    check('ORP7: and says nothing was lost, because the log is the record',
+      UI_HTML.includes('Nothing was lost \u2014 the log is the record'), 'reassured');
+  }
+
+  section('a runner outlives the console that started it');
+  {
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'web', 'server.ts'), 'utf8');
+    check('OU1: the runner is started as a transient unit of its own where one is possible',
+      /systemd-run/.test(src) && /'--user', '--quiet', '--collect'/.test(src),
+      'own unit attempted');
+    check('OU2: with no user bus to reach, the plain spawn is used AND said to be weaker',
+      /no user bus to /.test(src)
+      && /restarting the console will kill it/.test(src),
+      'the fallback admits what it is');
+    check('OU3: the stronger path says it survives, so the two are told apart',
+      /it survives a restart of this console/.test(src), 'the strong path says so');
   }
 
   section('a long operation is not answered by a proxy');

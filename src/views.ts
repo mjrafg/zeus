@@ -11,6 +11,7 @@
  * in-memory object a caller could have influenced.
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
 import { MissionRegistry } from './mission/registry';
 import { MissionRecord } from './mission/types';
@@ -164,6 +165,114 @@ export function costBreakdown(missions: MissionRegistry, missionId: string): Cos
   }
   const totalUsd = Number(Object.values(byPhase).reduce((a, b) => a + b, 0).toFixed(6));
   return { byPhase, totalUsd, unmeteredCalls, isLowerBound: unmeteredCalls > 0 };
+}
+
+/**
+ * Everything on the record about one mission, as one readable document.
+ *
+ * The mission's own log, every task it spawned, the project chat from the
+ * moment it began, and the runner's own output. Assembled for a person to
+ * paste somewhere — into an issue, a message, another model — which is why it
+ * is text rather than JSON: the reader is not always a program.
+ *
+ * WHAT IS NOT HERE is stated at the top of the document rather than left to be
+ * discovered. Prompts and raw model replies are not stored anywhere: events
+ * carry promptHash and promptBytes, a fingerprint and a size, never the words.
+ * What the agents PRODUCED — designs, findings, reviews, constraints — is
+ * here in full, because that is what the log keeps.
+ */
+export function missionBundle(missions: MissionRegistry, missionId: string,
+  opts: { projectRoot?: string; now?: string } = {}): string | null {
+  const rec = missions.mission(missionId);
+  if (!rec) return null;
+
+  const lines: string[] = [];
+  const rule = (title: string) => {
+    lines.push('');
+    lines.push(`${'\u2500'.repeat(8)} ${title} ${'\u2500'.repeat(8)}`);
+    lines.push('');
+  };
+  const dump = (events: StoredEvent[]) => {
+    for (const e of events) {
+      lines.push(`[${e.seq}] ${e.ts} ${e.type}`);
+      const payload = JSON.stringify(e.payload ?? {}, null, 1);
+      for (const l of payload.split('\n')) lines.push(`    ${l}`);
+      lines.push('');
+    }
+  };
+
+  const missionLog = missions.events.read(missionId);
+  const startedAt = missionLog.length ? missionLog[0].ts : '';
+  const taskIds = rec.spawned.map((s) => s.taskId);
+
+  const taskLogs: Array<{ taskId: string; events: StoredEvent[] }> = [];
+  for (const taskId of taskIds) {
+    try { taskLogs.push({ taskId, events: missions.events.read(taskId) }); }
+    catch { taskLogs.push({ taskId, events: [] }); }
+  }
+
+  let chat: StoredEvent[] = [];
+  // The project id is the mission id's first segment. The chat stream lives
+  // beside the missions, under the same project.
+  const chatId = `${missionId.split('/')[0]}/CHAT`;
+  try {
+    chat = missions.events.read(chatId).filter((e) => !startedAt || e.ts >= startedAt);
+  } catch { chat = []; }
+
+  let runLog = '';
+  let runLogPath: string | null = null;
+  if (opts.projectRoot) {
+    runLogPath = path.join(opts.projectRoot, '.zeus', 'logs',
+      `mission-run-${missionId.split('/').pop()}.log`);
+    try { runLog = fs.readFileSync(runLogPath, 'utf8'); } catch { runLog = ''; }
+  }
+
+  lines.push('ZEUS MISSION TRANSCRIPT');
+  lines.push(`mission    ${missionId}`);
+  lines.push(`goal       ${rec.goal}`);
+  lines.push(`started    ${startedAt || 'unknown'}`);
+  lines.push(`generated  ${opts.now ?? new Date().toISOString()}`);
+  lines.push(`state      ${rec.terminated
+    ? `${rec.achievement} / ${rec.terminationReason}` : 'not terminated'}`);
+  lines.push('');
+  lines.push('CONTAINS');
+  lines.push(`  mission log        ${missionLog.length} event(s)`);
+  lines.push(`  task logs          ${taskLogs.length} task(s), `
+    + `${taskLogs.reduce((a, t) => a + t.events.length, 0)} event(s)`);
+  lines.push(`  project chat       ${chat.length} event(s) since this mission began`);
+  lines.push(`  runner output      ${runLog ? `${runLog.split('\n').length} line(s)` : 'none on disk'}`);
+  lines.push('');
+  lines.push('NOT CONTAINED');
+  lines.push('  The prompts sent to models and their raw replies are not stored. Events');
+  lines.push('  carry promptHash and promptBytes — a fingerprint and a size, never the');
+  lines.push('  words. What the agents PRODUCED is here in full: designs, findings,');
+  lines.push('  reviews, constraints, checks and their outcomes.');
+  lines.push('');
+  lines.push('  Event payloads passed the redacting sink when they were written. The');
+  lines.push('  runner output did NOT — it is the process\u2019s own stdout, kept as it');
+  lines.push('  was printed. Read it before sending this anywhere.');
+  lines.push('');
+  lines.push('  The chat stream is per PROJECT, not per mission, so messages about other');
+  lines.push('  missions in the same window are included rather than guessed at.');
+
+  rule(`mission ${missionId}`);
+  dump(missionLog);
+
+  for (const t of taskLogs) {
+    rule(`task ${t.taskId}`);
+    if (!t.events.length) lines.push('(no log on disk for this task)');
+    else dump(t.events);
+  }
+
+  rule(`project chat since ${startedAt || 'the beginning'}`);
+  if (!chat.length) lines.push('(nothing)');
+  else dump(chat);
+
+  rule(`runner output${runLogPath ? ` \u2014 ${runLogPath}` : ''}`);
+  lines.push(runLog || '(no runner output on disk; the mission may never have been run,'
+    + ' or was run before output was captured)');
+
+  return lines.join('\n');
 }
 
 /** The oracle a mission accepted, or null. Read from the record, not a cache. */

@@ -21,7 +21,7 @@ import { MissionRegistry } from '../mission/registry';
 import { isMissionId, isTaskId, scopeOf } from '../mission/types';
 import {
   missionListView, missionReportView, missionStatusView, missionPhase,
-  costBreakdown, integrationLine, spendReader,
+  costBreakdown, integrationLine, spendReader, missionBundle,
 } from '../views';
 import { ensureToken, offeredToken, tokenMatches } from './token';
 import {
@@ -116,6 +116,7 @@ export const READ_ROUTES = [
   'GET /api/missions/:id',
   'GET /api/missions/:id/events',
   'GET /api/missions/:id/report',
+  'GET /api/missions/:id/bundle',
   'GET /api/tasks/:id',
   'GET /api/files/diff',
   'GET /api/missions/:id/consent',
@@ -428,7 +429,29 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         return;
       }
 
-      const missionMatch = /^\/api\/missions\/([^/]+)(\/(events|report))?$/.exec(url.pathname);
+          // The whole record of one mission as one document, for pasting
+      // somewhere. text/plain because the reader is often a person, and a
+      // person cannot paste a JSON envelope into a message and be understood.
+      const bundleMatch = /^\/api\/missions\/([^/]+)\/bundle$/.exec(url.pathname);
+      if (method === 'GET' && bundleMatch) {
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const id = resolveId(decodeURIComponent(bundleMatch[1]), sc.projectId);
+        if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
+        const text = missionBundle(sc.missions, id, { projectRoot: sc.root });
+        if (text === null) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
+        const body = Buffer.from(text, 'utf8');
+        res.writeHead(200, {
+          'content-type': 'text/plain; charset=utf-8',
+          'content-length': body.length,
+          'content-disposition':
+            `attachment; filename="${id.replace('/', '-')}-transcript.txt"`,
+        });
+        res.end(body);
+        return;
+      }
+
+  const missionMatch = /^\/api\/missions\/([^/]+)(\/(events|report))?$/.exec(url.pathname);
       if (method === 'GET' && missionMatch) {
         const sc = scoped(url);
         if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }

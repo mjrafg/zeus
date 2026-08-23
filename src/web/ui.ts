@@ -212,6 +212,7 @@ async function loadDetail() {
     + '<tr><th>cost</th><td>' + costCell(m) + '</td></tr>'
     + '<tr><th>budget</th><td>' + budgetCell(m) + '</td></tr></table>';
 
+  h += '<div id="transcript" class="acts"></div>';
   h += '<div id="actslot"></div>';
   if (o) {
     h += '<div id="pendingslot"></div>';
@@ -236,6 +237,7 @@ async function loadDetail() {
     h += '</table>';
   }
   $('detail').innerHTML = h;
+  wireTranscript(m);
   wireBudgetControl(m);
   renderActions(m);
   if (m.pendingDecision) renderPending(m, m.pendingDecision);
@@ -253,6 +255,86 @@ function costCell(m) {
       + '</span>'
     : '<br><span class="dim">nothing spent yet</span>';
   return h;
+}
+
+/**
+ * The whole record of one mission, on the clipboard or on disk.
+ *
+ * Everything the log holds: the mission's own events, every task it spawned,
+ * the project chat since it began, and the runner's own output. Reading a
+ * mission by scrolling a feed and opening event payloads one at a time is not
+ * reading it; this is the thing to paste into a message, an issue, or another
+ * model when you want a second opinion on what actually happened.
+ *
+ * Copy AND download, because the two fail differently. The clipboard needs a
+ * secure context and balks at some sizes; a download always works but leaves
+ * a file to find. Whichever is refused, the other is still there.
+ */
+function wireTranscript(m) {
+  const slot = $('transcript');
+  if (!slot) return;
+  const url = scope('/missions/' + encodeURIComponent(m.missionId.split('/').pop()) + '/bundle');
+
+  const copy = document.createElement('button');
+  copy.className = 'ghost';
+  copy.textContent = 'copy full transcript';
+  copy.title = 'every event on this mission, its tasks, the chat and the runner output';
+  copy.onclick = async () => {
+    const was = copy.textContent;
+    copy.disabled = true;
+    copy.textContent = 'fetching\u2026';
+    try {
+      const r = await fetch('/api' + url, { headers: { authorization: 'Bearer ' + TOKEN } });
+      if (!r.ok) throw new Error('the server answered ' + r.status);
+      const text = await r.text();
+      await writeClipboard(text);
+      const kb = Math.max(1, Math.round(text.length / 1024));
+      copy.textContent = 'copied \u2014 ' + kb + ' KB';
+      bubble('Copied the full transcript of <b>' + esc(m.missionId) + '</b> \u2014 '
+        + kb + ' KB.<br><span class="dim">prompts and raw model replies are not in it; '
+        + 'the log keeps a hash and a size, never the words</span>', false);
+    } catch (e) {
+      copy.textContent = was;
+      bubble('<span class="bad">could not copy: ' + esc(String(e && e.message || e))
+        + '</span><br><span class="dim">use download instead</span>', false);
+    } finally {
+      copy.disabled = false;
+      setTimeout(() => { copy.textContent = was; }, 4000);
+    }
+  };
+  slot.appendChild(copy);
+
+  const dl = document.createElement('a');
+  dl.className = 'ref';
+  dl.style.marginLeft = '8px';
+  dl.href = '/api' + url + (url.includes('?') ? '&' : '?') + 'token='
+    + encodeURIComponent(TOKEN);
+  dl.textContent = 'download it instead';
+  slot.appendChild(dl);
+}
+
+/**
+ * The clipboard, with the fallback that works when it is not available.
+ *
+ * navigator.clipboard needs a secure context and is not there on a plain-http
+ * origin, which is exactly how someone reaching this over a tunnel or a LAN
+ * address arrives. The old execCommand path is deprecated and still works.
+ */
+async function writeClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '-1000px';
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(ta);
+  if (!ok) throw new Error('the browser refused the clipboard');
 }
 
 /**

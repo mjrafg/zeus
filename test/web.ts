@@ -24,7 +24,7 @@ import {
   eventId, parseEventId, cursorFromLastId, since, advance, SSE_CHANNEL,
 } from '../src/web/tail';
 import { UI_HTML } from '../src/web/ui';
-import { missionStatusView, missionReportView } from '../src/views';
+import { missionStatusView, missionReportView, missionBundle } from '../src/views';
 import {
   findingsDigest, pendingDecision, awaitingHuman, consentSubject,
 } from '../src/mission/consent';
@@ -249,7 +249,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 11 && WRITE_ROUTES.length === 12,
+      READ_ROUTES.length === 12 && WRITE_ROUTES.length === 12,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -2036,11 +2036,19 @@ export async function webSuite(): Promise<void> {
         JSON.stringify([bad.status, bad.json?.error]));
     } finally { await server?.close(); }
 
+    // A COUNT of fetch sites was the first version of this, and it broke the
+    // moment a legitimate third one arrived. The property is not how many
+    // callers there are; it is that the WRITE helper scopes on its own, so a
+    // write cannot be sent unscoped by forgetting, and that nothing scopes a
+    // second time on top of it.
     check('WSC7: the UI scopes writes in ONE place, so no call site can forget',
       /fetch\('\/api' \+ scope\(p\)/.test(UI_HTML)
-      && (UI_HTML.match(/fetch\('\/api'/g) || []).length === 2
       && !/apiPost\(scope\(/.test(UI_HTML),
       'apiPost scopes centrally and nothing double-scopes');
+    check('WSC7b: and the one read that bypasses the helper scopes its own url',
+      /const url = scope\('\/missions\/' \+ encodeURIComponent/.test(UI_HTML)
+      && /fetch\('\/api' \+ url, \{ headers/.test(UI_HTML),
+      'the transcript fetch is scoped too');
   }
 
   section('the console can advance the mission it just created');
@@ -2998,6 +3006,69 @@ export async function webSuite(): Promise<void> {
     const close = uiSrc.lastIndexOf('`');
     check('PV4: no stray backtick inside the UI template — it would truncate the page',
       !uiSrc.slice(open + 1, close).includes('`'), 'template intact');
+  }
+
+  section('the whole record of a mission, as one document');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal worth reading afterwards', 'base0');
+    const id = rec.missionId;
+    fx.store.append({ taskId: `p/CHAT`, type: 'CHAT_MESSAGE',
+      payload: { message: 'do the thing' } });
+    fx.missions.taskSpawned(id, `p/T-0001`, `${id}/N-0001`, 1);
+    fx.store.append({ taskId: `p/T-0001`, type: 'DESIGN_RECORDED',
+      payload: { design: { plan: 'a design the agent produced' } } });
+    fx.store.append({ taskId: `p/T-0001`, type: 'AGENT_FINISHED',
+      payload: { role: 'implementer', promptHash: 'sha256:abc', promptBytes: 1234 } });
+
+    const text = missionBundle(fx.missions, id, { now: '2026-01-01T00:00:00.000Z' })!;
+    check('TR1: the mission log is in it',
+      text.includes('MISSION_CREATED') && text.includes(id), 'mission events present');
+    check('TR2: and every task it spawned, with what the agents produced',
+      text.includes(`task p/T-0001`)
+      && text.includes('a design the agent produced'),
+      'task events present');
+    check('TR3: and the project chat from the moment the mission began',
+      text.includes('do the thing'), 'chat present');
+    check('TR4: it says plainly that prompts and raw replies are NOT in it',
+      /promptHash and promptBytes/.test(text)
+      && /never the\s+words/.test(text), 'the gap is stated, not discovered');
+    check('TR5: and that the runner output never passed the redacting sink',
+      /runner output did NOT/.test(text)
+      && /Read it before sending this anywhere/.test(text), 'warned');
+    check('TR6: and that the chat stream is per project, not per mission',
+      /chat stream is per PROJECT/.test(text), 'scope stated');
+    check('TR7: it counts what it contains, so a truncated paste is obvious',
+      /mission log        \d+ event\(s\)/.test(text), 'inventory present');
+    check('TR8: an unknown mission yields nothing rather than an empty document',
+      missionBundle(fx.missions, `p/M-9999`) === null, 'null for unknown');
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const r = await get(`${server.url}/api/missions/M-0001/bundle`, auth);
+      check('TR9: the route serves it as text a person can paste, not as JSON',
+        r.status === 200 && r.body.startsWith('ZEUS MISSION TRANSCRIPT'),
+        `${r.status} ${r.body.slice(0, 30)}`);
+      const missing = await get(`${server.url}/api/missions/M-9999/bundle`, auth);
+      check('TR10: an unknown mission is 404 on the route too',
+        missing.status === 404, String(missing.status));
+      const noAuth = await get(`${server.url}/api/missions/M-0001/bundle`);
+      check('TR11: and it is behind the token like every other read',
+        noAuth.status === 401, String(noAuth.status));
+    } finally { await server?.close(); }
+
+    check('TR12: the route is advertised in the read table',
+      (READ_ROUTES as readonly string[]).includes('GET /api/missions/:id/bundle'),
+      'advertised');
+    check('TR13: the console offers both, because clipboard and download fail differently',
+      UI_HTML.includes('copy full transcript') && UI_HTML.includes('download it instead'),
+      'both offered');
+    check('TR14: and falls back when the clipboard API is not there',
+      UI_HTML.includes('window.isSecureContext') && UI_HTML.includes('execCommand'),
+      'fallback present');
   }
 
   section('a node whose work is outside the tree still counts');

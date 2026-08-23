@@ -174,6 +174,36 @@ export class Engine {
     return this.routing.find((r) => r.stage === stage)!;
   }
 
+  /**
+   * The provider INSTANCE a stage's route names.
+   *
+   * The first cut of routing passed the model and the effort but left the
+   * provider object where it was, keyed by role. So a project that routed its
+   * oracle to codex sent a codex model name to the claude CLI, which failed —
+   * the trace caught it on the first real call, which is what the trace is
+   * for. A route names a provider; that has to be the provider that runs.
+   *
+   * Instances are indexed by their own id rather than by role, because a role
+   * is not a provider: the reviewer's instance and the oracle critic's may be
+   * the same object serving two stages.
+   */
+  providerFor(stage: PipelineStage): Provider {
+    const want = this.routeFor(stage).provider;
+    const all = [this.opts.providers.planner, this.opts.providers.implementer,
+      this.opts.providers.reviewer];
+    const found = all.find((p) => p.id === want);
+    if (found) return found;
+    // An engine given ONE provider has no ambiguity to protect against: a mock
+    // run, or a single-provider install, cannot pick the wrong one because
+    // there is no other one. Substituting there is not a silent wrong choice.
+    const distinct = [...new Set(all.map((p) => p.id))];
+    if (distinct.length === 1) return all[0];
+    // With several to choose from, guessing is exactly the bug this method
+    // exists to stop. Refuse in the caller's terms rather than substituting.
+    throw new Error(`routing sends ${stage} to "${want}", which this engine has no provider for`
+      + ` (it holds ${distinct.join(', ')})`);
+  }
+
   constructor(readonly opts: EngineOptions) {
     this.stateRoot = opts.stateRoot
       ?? path.resolve(opts.projectRoot, opts.config.paths?.state ?? '.zeus/state');
@@ -459,13 +489,13 @@ export class Engine {
 
   private async agent(role: Role, rec: TaskRecord, prompt: string, readOnly: boolean,
     stage?: PipelineStage): Promise<AgentResponse> {
-    const provider = role === 'planner' ? this.opts.providers.planner
-      : role === 'implementer' ? this.opts.providers.implementer : this.opts.providers.reviewer;
     // A stage is more specific than a role and is used when the caller knows
     // one: `repair` and `implementer` are both implementers, and an operator
     // may want a cheaper model for the retry than for the first attempt.
-    const route = this.routeFor(stage ?? (role === 'planner' ? 'planner'
-      : role === 'implementer' ? (rec.repair ? 'repair' : 'implementer') : 'reviewer'));
+    const resolvedStage = stage ?? (role === 'planner' ? 'planner'
+      : role === 'implementer' ? (rec.repair ? 'repair' : 'implementer') : 'reviewer');
+    const route = this.routeFor(resolvedStage);
+    const provider = this.providerFor(resolvedStage);
     // ONE TRACE RECORD PER INVOCATION, opened BEFORE the provider is called.
     //
     // A task is not one model interaction: a single task calls a designer, an

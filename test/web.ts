@@ -3070,6 +3070,20 @@ export async function webSuite(): Promise<void> {
       /rec\.repair \? 'repair' : 'implementer'/.test(orch), 'repair is its own stage');
     check('RV5: the table is resolved once per engine, not per call',
       /readonly routing: ResolvedRoute\[\]/.test(orch), 'resolved at construction');
+    check('RV6b: a route names a PROVIDER, and that is the provider that runs',
+      /providerFor\(stage: PipelineStage\): Provider/.test(orch)
+      && /const provider = this\.providerFor\(resolvedStage\);/.test(orch),
+      'the route picks the instance');
+    const ops = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    check('RV6c: and the mission-level calls no longer take theirs from the role',
+      !/engine\.opts\.providers\./.test(ops)
+      && /provider: engine\.providerFor\(stage\)/.test(ops),
+      'no role-keyed providers left');
+    check('RV6d: a route to a provider this engine lacks is refused, not substituted',
+      /which this engine has no provider for/.test(orch),
+      'running the wrong one silently is how the bug happened');
+
     check('RV6: what Zeus ASKED for is recorded on the call, separately from the answer',
       /configuredModel: route\.model, configuredReasoning: route\.reasoning/.test(orch),
       'configured is recorded');

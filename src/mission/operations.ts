@@ -15,6 +15,7 @@
 
 import { MissionRegistry, PlanTrigger } from './registry';
 import { Engine } from '../engine/orchestrator';
+import { Provider } from '../engine/providers';
 import { PipelineStage } from '../routing';
 import { ExecutionPolicy } from '../engine/policy';
 import {
@@ -92,7 +93,7 @@ export async function recompileMissionOracle(ctx: OperationContext,
 
   const compiled = await compileOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, context: ctx.context,
-    provider: engine.opts.providers.planner, supervisor: engine.opts.supervisor,
+    supervisor: engine.opts.supervisor,
     policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle', missions, missionId),
     prior: { criteria: prior.criteria, findings, version: prior.version },
   });
@@ -123,7 +124,7 @@ export async function recompileMissionOracle(ctx: OperationContext,
   // A FRESH critique. Same policy, no prior verdict anywhere in its payload.
   const critique = await critiqueOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: compiled.criteria,
-    context: ctx.context, provider: engine.opts.providers.reviewer,
+    context: ctx.context,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha: rec.baseSha,
     ...route(engine, 'oracle-critic', missions, missionId),
   });
@@ -172,11 +173,17 @@ export async function recompileMissionOracle(ctx: OperationContext,
  */
 function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
   missionId?: string): {
+  provider: Provider;
   model: string | null; reasoning: string | null; stage: string;
   trace?: (type: string, payload: Record<string, unknown>) => void;
 } {
   const r = engine.routeFor(stage);
   return {
+    // The PROVIDER the route names, not the one the role happens to hold. The
+    // first cut passed the model and the effort and left the provider behind,
+    // so a project routing its oracle to codex sent a codex model name to the
+    // claude CLI. The trace caught it on the first real call.
+    provider: engine.providerFor(stage),
     model: r.model, reasoning: r.reasoning, stage: r.stage,
     // The trace goes on the MISSION's log, beside the events it explains.
     // Failing to write one must never fail the mission: observability is a
@@ -249,7 +256,7 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
 
   const compiled = await compileOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, context: ctx.context,
-    provider: engine.opts.providers.planner, supervisor: engine.opts.supervisor,
+    supervisor: engine.opts.supervisor,
     policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle', missions, missionId),
   });
   if (!compiled.ok) {
@@ -271,7 +278,7 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
 
   const critique = await critiqueOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: compiled.criteria,
-    context: ctx.context, provider: engine.opts.providers.reviewer,
+    context: ctx.context,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha: rec.baseSha,
     ...route(engine, 'oracle-critic', missions, missionId),
   });
@@ -493,7 +500,7 @@ async function planOnce(ctx: OperationContext, missionId: string,
   const baseSha = rec.ratchetSha ?? rec.baseSha;
   const planned = await planMission({
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,
-    context: ctx.context, provider: engine.opts.providers.planner,
+    context: ctx.context,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha,
     ...route(engine, 'planner', missions, missionId),
     // The previous attempt AND what was said against it. Without this a replan
@@ -525,7 +532,7 @@ async function planOnce(ctx: OperationContext, missionId: string,
   const critique = await critiquePlan({
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,
     graph, validation: planned.validation, context: ctx.context,
-    provider: engine.opts.providers.reviewer, supervisor: engine.opts.supervisor,
+    supervisor: engine.opts.supervisor,
     policy: ctx.policy, baseSha, ...route(engine, 'plan-critic', missions, missionId),
   });
   const acceptance = planAcceptance(critique);

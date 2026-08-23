@@ -111,6 +111,12 @@ export const UI_HTML = `<!doctype html>
   #routing { padding:20px 24px; overflow:auto; grid-column:1 / -1; max-width:900px }
   #routing h2 { margin-top:0 }
   .tier { display:flex; gap:8px; align-items:center; margin:6px 0 14px }
+  .call { border-left:2px solid var(--line); padding:6px 0 6px 10px; margin:7px 0 }
+  .call.bad { border-left-color:var(--bad) }
+  .call.lost { border-left-color:var(--warn) }
+  .call .who { font-weight:600 }
+  .call .meta { color:var(--dim); font-size:11px; margin-top:2px }
+  .call .warn { font-size:11px }
   .budgetpick { margin:8px 0 }
   .node { border-left:2px solid var(--line); padding:6px 0 6px 10px; margin:8px 0 }
   .node.done { border-left-color:var(--ok) }
@@ -242,6 +248,7 @@ async function loadDetail() {
     h += '</table>';
   }
   h += planSection(m);
+  h += '<div id="traceslot"></div>';
   if (rep.integrations.length) {
     h += '<h2>integrations</h2><table>';
     for (const i of rep.integrations) {
@@ -253,6 +260,7 @@ async function loadDetail() {
     h += '</table>';
   }
   $('detail').innerHTML = h;
+  loadTrace(m);
   wireTranscript(m);
   wireBudgetControl(m);
   renderActions(m);
@@ -271,6 +279,63 @@ function costCell(m) {
       + '</span>'
     : '<br><span class="dim">nothing spent yet</span>';
   return h;
+}
+
+/**
+ * Which model answered for each step, and what it cost in time.
+ *
+ * The mission log says what happened. This says who was asked, what was asked
+ * of them, which model actually answered and how it went — the questions that
+ * previously required reading the event log by hand, and in the case of "which
+ * model" could not be answered at all because the provider's own word for it
+ * was discarded before anything was written down.
+ */
+async function loadTrace(m) {
+  const slot = $('traceslot');
+  if (!slot) return;
+  let d;
+  try { d = await api(scope('/missions/' + encodeURIComponent(m.missionId.split('/').pop()) + '/trace')); }
+  catch { return; }
+  if (!d.calls || !d.calls.length) {
+    slot.innerHTML = '<h2>agent trace</h2><p class="dim">No model calls traced. '
+      + 'This mission may predate the trace.</p>';
+    return;
+  }
+  let h = '<h2>agent trace <span class="dim">' + d.calls.length + ' model call(s)</span></h2>';
+  for (const c of d.calls) {
+    const lost = c.status === 'ABANDONED';
+    const failed = c.outcome && c.outcome !== 'COMPLETED';
+    h += '<div class="call' + (lost ? ' lost' : failed ? ' bad' : '') + '">'
+      + '<span class="who">' + esc(c.stage || c.role || 'call') + '</span> '
+      + '<span class="dim">' + esc(c.provider || '?') + ' · '
+      + esc(c.configuredModel || (c.provider + ' default')) + ' · reasoning '
+      + esc(c.configuredReasoning || 'provider default') + '</span> '
+      + (lost ? '<span class="warn">ABANDONED</span>'
+        : c.status === 'RUNNING' ? '<span class="warn">running</span>'
+          : '<span class="' + (failed ? 'bad' : 'ok') + '">' + esc(c.outcome) + '</span>')
+      + '<div class="meta">' + esc(c.traceCallId) + ' · ' + (c.wallMs == null ? '?' : c.wallMs)
+      + 'ms · prompt ' + (c.promptBytes == null ? '?' : c.promptBytes) + 'B'
+      + (c.providerTiming && c.providerTiming.ttftMs
+        ? ' · ttft ' + c.providerTiming.ttftMs + 'ms' : '')
+      + (c.toolsUsed && c.toolsUsed.length ? ' · tools ' + esc(c.toolsUsed.join(', ')) : '')
+      + '</div>';
+    // Shown only when they DISAGREE. Printing "got X" beside "asked X" on
+    // every row trains the eye to skip the one row where they differ.
+    if (c.modelDiscrepancy) {
+      h += '<div class="warn">answered by <b>' + esc(c.modelDiscrepancy.actual)
+        + '</b>, not ' + esc(c.modelDiscrepancy.configured) + '</div>';
+    }
+    if (lost) {
+      h += '<div class="warn">pid ' + esc(a2s(c.pid)) + ' opened this call and is gone</div>';
+    }
+    if (c.infrastructureFailure) {
+      h += '<div class="meta bad">' + esc(String(c.infrastructureFailure).slice(0, 160)) + '</div>';
+    }
+    h += '</div>';
+  }
+  h += '<p class="dim">Prompts and raw replies are not stored \u2014 the log keeps a hash '
+    + 'and a size, never the words.</p>';
+  slot.innerHTML = h;
 }
 
 /**

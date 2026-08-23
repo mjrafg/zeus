@@ -38,7 +38,9 @@ import {
   missionUsage, progressFrom, providerSpendOf, negotiateBudget,
   mergeMissionBudgets, BudgetNegotiation, MissionBudgets,
 } from './mission/progress';
-import { missionStatusView, missionListView, missionReportView } from './views';
+import {
+  missionStatusView, missionListView, missionReportView, missionTrace,
+} from './views';
 import {
   startWebServer, defaultSpawnRun, zeusCliArgv, ProjectTarget,
 } from './web/server';
@@ -1651,6 +1653,58 @@ async function cmdMission(argv: string[]): Promise<number> {
       for (const r of result.refusals) out(`  ${C.y}${r.code}${C.x} ${r.detail}`);
       out(`  ${C.dim}zeus mission report ${missionLabel(id)} for the full account${C.x}`);
       return result.achievement === 'ACHIEVED' ? 0 : 1;
+    }
+
+    case 'trace': {
+      const raw = rest.find((a) => !a.startsWith('--'));
+      if (!raw) { err('usage: zeus mission trace <id> [--call <traceCallId>] [--json]'); return 2; }
+      const id = resolve(raw);
+      if (!missions.mission(id)) { err(`unknown mission ${id}`); return 2; }
+      const calls = missionTrace(missions, id);
+      const wanted = rest.indexOf('--call') >= 0 ? rest[rest.indexOf('--call') + 1] : null;
+      const shown = wanted ? calls.filter((c) => c.traceCallId === wanted) : calls;
+      if (json) { out(JSON.stringify(shown, null, 1)); return 0; }
+      if (!calls.length) {
+        out(`${C.dim}no model calls traced on ${id} — it may predate the agent trace${C.x}`);
+        return 0;
+      }
+      if (wanted && !shown.length) { err(`no call ${wanted} on ${id}`); return 1; }
+
+      out(`${C.b}${id}${C.x} ${C.dim}${calls.length} model call(s)${C.x}`);
+      out('');
+      for (const c of shown) {
+        const state = c.status === 'ABANDONED' ? `${C.r}ABANDONED${C.x}`
+          : c.status === 'RUNNING' ? `${C.y}RUNNING${C.x}`
+            : c.outcome === 'COMPLETED' ? `${C.g}${c.outcome}${C.x}` : `${C.r}${c.outcome}${C.x}`;
+        const asked = c.configuredModel ?? `${c.provider} default`;
+        const got = c.actualModel ?? 'not reported';
+        out(`  ${C.b}${String(c.stage ?? c.role).padEnd(14)}${C.x} ${c.provider} · ${asked}`
+          + ` · ${c.configuredReasoning ?? 'provider default'}   ${state}`);
+        out(`  ${' '.repeat(14)} ${C.dim}${c.traceCallId}  ${c.wallMs ?? '?'}ms`
+          + `  prompt ${c.promptBytes ?? '?'}B${C.x}`);
+        // Asked-for and answered are shown together only when they DISAGREE.
+        // Printing "got X" beside "asked X" on every line trains the eye to
+        // skip the one line where they differ.
+        if (c.modelDiscrepancy) {
+          out(`  ${' '.repeat(14)} ${C.r}answered by ${got}, not ${c.modelDiscrepancy.configured}${C.x}`);
+        }
+        if (c.status === 'ABANDONED') {
+          out(`  ${' '.repeat(14)} ${C.r}pid ${c.pid} opened this call and is gone${C.x}`);
+        }
+        if (c.infrastructureFailure) {
+          out(`  ${' '.repeat(14)} ${C.dim}${String(c.infrastructureFailure).slice(0, 100)}${C.x}`);
+        }
+        if (wanted) {
+          out(`  ${' '.repeat(14)} ${C.dim}prompt ${c.promptHash ?? 'unhashed'}${C.x}`);
+          out(`  ${' '.repeat(14)} ${C.dim}parsed ${JSON.stringify(c.parsed)}${C.x}`);
+          out(`  ${' '.repeat(14)} ${C.dim}usage ${JSON.stringify(c.usage)}${C.x}`);
+          out(`  ${' '.repeat(14)} ${C.dim}timing ${JSON.stringify(c.providerTiming)}${C.x}`);
+          if (c.toolsUsed) out(`  ${' '.repeat(14)} ${C.dim}tools ${c.toolsUsed.join(', ')}${C.x}`);
+        }
+      }
+      out('');
+      out(`  ${C.dim}prompts and raw replies are not stored; the log keeps a hash and a size${C.x}`);
+      return 0;
     }
 
     case 'routing': {

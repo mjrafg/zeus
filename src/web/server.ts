@@ -27,7 +27,7 @@ import { MissionRegistry } from '../mission/registry';
 import { isMissionId, isTaskId, scopeOf } from '../mission/types';
 import {
   missionListView, missionReportView, missionStatusView, missionPhase,
-  costBreakdown, integrationLine, spendReader, missionBundle,
+  costBreakdown, integrationLine, spendReader, missionBundle, missionTrace,
 } from '../views';
 import { ensureToken, offeredToken, tokenMatches } from './token';
 import {
@@ -124,6 +124,7 @@ export const READ_ROUTES = [
   'GET /api/missions/:id/events',
   'GET /api/missions/:id/report',
   'GET /api/missions/:id/bundle',
+  'GET /api/missions/:id/trace',
   'GET /api/tasks/:id',
   'GET /api/files/diff',
   'GET /api/missions/:id/consent',
@@ -486,6 +487,17 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           // The whole record of one mission as one document, for pasting
       // somewhere. text/plain because the reader is often a person, and a
       // person cannot paste a JSON envelope into a message and be understood.
+      const traceMatch = /^\/api\/missions\/([^/]+)\/trace$/.exec(url.pathname);
+      if (method === 'GET' && traceMatch) {
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const id = resolveId(decodeURIComponent(traceMatch[1]), sc.projectId);
+        if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
+        if (!sc.missions.mission(id)) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
+        send(res, 200, { missionId: id, calls: missionTrace(sc.missions, id) });
+        return;
+      }
+
       const bundleMatch = /^\/api\/missions\/([^/]+)\/bundle$/.exec(url.pathname);
       if (method === 'GET' && bundleMatch) {
         const sc = scoped(url);

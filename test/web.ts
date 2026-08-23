@@ -24,7 +24,9 @@ import {
   eventId, parseEventId, cursorFromLastId, since, advance, SSE_CHANNEL,
 } from '../src/web/tail';
 import { UI_HTML } from '../src/web/ui';
-import { missionStatusView, missionReportView, missionBundle } from '../src/views';
+import {
+  missionStatusView, missionReportView, missionBundle, missionTrace,
+} from '../src/views';
 import {
   findingsDigest, pendingDecision, awaitingHuman, consentSubject,
 } from '../src/mission/consent';
@@ -255,7 +257,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 13 && WRITE_ROUTES.length === 13,
+      READ_ROUTES.length === 14 && WRITE_ROUTES.length === 13,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -2860,6 +2862,76 @@ export async function webSuite(): Promise<void> {
         < UI_HTML.indexOf('</b> is running on this mission'), 'stated first');
     check('ORP7: and says nothing was lost, because the log is the record',
       UI_HTML.includes('Nothing was lost \u2014 the log is the record'), 'reassured');
+  }
+
+  section('the trace pairs every model call, and knows a dead one');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal with model calls', 'base0');
+    const id = rec.missionId;
+    const call = (tid: string, stage: string, finish: any) => {
+      fx.store.append({ taskId: id, type: 'MODEL_CALL_STARTED', payload: {
+        traceCallId: tid, stage, provider: 'codex', configuredModel: 'gpt-5.5',
+        configuredReasoning: 'high', promptHash: 'sha256:aa', promptBytes: 1200,
+        pid: finish === 'dead' ? 999_999 : process.pid,
+        startedAt: '2026-01-01T00:00:00.000Z',
+      } });
+      if (finish && finish !== 'dead') {
+        fx.store.append({ taskId: id, type: 'MODEL_CALL_FINISHED', payload: {
+          traceCallId: tid, stage, provider: 'codex', outcome: 'COMPLETED',
+          configuredModel: 'gpt-5.5', actualModel: finish.actual ?? null,
+          ...(finish.actual && finish.actual !== 'gpt-5.5'
+            ? { modelDiscrepancy: { configured: 'gpt-5.5', actual: finish.actual } } : {}),
+          wallMs: 4200, parsed: { ok: true, structuredKeys: ['criteria'] },
+          finishedAt: '2026-01-01T00:01:00.000Z',
+        } });
+      }
+    };
+    call('TC-a', 'oracle', { actual: 'gpt-5.5' });
+    call('TC-b', 'oracle-critic', { actual: 'gpt-5.6-sol' });
+    call('TC-c', 'planner', 'dead');
+
+    const calls = missionTrace(fx.missions, id);
+    check('TC1: every call is paired, in the order it was opened',
+      calls.length === 3 && calls.map((c) => c.traceCallId).join() === 'TC-a,TC-b,TC-c',
+      calls.map((c) => c.traceCallId).join());
+    check('TC2: a completed call carries what was asked AND what answered',
+      calls[0].configuredModel === 'gpt-5.5' && calls[0].actualModel === 'gpt-5.5'
+      && calls[0].status === 'COMPLETED', JSON.stringify(calls[0].status));
+    check('TC3: a model that is not the one asked for is flagged as a discrepancy',
+      !!calls[1].modelDiscrepancy
+      && calls[1].modelDiscrepancy!.actual === 'gpt-5.6-sol',
+      JSON.stringify(calls[1].modelDiscrepancy));
+    check('TC4: and a call whose process is gone is ABANDONED, not forever running',
+      calls[2].status === 'ABANDONED' && calls[2].finishedAt === null,
+      calls[2].status);
+    check('TC5: an unfinished call from a LIVE process is still running, not abandoned',
+      (() => {
+        const fx2 = fixture();
+        const r2 = fx2.missions.create('a live one', 'base0');
+        fx2.store.append({ taskId: r2.missionId, type: 'MODEL_CALL_STARTED',
+          payload: { traceCallId: 'TC-live', stage: 'oracle', pid: process.pid } });
+        return missionTrace(fx2.missions, r2.missionId)[0].status === 'RUNNING';
+      })(), 'live means running');
+
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+      const r = await get(`${server.url}/api/missions/M-0001/trace`, auth);
+      check('TC6: the route serves the paired calls',
+        r.status === 200 && r.json.calls.length === 3, `${r.status} ${r.json?.calls?.length}`);
+      const missing = await get(`${server.url}/api/missions/M-9999/trace`, auth);
+      check('TC7: an unknown mission is 404 rather than an empty trace',
+        missing.status === 404, String(missing.status));
+    } finally { await server?.close(); }
+
+    check('TC8: the console shows what answered only when it DIFFERS from what was asked',
+      /if \(c\.modelDiscrepancy\) \{/.test(UI_HTML)
+      && /answered by <b>/.test(UI_HTML), 'discrepancy is the signal');
+    check('TC9: and says plainly that prompts are not stored',
+      /the log keeps a hash[\s\S]{0,40}never the words/.test(UI_HTML), 'stated on the page');
   }
 
   section('every stage of the pipeline routes on its own');

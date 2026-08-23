@@ -275,6 +275,100 @@ export function missionBundle(missions: MissionRegistry, missionId: string,
   return lines.join('\n');
 }
 
+export interface TraceCall {
+  traceCallId: string;
+  stage: string | null;
+  role?: string;
+  provider: string | null;
+  configuredModel: string | null;
+  configuredReasoning: string | null;
+  reasoningSource?: string | null;
+  actualModel: string | null;
+  modelDiscrepancy: { configured: string; actual: string } | null;
+  promptHash: string | null;
+  promptBytes: number | null;
+  outcome: string | null;
+  wallMs: number | null;
+  providerTiming: Record<string, unknown> | null;
+  usage: Record<string, unknown> | null;
+  toolsUsed: string[] | null;
+  parsed: { ok: boolean; structuredKeys: string[] } | null;
+  infrastructureFailure: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  pid: number | null;
+  /** RUNNING, COMPLETED, or ABANDONED when the process that opened it is gone. */
+  status: 'RUNNING' | 'COMPLETED' | 'ABANDONED';
+}
+
+/**
+ * Every model call this mission made, paired from the log.
+ *
+ * A STARTED with no FINISHED is not a call that is still going — it is a call
+ * whose process may be dead, and the difference is the whole point. M-0012 was
+ * killed four minutes into a call and left a record that would otherwise look
+ * permanently in flight; the pid is checked against the world, exactly as the
+ * mission runner's claim is.
+ */
+export function missionTrace(missions: MissionRegistry, missionId: string): TraceCall[] {
+  const open = new Map<string, TraceCall>();
+  const order: string[] = [];
+  const logs: StoredEvent[][] = [missions.events.read(missionId)];
+  const rec = missions.mission(missionId);
+  for (const t of (rec?.spawned ?? [])) {
+    try { logs.push(missions.events.read(t.taskId)); } catch { /* unreadable task log */ }
+  }
+
+  for (const log of logs) {
+    for (const e of log) {
+      const p = (e.payload ?? {}) as any;
+      const id = typeof p.traceCallId === 'string' ? p.traceCallId : null;
+      if (!id) continue;
+      if (e.type === 'MODEL_CALL_STARTED') {
+        if (!open.has(id)) order.push(id);
+        open.set(id, {
+          traceCallId: id,
+          stage: p.stage ?? null, role: p.role, provider: p.provider ?? null,
+          configuredModel: p.configuredModel ?? null,
+          configuredReasoning: p.configuredReasoning ?? null,
+          reasoningSource: p.reasoningSource ?? null,
+          actualModel: null, modelDiscrepancy: null,
+          promptHash: p.promptHash ?? null, promptBytes: p.promptBytes ?? null,
+          outcome: null, wallMs: null, providerTiming: null, usage: null,
+          toolsUsed: null, parsed: null, infrastructureFailure: null,
+          startedAt: p.startedAt ?? e.ts, finishedAt: null,
+          pid: typeof p.pid === 'number' ? p.pid : null,
+          status: 'RUNNING',
+        });
+      } else if (e.type === 'MODEL_CALL_FINISHED') {
+        const call = open.get(id);
+        if (!call) continue;
+        call.actualModel = p.actualModel ?? null;
+        call.modelDiscrepancy = p.modelDiscrepancy ?? null;
+        call.outcome = p.outcome ?? null;
+        call.wallMs = typeof p.wallMs === 'number' ? p.wallMs : null;
+        call.providerTiming = p.providerTiming ?? null;
+        call.usage = p.usage ?? null;
+        call.toolsUsed = p.toolsUsed ?? null;
+        call.parsed = p.parsed ?? null;
+        call.infrastructureFailure = p.infrastructureFailure ?? null;
+        call.finishedAt = p.finishedAt ?? e.ts;
+        call.status = 'COMPLETED';
+      }
+    }
+  }
+
+  return order.map((id) => {
+    const call = open.get(id)!;
+    if (call.status !== 'RUNNING') return call;
+    // Unfinished. Alive or abandoned is a question about the world, not the log.
+    if (call.pid === null) return call;
+    let alive = false;
+    try { process.kill(call.pid, 0); alive = true; } catch { alive = false; }
+    return alive ? call : { ...call, status: 'ABANDONED' as const };
+  });
+}
+
 /** The oracle a mission accepted, or null. Read from the record, not a cache. */
 export function oracleOf(rec: MissionRecord): Oracle | null {
   const o = rec.oracle as Oracle | null;

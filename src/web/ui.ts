@@ -108,6 +108,7 @@ export const UI_HTML = `<!doctype html>
   .stage select { min-width:150px }
   .stage .src { font-size:10px; color:var(--dim); margin-top:7px }
   .stage .bad { font-size:11px; margin-top:7px }
+  #routing { padding:20px 24px; overflow:auto; grid-column:1 / -1; max-width:900px }
   #routing h2 { margin-top:0 }
   .tier { display:flex; gap:8px; align-items:center; margin:6px 0 14px }
   .budgetpick { margin:8px 0 }

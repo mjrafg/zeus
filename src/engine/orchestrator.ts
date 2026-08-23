@@ -12,7 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { EventStore, StoredEvent } from './events';
+import { EventStore, sha256, StoredEvent } from './events';
 import { ProjectLock } from './lock';
 import { ProcessSupervisor, ExecutionResult, killRecorded } from './exec';
 import { ExecutionPolicy, defaultPolicy } from './policy';
@@ -466,11 +466,39 @@ export class Engine {
     // may want a cheaper model for the retry than for the first attempt.
     const route = this.routeFor(stage ?? (role === 'planner' ? 'planner'
       : role === 'implementer' ? (rec.repair ? 'repair' : 'implementer') : 'reviewer'));
+    // ONE TRACE RECORD PER INVOCATION, opened BEFORE the provider is called.
+    //
+    // A task is not one model interaction: a single task calls a designer, an
+    // implementer and a reviewer, and a mission calls many more. Correlating
+    // them afterwards from timestamps is guesswork, so the id is minted here
+    // and written down with everything known at call time.
+    //
+    // Written first because of what happened to M-0012: the runner was killed
+    // four minutes into a call, and the log had an AGENT_STARTED and nothing
+    // else. If the host dies mid-call we still know exactly what was in flight,
+    // under which routing, asking which model.
+    const traceCallId = `TC-${sha256(`${rec.taskId}:${route.stage}:${Date.now()}:${prompt.length}`).slice(0, 20)}`;
+    this.record({ taskId: rec.taskId, type: 'MODEL_CALL_STARTED', payload: {
+      traceCallId,
+      stage: route.stage, role, provider: provider.id, readOnly,
+      // What Zeus ASKED FOR. What actually answered is read from the stream and
+      // recorded on MODEL_CALL_FINISHED; the two are never folded into one field.
+      configuredModel: route.model,
+      configuredReasoning: route.reasoning,
+      reasoningSource: route.source.reasoning,
+      modelSource: route.source.model,
+      promptHash: `sha256:${sha256(prompt).slice(0, 32)}`,
+      promptBytes: prompt.length,
+      // The policy that applied WHEN THIS CALL BEGAN. Changing a project's
+      // routing halfway through a mission must not rewrite what an earlier
+      // call ran under.
+      policySnapshot: { projectId: this.projectId, baseSha: rec.baseSha },
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    } });
     this.record({ taskId: rec.taskId, type: 'AGENT_STARTED', payload: {
       role, provider: provider.id, readOnly,
-      stage: route.stage,
-      // What Zeus ASKED FOR. What actually answered is read from the stream and
-      // recorded on AGENT_FINISHED; the two are never folded into one field.
+      stage: route.stage, traceCallId,
       configuredModel: route.model, configuredReasoning: route.reasoning,
       reasoningSource: route.source.reasoning,
     } });
@@ -522,6 +550,32 @@ export class Engine {
       ...(res.identity?.model && route.model && res.identity.model !== route.model
         ? { modelDiscrepancy: { configured: route.model, actual: res.identity.model } }
         : {}),
+      traceCallId,
+    } });
+    // Closes the trace record. Its ABSENCE, with a dead pid, is what tells a
+    // later reader the call was abandoned rather than merely slow.
+    this.record({ taskId: rec.taskId, type: 'MODEL_CALL_FINISHED', payload: {
+      traceCallId, stage: route.stage, role, provider: provider.id,
+      outcome: res.outcome,
+      configuredModel: route.model, configuredReasoning: route.reasoning,
+      actualModel: res.identity?.model ?? null,
+      ...(res.identity?.model && route.model && res.identity.model !== route.model
+        ? { modelDiscrepancy: { configured: route.model, actual: res.identity.model } }
+        : {}),
+      parsed: {
+        ok: res.structured !== null,
+        structuredKeys: res.structured ? Object.keys(res.structured) : [],
+      },
+      infrastructureFailure: res.infrastructureFailure,
+      wallMs: res.durationMs,
+      ...(res.identity ? { providerTiming: {
+        ttftMs: res.identity.ttftMs ?? null,
+        timeToRequestMs: res.identity.timeToRequestMs ?? null,
+        durationApiMs: res.identity.durationApiMs ?? null,
+      } } : {}),
+      ...(res.providerUsage ? { usage: res.providerUsage } : {}),
+      ...(res.identity?.toolsUsed ? { toolsUsed: res.identity.toolsUsed } : {}),
+      finishedAt: new Date().toISOString(),
     } });
     return res;
   }

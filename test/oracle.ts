@@ -106,8 +106,13 @@ export async function oracleSuite(): Promise<void> {
       moved.filter((n) => !discovered.includes(n)).join(', '));
     // Pinned, not assumed: the probe went stale once, and the registry fix is
     // what stops it happening again.
-    check('OR12: the event-type total is pinned at 59',
-      discovered.length === 59, `${discovered.length} types`);
+    // 59 -> 62 with the agent trace: MODEL_CALL_STARTED, MODEL_CALL_FINISHED
+    // and TRACE_WRITE_FAILED. The pin exists so a new type is acknowledged
+    // rather than slipped in, and it matters here because RS2 exercises every
+    // DISCOVERED type against secret fixtures — a type that arrived unnoticed
+    // would be a type nobody had checked for leaks.
+    check('OR12: the event-type total is pinned at 62',
+      discovered.length === 62, `${discovered.length} types`);
     check('OR12e: the chat events are discovered automatically, like every other family',
       ['CHAT_MESSAGE', 'CHAT_CARD_DECISION'].every((n) => discovered.includes(n)));
     check('OR12d: the budget revision and the stop decision are discovered automatically',

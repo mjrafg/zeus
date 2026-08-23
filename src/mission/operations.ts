@@ -93,7 +93,7 @@ export async function recompileMissionOracle(ctx: OperationContext,
   const compiled = await compileOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, context: ctx.context,
     provider: engine.opts.providers.planner, supervisor: engine.opts.supervisor,
-    policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle'),
+    policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle', missions, missionId),
     prior: { criteria: prior.criteria, findings, version: prior.version },
   });
   if (!compiled.ok) {
@@ -125,7 +125,7 @@ export async function recompileMissionOracle(ctx: OperationContext,
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: compiled.criteria,
     context: ctx.context, provider: engine.opts.providers.reviewer,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha: rec.baseSha,
-    ...route(engine, 'oracle-critic'),
+    ...route(engine, 'oracle-critic', missions, missionId),
   });
   const nextFindings: CriticFindingRef[] = critique.valid
     ? (critique.findings as CriticFindingRef[]) : [];
@@ -170,10 +170,30 @@ export async function recompileMissionOracle(ctx: OperationContext,
  * critic both used providers.reviewer, so wanting a cheaper model for one and
  * not the other was not expressible.
  */
-function route(engine: Engine, stage: PipelineStage):
-{ model: string | null; reasoning: string | null; stage: string } {
+function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
+  missionId?: string): {
+  model: string | null; reasoning: string | null; stage: string;
+  trace?: (type: string, payload: Record<string, unknown>) => void;
+} {
   const r = engine.routeFor(stage);
-  return { model: r.model, reasoning: r.reasoning, stage: r.stage };
+  return {
+    model: r.model, reasoning: r.reasoning, stage: r.stage,
+    // The trace goes on the MISSION's log, beside the events it explains.
+    // Failing to write one must never fail the mission: observability is a
+    // second concern, and a mission killed by its own logging would be a worse
+    // outcome than a mission nobody can explain.
+    ...(missions && missionId ? {
+      trace: (type: string, payload: Record<string, unknown>) => {
+        try { missions.events.append({ taskId: missionId, type, payload }); }
+        catch (e: any) {
+          try {
+            missions.events.append({ taskId: missionId, type: 'TRACE_WRITE_FAILED',
+              payload: { forType: type, detail: String(e?.message ?? e) } });
+          } catch { /* if even this fails, the mission still proceeds */ }
+        }
+      },
+    } : {}),
+  };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -230,7 +250,7 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
   const compiled = await compileOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, context: ctx.context,
     provider: engine.opts.providers.planner, supervisor: engine.opts.supervisor,
-    policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle'),
+    policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle', missions, missionId),
   });
   if (!compiled.ok) {
     // A provider that could not answer is infrastructure. The mission has not
@@ -253,7 +273,7 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: compiled.criteria,
     context: ctx.context, provider: engine.opts.providers.reviewer,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha: rec.baseSha,
-    ...route(engine, 'oracle-critic'),
+    ...route(engine, 'oracle-critic', missions, missionId),
   });
   const findings: CriticFindingRef[] = critique.valid ? (critique.findings as CriticFindingRef[]) : [];
   const proposal = proposeAcceptance(compiled.criteria, ctx.context,
@@ -475,7 +495,7 @@ async function planOnce(ctx: OperationContext, missionId: string,
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,
     context: ctx.context, provider: engine.opts.providers.planner,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha,
-    ...route(engine, 'planner'),
+    ...route(engine, 'planner', missions, missionId),
     // The previous attempt AND what was said against it. Without this a replan
     // starts from the goal alone and repeats the last plan's mistakes: two
     // plans in a row left the site chrome outside the localisation nodes,
@@ -506,7 +526,7 @@ async function planOnce(ctx: OperationContext, missionId: string,
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,
     graph, validation: planned.validation, context: ctx.context,
     provider: engine.opts.providers.reviewer, supervisor: engine.opts.supervisor,
-    policy: ctx.policy, baseSha, ...route(engine, 'plan-critic'),
+    policy: ctx.policy, baseSha, ...route(engine, 'plan-critic', missions, missionId),
   });
   const acceptance = planAcceptance(critique);
   missions.recordPlanCritique(missionId, {

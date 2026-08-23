@@ -13,6 +13,7 @@
  * and the critic may only push it UP.
  */
 
+import { createHash } from 'crypto';
 import { Provider, AgentResponse } from '../engine/providers';
 import { ProcessSupervisor } from '../engine/exec';
 import { ExecutionPolicy } from '../engine/policy';
@@ -45,6 +46,16 @@ export interface CompileInput {
   model?: string | null;
   reasoning?: string | null;
   stage?: string;
+  /**
+   * Where this call's trace record goes.
+   *
+   * A callback rather than an EventStore because compile and plan know the
+   * prompt and the provider's reply and nothing about where a mission keeps
+   * its log — and the recording has to happen HERE, beside the invoke, or the
+   * prompt hash and the provider's own identity are both out of reach.
+   */
+  trace?: (type: string, payload: Record<string, unknown>) => void;
+
   supervisor: ProcessSupervisor;
   policy: ExecutionPolicy;
   baseSha: string;
@@ -178,11 +189,39 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
 
   let res: AgentResponse;
   try {
+    const traceCallId = `TC-${createHash('sha256')
+      .update(`${input.missionId}:${input.stage ?? 'unstaged'}:${Date.now()}`)
+      .digest('hex').slice(0, 20)}`;
+    // Opened BEFORE the provider is called. If the host dies mid-call the log
+    // still says exactly what was in flight, asking which model, at what effort.
+    input.trace?.('MODEL_CALL_STARTED', {
+      traceCallId, stage: input.stage ?? null, provider: input.provider.id,
+      configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
+      promptHash: `sha256:${createHash('sha256').update(prompt).digest('hex').slice(0, 32)}`,
+      promptBytes: prompt.length, pid: process.pid,
+      startedAt: new Date().toISOString(),
+    });
     res = await input.provider.invoke({
       role: 'planner', taskId: input.missionId, projectId: input.projectId,
       model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt, policy: input.policy, readOnly: true,
     }, input.supervisor);
+    input.trace?.('MODEL_CALL_FINISHED', {
+      traceCallId, stage: input.stage ?? null, provider: input.provider.id,
+      outcome: res.outcome,
+      configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
+      actualModel: (res as any).identity?.model ?? null,
+      ...((res as any).identity?.model && input.model
+        && (res as any).identity.model !== input.model
+        ? { modelDiscrepancy: { configured: input.model, actual: (res as any).identity.model } }
+        : {}),
+      parsed: { ok: res.structured !== null,
+        structuredKeys: res.structured ? Object.keys(res.structured) : [] },
+      infrastructureFailure: res.infrastructureFailure,
+      wallMs: res.durationMs,
+      ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
+      finishedAt: new Date().toISOString(),
+    });
   } catch (e: any) {
     return {
       ok: false, infrastructureFailure: `compiler provider threw: ${e?.message ?? e}`,
@@ -280,6 +319,7 @@ export async function critiqueOracle(input: {
   policy: ExecutionPolicy; baseSha: string;
   /** The model and effort Zeus resolved for this stage. Null = provider decides. */
   model?: string | null; reasoning?: string | null; stage?: string;
+  trace?: (type: string, payload: Record<string, unknown>) => void;
   /** Extra sections a caller wants delivered — used by tests to prove refusal. */
   extraInputs?: Array<{ kind: any; label: string; content: string }>;
 }): Promise<CritiqueResult> {
@@ -310,11 +350,39 @@ export async function critiqueOracle(input: {
 
   let res: AgentResponse;
   try {
+    const traceCallId = `TC-${createHash('sha256')
+      .update(`${input.missionId}:${input.stage ?? 'unstaged'}:${Date.now()}`)
+      .digest('hex').slice(0, 20)}`;
+    // Opened BEFORE the provider is called. If the host dies mid-call the log
+    // still says exactly what was in flight, asking which model, at what effort.
+    input.trace?.('MODEL_CALL_STARTED', {
+      traceCallId, stage: input.stage ?? null, provider: input.provider.id,
+      configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
+      promptHash: `sha256:${createHash('sha256').update(payload.prompt).digest('hex').slice(0, 32)}`,
+      promptBytes: payload.prompt.length, pid: process.pid,
+      startedAt: new Date().toISOString(),
+    });
     res = await input.provider.invoke({
       role: 'reviewer', taskId: input.missionId, projectId: input.projectId,
       model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt: payload.prompt, policy: input.policy, readOnly: true,
     }, input.supervisor);
+    input.trace?.('MODEL_CALL_FINISHED', {
+      traceCallId, stage: input.stage ?? null, provider: input.provider.id,
+      outcome: res.outcome,
+      configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
+      actualModel: (res as any).identity?.model ?? null,
+      ...((res as any).identity?.model && input.model
+        && (res as any).identity.model !== input.model
+        ? { modelDiscrepancy: { configured: input.model, actual: (res as any).identity.model } }
+        : {}),
+      parsed: { ok: res.structured !== null,
+        structuredKeys: res.structured ? Object.keys(res.structured) : [] },
+      infrastructureFailure: res.infrastructureFailure,
+      wallMs: res.durationMs,
+      ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
+      finishedAt: new Date().toISOString(),
+    });
   } catch (e: any) {
     return {
       ok: false, valid: true, payload, findings: [], modeOpinion: null,

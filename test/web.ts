@@ -41,6 +41,7 @@ const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsO
   estimatedTier: 'FAST', estimatedCost: 1, risk: 'LOW' });
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
+import { readConfig } from '../src/config';
 import { detectProject, nodePackageDirs } from '../src/adapters';
 import {
   PIPELINE_STAGES, STAGE_ROLE, ZEUS_DEFAULT_ROUTING, resolveRouting,
@@ -254,7 +255,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 12 && WRITE_ROUTES.length === 12,
+      READ_ROUTES.length === 13 && WRITE_ROUTES.length === 13,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -2908,6 +2909,86 @@ export async function webSuite(): Promise<void> {
       Object.values(ZEUS_DEFAULT_ROUTING).every((c) => c.model === undefined
         && c.reasoning === undefined),
       JSON.stringify(ZEUS_DEFAULT_ROUTING.planner));
+  }
+
+  section('routing is a settings screen, not a config file');
+  {
+    // The global tier is read from the real user config, so a test that did
+    // not isolate it would pass or fail depending on whose machine it ran on.
+    const priorHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-xdg-'));
+
+    const fx = fixture();
+    fs.writeFileSync(path.join(fx.root, '.zeus', 'config.yaml'),
+      'version: 1\nproject:\n  name: p\n  adapter: node\n');
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+      const auth = { authorization: `Bearer ${server.token}` };
+
+      const r = await get(`${server.url}/api/routing`, auth);
+      check('AR1: the screen is given every stage, with what each one is for',
+        r.status === 200 && r.json.stages.length === 7
+        && r.json.stages.every((s2: any) => s2.label && s2.description),
+        JSON.stringify(r.json?.stages?.map((s2: any) => s2.label)));
+      check('AR2: and the providers\u2019 own catalogue, so nothing is hardcoded in the page',
+        Array.isArray(r.json.capabilities)
+        && r.json.capabilities.every((c: any) => typeof c.closed === 'boolean'),
+        JSON.stringify(r.json?.capabilities?.map((c: any) => c.provider)));
+      check('AR3: with the resolved table and the tier each field came from',
+        r.json.routes.length === 7 && r.json.routes[0].source.provider,
+        JSON.stringify(r.json?.routes?.[0]?.source));
+
+      const bad = await post(server, '/api/routing',
+        { stage: 'not-a-stage', provider: 'claude' });
+      check('AR4: an unknown stage is named, not invented',
+        bad.status === 400 && bad.json.error === 'NO_SUCH_STAGE'
+        && /known stages are/.test(bad.json.detail), bad.json?.detail);
+
+      const ok = await post(server, '/api/routing',
+        { stage: 'plan-critic', tier: 'project', provider: 'claude', reasoning: 'high' });
+      check('AR5: a valid choice is written to the project and comes back resolved',
+        ok.status === 200
+        && ok.json.routes.find((x: any) => x.stage === 'plan-critic').reasoning === 'high',
+        `${ok.status} ${JSON.stringify(ok.json?.routes?.find((x: any) => x.stage === 'plan-critic'))}`);
+      check('AR5b: and it persisted, rather than living in the reply',
+        (readConfig(fx.root) as any)?.routing?.['plan-critic']?.reasoning === 'high',
+        JSON.stringify((readConfig(fx.root) as any)?.routing));
+
+      // The screen must not be able to store something the provider refuses.
+      const refused = await post(server, '/api/routing',
+        { stage: 'reviewer', tier: 'project', provider: 'codex', model: 'no-such-model' });
+      check('AR6: an impossible combination is refused BEFORE it is written',
+        refused.status === 409 && refused.json.error === 'ROUTING_REFUSED',
+        `${refused.status} ${refused.json?.error}`);
+      check('AR6b: and nothing was written for it',
+        !(readConfig(fx.root) as any)?.routing?.reviewer,
+        JSON.stringify((readConfig(fx.root) as any)?.routing));
+
+      // Clearing a field must mean "fall through", not "set to empty".
+      const cleared = await post(server, '/api/routing',
+        { stage: 'plan-critic', tier: 'project', reasoning: '' });
+      check('AR7: clearing a field removes it so the tier below applies again',
+        cleared.status === 200
+        && !(readConfig(fx.root) as any)?.routing?.['plan-critic']?.reasoning,
+        JSON.stringify((readConfig(fx.root) as any)?.routing));
+    } finally {
+      await server?.close();
+      if (priorHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = priorHome;
+    }
+
+    check('AR8: the page rebuilds the model list when the provider changes',
+      /sel\.provider\.onchange = \(\) => \{/.test(UI_HTML)
+      && /fill\(modelSel/.test(UI_HTML), 'provider drives models');
+    check('AR9: and the reasoning list when the model changes',
+      /modelSel\.onchange = \(\) => fill\(reasoningSel, reasoningFor\(/.test(UI_HTML),
+      'model drives reasoning');
+    check('AR10: a level the model cannot use is never offered',
+      /function reasoningFor\(cap, modelId\)/.test(UI_HTML)
+      && /m\.reasoning\.length\) \? m\.reasoning : \(cap\.reasoning/.test(UI_HTML),
+      'per-model levels win over the provider union');
   }
 
   section('the catalogue comes from the providers, not from Zeus');

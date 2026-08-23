@@ -16,7 +16,13 @@ import * as path from 'path';
 import { AddressInfo } from 'net';
 import { spawn, spawnSync } from 'child_process';
 import { EventStore, StoredEvent } from '../engine/events';
-import { readConfig, writeConfig } from '../config';
+import {
+  readConfig, writeConfig, readUserDefaults, writeUserDefaults,
+} from '../config';
+import {
+  PIPELINE_STAGES, STAGE_LABEL, STAGE_DESCRIPTION, STAGE_ROLE,
+  resolveRouting, validateRouting, providerCapabilities,
+} from '../routing';
 import { MissionRegistry } from '../mission/registry';
 import { isMissionId, isTaskId, scopeOf } from '../mission/types';
 import {
@@ -124,6 +130,7 @@ export const READ_ROUTES = [
   'GET /api/chat',
   'GET /api/projects',
   'GET /api/events/stream',
+  'GET /api/routing',
 ] as const;
 
 export const WRITE_ROUTES = [
@@ -139,6 +146,7 @@ export const WRITE_ROUTES = [
   'POST /api/chat/decide',
   'POST /api/projects/draft',
   'POST /api/projects/decide',
+  'POST /api/routing',
 ] as const;
 
 /**
@@ -572,6 +580,32 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/api/routing') {
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const cfg = readConfig(sc.root);
+        const routes = resolveRouting({
+          project: cfg?.routing ?? null,
+          global: readUserDefaults()?.routing ?? null,
+        });
+        send(res, 200, {
+          projectId: sc.projectId,
+          stages: PIPELINE_STAGES.map((st) => ({
+            stage: st, label: STAGE_LABEL[st], description: STAGE_DESCRIPTION[st],
+            role: STAGE_ROLE[st],
+          })),
+          routes,
+          problems: validateRouting(routes),
+          // The catalogue is the PROVIDERS' answer, refreshed on every read.
+          // A settings screen that offers a model the host cannot reach, or a
+          // reasoning level the model refuses, is offering a failed call.
+          capabilities: providerCapabilities(),
+          project: cfg?.routing ?? {},
+          global: readUserDefaults()?.routing ?? {},
+        });
+        return;
+      }
+
       if (method === 'GET' && url.pathname === '/api/projects') {
         if (!opts.projectsRoot) {
           send(res, 200, { projectsRoot: null, projects: [],
@@ -851,6 +885,53 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         payload.handoff = 'the project is empty; accept the mission card to build it';
       }
       send(res, 201, payload);
+      return;
+    }
+
+    if (url.pathname === '/api/routing') {
+      const stage = String(body?.stage ?? '');
+      if (!(PIPELINE_STAGES as readonly string[]).includes(stage)) {
+        send(res, 400, { error: 'NO_SUCH_STAGE', stage,
+          detail: `known stages are ${PIPELINE_STAGES.join(', ')}` });
+        return;
+      }
+      const tier = body?.tier === 'global' ? 'global' : 'project';
+      // An explicit null CLEARS the field so it falls through to the tier
+      // below; undefined leaves it alone. The difference matters: "use the
+      // global model" and "do not change the model" are different intents.
+      const choice: Record<string, unknown> = {};
+      for (const k of ['provider', 'model', 'reasoning']) {
+        if (body[k] !== undefined) choice[k] = body[k] === '' ? null : body[k];
+      }
+
+      const cfg = tier === 'project' ? readConfig(wsc.root) : null;
+      const current = (tier === 'project'
+        ? (cfg?.routing ?? {}) : (readUserDefaults()?.routing ?? {})) as Record<string, any>;
+      const next = { ...current, [stage]: { ...(current[stage] ?? {}), ...choice } };
+      for (const k of Object.keys(next[stage])) {
+        if (next[stage][k] === null || next[stage][k] === undefined) delete next[stage][k];
+      }
+      if (!Object.keys(next[stage]).length) delete next[stage];
+
+      // VALIDATED BEFORE IT IS WRITTEN. A settings screen that stores an
+      // impossible combination has only moved the failure to the next mission.
+      const proposed = resolveRouting({
+        project: tier === 'project' ? next : (cfg?.routing ?? null),
+        global: tier === 'global' ? next : (readUserDefaults()?.routing ?? null),
+      });
+      const problems = validateRouting(proposed).filter((p) => p.stage === stage);
+      if (problems.length) {
+        send(res, 409, { error: 'ROUTING_REFUSED', stage, problems });
+        return;
+      }
+
+      if (tier === 'project') {
+        if (!cfg) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        writeConfig(wsc.root, { ...cfg, routing: next } as any);
+      } else {
+        writeUserDefaults({ ...(readUserDefaults() ?? {}), routing: next } as any);
+      }
+      send(res, 200, { stage, tier, routes: proposed, problems: validateRouting(proposed) });
       return;
     }
 

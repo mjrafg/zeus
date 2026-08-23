@@ -98,6 +98,18 @@ export const UI_HTML = `<!doctype html>
   .bar i.warn { background:var(--warn) }
   .bar i.bad { background:var(--bad) }
   .budgetpick input { width:88px }
+  .stage { border:1px solid var(--line); border-radius:6px; padding:12px 14px; margin:10px 0;
+           background:#0d1117 }
+  .stage.overridden { border-color:var(--acc) }
+  .stage h4 { margin:0 0 2px; font-size:13px }
+  .stage .why { color:var(--dim); font-size:11px; margin-bottom:9px }
+  .stage .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center }
+  .stage label { font-size:11px; color:var(--dim); display:flex; flex-direction:column; gap:3px }
+  .stage select { min-width:150px }
+  .stage .src { font-size:10px; color:var(--dim); margin-top:7px }
+  .stage .bad { font-size:11px; margin-top:7px }
+  #routing h2 { margin-top:0 }
+  .tier { display:flex; gap:8px; align-items:center; margin:6px 0 14px }
   .budgetpick { margin:8px 0 }
   .node { border-left:2px solid var(--line); padding:6px 0 6px 10px; margin:8px 0 }
   .node.done { border-left-color:var(--ok) }
@@ -122,6 +134,7 @@ export const UI_HTML = `<!doctype html>
   <h1>Zeus Control Center</h1>
   <span class="dim" id="proj">—</span>
   <span id="crumb" style="display:none">← all projects</span>
+  <span id="routelink" class="ref" style="display:none">agent routing</span>
   <span style="flex:1"></span>
   <input id="tok" type="password" placeholder="bearer token (printed once at startup)">
   <button id="go">connect</button>
@@ -129,6 +142,7 @@ export const UI_HTML = `<!doctype html>
 </header>
 <main>
   <div id="home" style="display:none"></div>
+  <div id="routing" style="display:none"></div>
   <div id="list"><p class="dim">Enter the token to connect.</p></div>
   <div id="centre">
     <div id="detail"><p class="dim">Select a mission.</p></div>
@@ -150,6 +164,7 @@ let TOKEN = '', SEL = null, ES = null, LAST = null;
 // Which project every per-project call is about. null = the project the
 // server was started in, which is what the API assumes without ?project=.
 let PROJECT = null;
+let ROUTING = null;
 const scope = (p) => p + (PROJECT ? (p.includes('?') ? '&' : '?') + 'project='
   + encodeURIComponent(PROJECT) : '');
 const $ = (id) => document.getElementById(id);
@@ -968,11 +983,180 @@ async function loadChat() {
 
 $('send').onclick = send;
 $('say').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+$('routelink').onclick = () => showRouting($('routing').style.display === 'none');
+
+/**
+ * Agent routing — which model answers for which stage, and how hard it thinks.
+ *
+ * Every option here comes from the PROVIDERS. The model list is whatever each
+ * provider publishes, and the reasoning levels are the ones that model actually
+ * accepts — gpt-5.5 stops at xhigh while a sibling takes ultra. Offering a
+ * combination the provider would refuse is offering a failed mission.
+ *
+ * Precedence is shown per field, because it works per field: setting only the
+ * reasoning level for a project keeps the global choice of model.
+ */
+async function loadRouting() {
+  const d = await api(scope('/routing'));
+  ROUTING = d;
+  const el = $('routing');
+  let h = '<h2>Agent routing</h2>';
+  h += '<p class="dim">Which model answers for each stage of the pipeline, and how hard '
+    + 'it thinks. Options come from the providers themselves \u2014 a level a model cannot '
+    + 'use is not offered.</p>';
+  h += '<div class="tier"><span class="dim">editing</span>'
+    + '<select id="tier"><option value="project">this project</option>'
+    + '<option value="global">global default</option></select>'
+    + '<span class="dim" id="tierwhy"></span></div>';
+  h += '<div id="stages"></div>';
+  el.innerHTML = h;
+  $('tier').onchange = () => renderStages();
+  renderStages();
+}
+
+function renderStages() {
+  const d = ROUTING;
+  const tier = $('tier').value;
+  $('tierwhy').textContent = tier === 'project'
+    ? 'overrides the global default for ' + d.projectId
+    : 'applies to every project that does not override it';
+  const wrap = $('stages');
+  wrap.innerHTML = '';
+
+  for (const st of d.stages) {
+    const r = d.routes.find((x) => x.stage === st.stage);
+    const set = (tier === 'project' ? d.project : d.global)[st.stage] || {};
+    const box = document.createElement('div');
+    box.className = 'stage' + (Object.keys(set).length ? ' overridden' : '');
+    box.innerHTML = '<h4>' + esc(st.label) + '</h4>'
+      + '<div class="why">' + esc(st.description) + '</div>'
+      + '<div class="row"></div>'
+      + '<div class="src"></div>';
+    const row = box.querySelector('.row');
+
+    const providers = d.capabilities.map((c) => c.provider);
+    const cap = () => d.capabilities.find((c) => c.provider === (sel.provider.value || r.provider));
+
+    const sel = {};
+    const mk = (name, label, options, value, allowBlank) => {
+      const l = document.createElement('label');
+      l.textContent = label;
+      const s = document.createElement('select');
+      if (allowBlank) {
+        const o = document.createElement('option');
+        o.value = ''; o.textContent = 'inherit';
+        s.appendChild(o);
+      }
+      for (const opt of options) {
+        const o = document.createElement('option');
+        o.value = typeof opt === 'string' ? opt : opt.id;
+        o.textContent = typeof opt === 'string' ? opt : (opt.display || opt.id);
+        s.appendChild(o);
+      }
+      s.value = value == null ? '' : String(value);
+      l.appendChild(s);
+      row.appendChild(l);
+      sel[name] = s;
+      return s;
+    };
+
+    mk('provider', 'Provider', providers, set.provider ?? r.provider, false);
+    const modelSel = mk('model', 'Model',
+      (cap()?.models || []), set.model ?? null, true);
+    const reasoningSel = mk('reasoning', 'Reasoning',
+      reasoningFor(cap(), set.model ?? r.model), set.reasoning ?? null, true);
+
+    // Changing the provider changes what models exist; changing the model
+    // changes which reasoning levels do. Rebuild rather than leave a stale
+    // list that would let an impossible pair be chosen.
+    sel.provider.onchange = () => {
+      const c = cap();
+      fill(modelSel, (c?.models || []), true);
+      fill(reasoningSel, reasoningFor(c, ''), true);
+    };
+    modelSel.onchange = () => fill(reasoningSel, reasoningFor(cap(), modelSel.value), true);
+
+    const save = document.createElement('button');
+    save.textContent = 'save';
+    save.onclick = async () => {
+      save.disabled = true;
+      const r2 = await apiPost('/routing', {
+        stage: st.stage, tier,
+        provider: sel.provider.value,
+        model: modelSel.value,
+        reasoning: reasoningSel.value,
+      });
+      save.disabled = false;
+      if (r2.status === 409) {
+        const p = (r2.json.problems || [])[0] || {};
+        bubble('<span class="bad">' + esc(st.label) + ': ' + esc(p.detail || 'refused')
+          + '</span>' + (p.options ? '<br><span class="dim">accepts '
+            + esc(p.options.join(', ')) + '</span>' : ''), false);
+      } else if (r2.status >= 400) {
+        bubble('<span class="bad">' + esc((r2.json && r2.json.detail) || r2.status) + '</span>', false);
+      } else {
+        bubble('Routing for <b>' + esc(st.label) + '</b> saved to the '
+          + esc(tier === 'project' ? 'project' : 'global default') + '.', false);
+        loadRouting();
+      }
+    };
+    row.appendChild(save);
+
+    box.querySelector('.src').textContent =
+      'in use: ' + r.provider + ' \u00b7 ' + (r.model || r.provider + ' default')
+      + ' \u00b7 ' + (r.reasoning || 'provider default')
+      + '  (from ' + r.source.provider + '/' + r.source.model + '/' + r.source.reasoning + ')';
+
+    const bad = (d.problems || []).filter((p) => p.stage === st.stage);
+    if (bad.length) {
+      const b = document.createElement('div');
+      b.className = 'bad';
+      b.textContent = bad.map((p) => p.detail).join(' · ');
+      box.appendChild(b);
+    }
+    wrap.appendChild(box);
+  }
+}
+
+/** The levels THIS model accepts, falling back to the provider's own union. */
+function reasoningFor(cap, modelId) {
+  if (!cap) return [];
+  const m = (cap.models || []).find((x) => x.id === modelId);
+  return (m && m.reasoning && m.reasoning.length) ? m.reasoning : (cap.reasoning || []);
+}
+
+function fill(sel, options, allowBlank) {
+  const was = sel.value;
+  sel.innerHTML = '';
+  if (allowBlank) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = 'inherit';
+    sel.appendChild(o);
+  }
+  for (const opt of options) {
+    const o = document.createElement('option');
+    o.value = typeof opt === 'string' ? opt : opt.id;
+    o.textContent = typeof opt === 'string' ? opt : (opt.display || opt.id);
+    sel.appendChild(o);
+  }
+  sel.value = [...sel.options].some((o) => o.value === was) ? was : '';
+}
 
 function showHome(on) {
   $('home').style.display = on ? 'block' : 'none';
+  $('routing').style.display = 'none';
   for (const id of ['list', 'centre', 'chat']) $(id).style.display = on ? 'none' : '';
   $('crumb').style.display = on ? 'none' : '';
+  $('routelink').style.display = on ? 'none' : '';
+}
+
+/** The settings screen is a view of the project, so it lives beside it. */
+function showRouting(on) {
+  $('routing').style.display = on ? 'block' : 'none';
+  $('home').style.display = 'none';
+  for (const id of ['list', 'centre', 'chat']) $(id).style.display = on ? 'none' : '';
+  $('routelink').textContent = on ? '← back to missions' : 'agent routing';
+  if (on) loadRouting();
 }
 
 /**

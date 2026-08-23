@@ -271,7 +271,12 @@ function budgetCell(m) {
     { label: 'spend', now: u.costUsd || 0, max: b.costCeilingUsd,
       fmt: (v) => '$' + Number(v).toFixed(4) },
     { label: 'tasks', now: u.tasksSpawned, max: b.maxTasks, fmt: (v) => String(v) },
-    { label: 'plans refused', now: u.planRecompiles, max: b.maxPlanRecompiles,
+    // AUTOMATIC replans against the limit, because that is the only kind the
+    // limit bounds. Showing every refused plan against it read "3 of 3
+    // reached" over a cascade that was correctly still running, because one of
+    // the three was the attempt a person asked for. A gauge that disagrees
+    // with the rule it draws is worse than no gauge.
+    { label: 'automatic replans', now: u.autoPlanRecompiles, max: b.maxPlanRecompiles,
       fmt: (v) => String(v) },
     { label: 'replans', now: u.replans, max: b.maxReplans, fmt: (v) => String(v) },
   ];
@@ -289,6 +294,13 @@ function budgetCell(m) {
       + Math.round(frac * 100) + '%"></i></span>'
       + (r.now >= r.max ? '<span class="bad">reached</span>' : '')
       + '</div>';
+  }
+  // The total, as information rather than a limit: human-triggered attempts
+  // are bounded by spend, not by a count.
+  if (u.planRecompiles > u.autoPlanRecompiles) {
+    h += '<div class="dim">' + u.planRecompiles + ' plan(s) refused in all; the other '
+      + (u.planRecompiles - u.autoPlanRecompiles)
+      + ' were asked for, and are bounded by spend rather than by a count</div>';
   }
   if (m.cost.isLowerBound) {
     h += '<div class="dim">the ceiling is checked against provider-reported spend; '

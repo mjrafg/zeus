@@ -2370,6 +2370,14 @@ export async function webSuite(): Promise<void> {
 
     check('BG5: the console renders spend against the ceiling',
       /spend[\s\S]{0,80}costCeilingUsd/.test(UI_HTML), 'gauge present');
+    // The gauge said "3 of 3 reached" over a cascade that was correctly still
+    // running, because one of the three was the attempt a person asked for.
+    check('BG5b: the replan gauge counts the AUTOMATIC ones, which is what the limit bounds',
+      /now: u\.autoPlanRecompiles, max: b\.maxPlanRecompiles/.test(UI_HTML)
+      && !/now: u\.planRecompiles, max: b\.maxPlanRecompiles/.test(UI_HTML),
+      'gauge matches the rule it draws');
+    check('BG5c: and the human-asked ones are shown as information, not as a limit',
+      UI_HTML.includes('bounded by spend rather than by a count'), 'totals explained');
     check('BG6: and says the unmetered calls are NOT inside the number the ceiling checks',
       UI_HTML.includes('reported no price and are not in it'), 'lower bound explained');
   }

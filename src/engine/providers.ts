@@ -26,6 +26,19 @@ export interface AgentRequest {
   /** Implementers may write; planners and reviewers may not. */
   readOnly: boolean;
   timeoutSeconds?: number;
+  /**
+   * The model and effort Zeus resolved for this call's pipeline stage.
+   *
+   * Null means "the provider CLI decides", and that is a STATED position
+   * rather than an absence: before these existed, every call ran on whatever
+   * those CLIs happened to be configured with, which was invisible to the log
+   * and different on another machine. A mission could not say which model
+   * wrote its plan.
+   */
+  model?: string | null;
+  reasoning?: string | null;
+  /** The stage this call serves, for the record. Roles collapse seven into three. */
+  stage?: string;
 }
 
 export interface AgentResponse {
@@ -266,6 +279,10 @@ export function claudeProvider(binOverride?: string): Provider {
     },
     invoke: (req, sup) => runCli('claude', bin, (r) => [
       '-p', r.prompt,
+      // Only when Zeus resolved one. Passing an empty --model is not the same
+      // as not passing it, and the difference is a failed call.
+      ...(r.model ? ['--model', r.model] : []),
+      ...(r.reasoning ? ['--effort', r.reasoning] : []),
       '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
       '--permission-mode', r.readOnly ? 'manual' : 'acceptEdits',
       '--allowed-tools', ...(r.readOnly ? ['Read', 'Grep', 'Glob', 'Bash'] : ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash']),
@@ -283,7 +300,11 @@ export function codexProvider(binOverride?: string): Provider {
       return found ? { ok: true, detail: found } : { ok: false, detail: `${bin} not found on PATH` };
     },
     invoke: (req, sup) => runCli('codex', bin, (r) => [
-      'exec', '--json', '--sandbox', 'read-only', '--skip-git-repo-check', r.prompt,
+      'exec', '--json', '--sandbox', 'read-only', '--skip-git-repo-check',
+      ...(r.model ? ['--model', r.model] : []),
+      // Codex takes effort as a config override rather than a flag of its own.
+      ...(r.reasoning ? ['-c', `model_reasoning_effort=\"${r.reasoning}\"`] : []),
+      r.prompt,
     ], req, sup),
   };
 }

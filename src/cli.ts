@@ -13,6 +13,7 @@ import * as path from 'path';
 import {
   ProjectConfig, defaultConfig, findProjectRoot, projectConfigPath, readConfig,
   renderConfig, userConfigDir, userDataDir, userDefaultsPath, validateConfig,
+  readUserDefaults,
   writeConfig, writeUserDefaults, PROJECT_DIR,
 } from './config';
 import { detectProject } from './adapters';
@@ -46,6 +47,10 @@ import {
   compileMissionOracle, planMissionGraph, recompileMissionOracle,
   MAX_ORACLE_RECOMPILES, budgetsFor, liveRun,
 } from './mission/operations';
+import {
+  resolveRouting, validateRouting, renderRouting, providerCapabilities,
+  STAGE_LABEL, STAGE_DESCRIPTION,
+} from './routing';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -1557,6 +1562,26 @@ async function cmdMission(argv: string[]): Promise<number> {
         missions.recordRunFinished(id, held.pid, 'ABANDONED');
       }
 
+      // ROUTING BEFORE READINESS, because it is free and it decides what the
+      // money will be spent on. An operator should never learn which model
+      // wrote their plan by reading the log afterwards.
+      const routes = engine.routing;
+      const routeProblems = validateRouting(routes);
+      if (!json) {
+        out('');
+        out(`  ${C.b}agent routing${C.x}`);
+        for (const line of renderRouting(routes)) out(`    ${C.dim}${line}${C.x}`);
+      }
+      if (routeProblems.length) {
+        err(`${C.r}✗${C.x} ${id} will not start: the routing table is not usable`);
+        for (const p of routeProblems) {
+          err(`  ${C.r}✗${C.x} ${STAGE_LABEL[p.stage]} ${p.field}: ${p.detail}`);
+          if (p.options?.length) err(`      ${C.dim}accepts ${p.options.join(', ')}${C.x}`);
+        }
+        err(`  ${C.dim}nothing was spent — zeus routing shows the whole table${C.x}`);
+        return 1;
+      }
+
       // Project readiness comes FIRST, before the selftest, because it is free
       // and the selftest costs money. The same probes doctor runs, from the
       // same implementation: two health paths that decide separately will
@@ -1626,6 +1651,40 @@ async function cmdMission(argv: string[]): Promise<number> {
       for (const r of result.refusals) out(`  ${C.y}${r.code}${C.x} ${r.detail}`);
       out(`  ${C.dim}zeus mission report ${missionLabel(id)} for the full account${C.x}`);
       return result.achievement === 'ACHIEVED' ? 0 : 1;
+    }
+
+    case 'routing': {
+      const routes = resolveRouting({
+        project: ctx.cfg.routing ?? null,
+        global: readUserDefaults()?.routing ?? null,
+      });
+      const problems = validateRouting(routes);
+      if (json) {
+        out(JSON.stringify({ routes, problems, capabilities: providerCapabilities() }, null, 1));
+        return problems.length ? 1 : 0;
+      }
+      out(`${C.b}agent routing${C.x} ${C.dim}${ctx.root}${C.x}`);
+      out('');
+      for (const r of routes) {
+        const model = r.model ?? `${C.dim}${r.provider} default${C.x}`;
+        const reasoning = r.reasoning ?? `${C.dim}provider default${C.x}`;
+        out(`  ${STAGE_LABEL[r.stage].padEnd(14)} ${C.b}${r.provider}${C.x} · ${model} · ${reasoning}`);
+        out(`  ${' '.repeat(14)} ${C.dim}${STAGE_DESCRIPTION[r.stage]}${C.x}`);
+        out(`  ${' '.repeat(14)} ${C.dim}from ${r.source.provider}/${r.source.model}/${r.source.reasoning}${C.x}`);
+      }
+      if (problems.length) {
+        out('');
+        for (const p of problems) {
+          err(`  ${C.r}✗${C.x} ${STAGE_LABEL[p.stage]} ${p.field}: ${p.detail}`);
+          if (p.options?.length) err(`      ${C.dim}accepts ${p.options.join(', ')}${C.x}`);
+        }
+        return 1;
+      }
+      out('');
+      for (const cap of providerCapabilities()) {
+        out(`  ${C.dim}${cap.provider}: ${cap.detail}${C.x}`);
+      }
+      return 0;
     }
 
     case 'report': {

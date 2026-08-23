@@ -41,6 +41,10 @@ export interface CompileInput {
   goal: string;
   context: ProjectContext;
   provider: Provider;
+  /** The model and effort Zeus resolved for this stage. Null = provider decides. */
+  model?: string | null;
+  reasoning?: string | null;
+  stage?: string;
   supervisor: ProcessSupervisor;
   policy: ExecutionPolicy;
   baseSha: string;
@@ -176,6 +180,7 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
   try {
     res = await input.provider.invoke({
       role: 'planner', taskId: input.missionId, projectId: input.projectId,
+      model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt, policy: input.policy, readOnly: true,
     }, input.supervisor);
   } catch (e: any) {
@@ -273,6 +278,8 @@ export async function critiqueOracle(input: {
   missionId: string; projectId: string; goal: string; criteria: Criterion[];
   context: ProjectContext; provider: Provider; supervisor: ProcessSupervisor;
   policy: ExecutionPolicy; baseSha: string;
+  /** The model and effort Zeus resolved for this stage. Null = provider decides. */
+  model?: string | null; reasoning?: string | null; stage?: string;
   /** Extra sections a caller wants delivered — used by tests to prove refusal. */
   extraInputs?: Array<{ kind: any; label: string; content: string }>;
 }): Promise<CritiqueResult> {
@@ -305,6 +312,7 @@ export async function critiqueOracle(input: {
   try {
     res = await input.provider.invoke({
       role: 'reviewer', taskId: input.missionId, projectId: input.projectId,
+      model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt: payload.prompt, policy: input.policy, readOnly: true,
     }, input.supervisor);
   } catch (e: any) {

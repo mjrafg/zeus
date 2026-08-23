@@ -140,6 +140,10 @@ export interface PlanInput {
   criteria: Criterion[];
   context: ProjectContext;
   provider: Provider;
+  /** The model and effort Zeus resolved for this stage. Null = provider decides. */
+  model?: string | null;
+  reasoning?: string | null;
+  stage?: string;
   supervisor: ProcessSupervisor;
   policy: ExecutionPolicy;
   baseSha: string;
@@ -299,6 +303,7 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
   try {
     res = await input.provider.invoke({
       role: 'planner', taskId: input.missionId, projectId: input.projectId,
+      model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt, policy: input.policy, readOnly: true,
     }, input.supervisor);
   } catch (e: any) { return fail(`planner provider threw: ${e?.message ?? e}`); }
@@ -448,6 +453,8 @@ export async function critiquePlan(input: {
   criteria: Criterion[]; graph: PlanGraph; validation: PlanValidation;
   context: ProjectContext; provider: Provider; supervisor: ProcessSupervisor;
   policy: ExecutionPolicy; baseSha: string;
+  /** The model and effort Zeus resolved for this stage. Null = provider decides. */
+  model?: string | null; reasoning?: string | null; stage?: string;
   extraInputs?: ReviewInput[];
 }): Promise<PlanCritique> {
   const payload = buildReviewPayload({
@@ -486,6 +493,7 @@ export async function critiquePlan(input: {
   try {
     res = await input.provider.invoke({
       role: 'reviewer', taskId: input.missionId, projectId: input.projectId,
+      model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt: payload.prompt, policy: input.policy, readOnly: true,
     }, input.supervisor);
   } catch (e: any) {

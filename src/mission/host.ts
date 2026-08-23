@@ -133,8 +133,9 @@ export function missionHost(input: MissionHostInput): LoopHost {
   let lastTaskId: string | null = null;
 
   return {
-    createTask(node: TaskNode): string {
-      const rec = engine.createTask(node.description, { missionId });
+    createTask(node: TaskNode, opts: { repair?: boolean } = {}): string {
+      const rec = engine.createTask(node.description,
+        { missionId, ...(opts.repair ? { repair: true } : {}) });
       tasks.set(rec.taskId, rec);
       return rec.taskId;
     },

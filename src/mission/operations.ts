@@ -15,6 +15,7 @@
 
 import { MissionRegistry, PlanTrigger } from './registry';
 import { Engine } from '../engine/orchestrator';
+import { PipelineStage } from '../routing';
 import { ExecutionPolicy } from '../engine/policy';
 import {
   Criterion, Oracle, OracleFinding, ProjectContext,
@@ -92,7 +93,7 @@ export async function recompileMissionOracle(ctx: OperationContext,
   const compiled = await compileOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, context: ctx.context,
     provider: engine.opts.providers.planner, supervisor: engine.opts.supervisor,
-    policy: ctx.policy, baseSha: rec.baseSha,
+    policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle'),
     prior: { criteria: prior.criteria, findings, version: prior.version },
   });
   if (!compiled.ok) {
@@ -124,6 +125,7 @@ export async function recompileMissionOracle(ctx: OperationContext,
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: compiled.criteria,
     context: ctx.context, provider: engine.opts.providers.reviewer,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha: rec.baseSha,
+    ...route(engine, 'oracle-critic'),
   });
   const nextFindings: CriticFindingRef[] = critique.valid
     ? (critique.findings as CriticFindingRef[]) : [];
@@ -154,6 +156,24 @@ export async function recompileMissionOracle(ctx: OperationContext,
     acceptedBy: null,
     recompiledFrom: { version: prior.version, findingsForwarded: findings.length, attempt },
   };
+}
+
+/**
+ * The model and effort resolved for one pipeline stage.
+ *
+ * Spread into a provider call rather than passed as an object, so a call site
+ * that forgets it fails to compile against a route-carrying input type instead
+ * of quietly running on the provider's default.
+ *
+ * This is where four stages stopped being two settings: the oracle and the
+ * planner both used providers.planner, and the oracle critic and the plan
+ * critic both used providers.reviewer, so wanting a cheaper model for one and
+ * not the other was not expressible.
+ */
+function route(engine: Engine, stage: PipelineStage):
+{ model: string | null; reasoning: string | null; stage: string } {
+  const r = engine.routeFor(stage);
+  return { model: r.model, reasoning: r.reasoning, stage: r.stage };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -210,7 +230,7 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
   const compiled = await compileOracle({
     missionId, projectId: engine.projectId, goal: rec.goal, context: ctx.context,
     provider: engine.opts.providers.planner, supervisor: engine.opts.supervisor,
-    policy: ctx.policy, baseSha: rec.baseSha,
+    policy: ctx.policy, baseSha: rec.baseSha, ...route(engine, 'oracle'),
   });
   if (!compiled.ok) {
     // A provider that could not answer is infrastructure. The mission has not
@@ -233,6 +253,7 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: compiled.criteria,
     context: ctx.context, provider: engine.opts.providers.reviewer,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha: rec.baseSha,
+    ...route(engine, 'oracle-critic'),
   });
   const findings: CriticFindingRef[] = critique.valid ? (critique.findings as CriticFindingRef[]) : [];
   const proposal = proposeAcceptance(compiled.criteria, ctx.context,
@@ -454,6 +475,7 @@ async function planOnce(ctx: OperationContext, missionId: string,
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,
     context: ctx.context, provider: engine.opts.providers.planner,
     supervisor: engine.opts.supervisor, policy: ctx.policy, baseSha,
+    ...route(engine, 'planner'),
     // The previous attempt AND what was said against it. Without this a replan
     // starts from the goal alone and repeats the last plan's mistakes: two
     // plans in a row left the site chrome outside the localisation nodes,
@@ -484,7 +506,7 @@ async function planOnce(ctx: OperationContext, missionId: string,
     missionId, projectId: engine.projectId, goal: rec.goal, criteria: gate.criteria,
     graph, validation: planned.validation, context: ctx.context,
     provider: engine.opts.providers.reviewer, supervisor: engine.opts.supervisor,
-    policy: ctx.policy, baseSha,
+    policy: ctx.policy, baseSha, ...route(engine, 'plan-critic'),
   });
   const acceptance = planAcceptance(critique);
   missions.recordPlanCritique(missionId, {

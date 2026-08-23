@@ -42,6 +42,10 @@ const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsO
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import { detectProject, nodePackageDirs } from '../src/adapters';
+import {
+  PIPELINE_STAGES, STAGE_ROLE, ZEUS_DEFAULT_ROUTING, resolveRouting,
+  validateRouting, codexCapability,
+} from '../src/routing';
 import { ZEUS_WORKTREE_EXCLUDES, ZEUS_PATHSPEC_EXCLUDES } from '../src/engine/orchestrator';
 import { splitCommand } from '../src/engine/dependencies';
 import {
@@ -2855,6 +2859,139 @@ export async function webSuite(): Promise<void> {
         < UI_HTML.indexOf('</b> is running on this mission'), 'stated first');
     check('ORP7: and says nothing was lost, because the log is the record',
       UI_HTML.includes('Nothing was lost \u2014 the log is the record'), 'reassured');
+  }
+
+  section('every stage of the pipeline routes on its own');
+  {
+    // Seven stages used to be three settings. The oracle and the planner both
+    // took providers.planner; the oracle critic and the plan critic both took
+    // providers.reviewer. Wanting a cheaper model for one and not the other
+    // was not expressible, and no log said which model wrote a plan.
+    check('RT1: the pipeline has seven stages, each nameable on its own',
+      PIPELINE_STAGES.length === 7
+      && PIPELINE_STAGES.includes('oracle') && PIPELINE_STAGES.includes('planner')
+      && PIPELINE_STAGES.includes('oracle-critic') && PIPELINE_STAGES.includes('plan-critic')
+      && PIPELINE_STAGES.includes('repair'),
+      PIPELINE_STAGES.join(', '));
+
+    const split = resolveRouting({ project: {
+      oracle: { provider: 'claude', model: 'opus', reasoning: 'high' },
+      planner: { provider: 'codex', model: 'gpt-5.4-mini', reasoning: 'low' },
+    } });
+    const at = (st: string) => split.find((r) => r.stage === st)!;
+    check('RT2: the oracle and the planner are separate settings, though both plan',
+      at('oracle').model === 'opus' && at('planner').model === 'gpt-5.4-mini'
+      && at('oracle').role === at('planner').role,
+      `${at('oracle').model} vs ${at('planner').model}, both role ${at('oracle').role}`);
+    check('RT3: and so are the two critics, though both review',
+      STAGE_ROLE['oracle-critic'] === 'reviewer' && STAGE_ROLE['plan-critic'] === 'reviewer'
+      && at('oracle-critic').stage !== at('plan-critic').stage,
+      'distinct stages, one role');
+
+    // Precedence is per FIELD. An operator who sets only the reasoning level
+    // in a project should keep the global choice of model, not fall back to
+    // the Zeus default for it.
+    const layered = resolveRouting({
+      global: { 'plan-critic': { model: 'gpt-5.6-terra', reasoning: 'high' } },
+      project: { 'plan-critic': { reasoning: 'xhigh' } },
+    });
+    const pc = layered.find((r) => r.stage === 'plan-critic')!;
+    check('RT4: project over global over Zeus default, field by field',
+      pc.model === 'gpt-5.6-terra' && pc.reasoning === 'xhigh'
+      && pc.source.model === 'global' && pc.source.reasoning === 'project',
+      `${pc.model}/${pc.source.model} + ${pc.reasoning}/${pc.source.reasoning}`);
+    check('RT5: an unset field says provider-default rather than inventing one',
+      layered.find((r) => r.stage === 'reviewer')!.model === null
+      && layered.find((r) => r.stage === 'reviewer')!.source.model === 'provider-default',
+      'null is a stated position');
+    check('RT6: Zeus ships no default model — an upgrade cannot silently move a mission',
+      Object.values(ZEUS_DEFAULT_ROUTING).every((c) => c.model === undefined
+        && c.reasoning === undefined),
+      JSON.stringify(ZEUS_DEFAULT_ROUTING.planner));
+  }
+
+  section('the catalogue comes from the providers, not from Zeus');
+  {
+    // A hardcoded model list is wrong the week after it is written, and
+    // offering a reasoning level a model cannot use is offering a failed call.
+    const codexCache = path.join(TMP, `models-${seq += 1}.json`);
+    fs.writeFileSync(codexCache, JSON.stringify({
+      fetched_at: '2026-01-01T00:00:00Z',
+      models: [
+        { slug: 'big', display_name: 'Big', default_reasoning_level: 'medium',
+          supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }, { effort: 'ultra' }] },
+        { slug: 'small', display_name: 'Small', default_reasoning_level: 'low',
+          supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }] },
+        { slug: 'secret', display_name: 'Hidden', visibility: 'hidden',
+          supported_reasoning_levels: [{ effort: 'low' }] },
+      ],
+    }));
+    const cap = codexCapability(codexCache);
+    check('CAT1: models and their reasoning levels are read from the provider catalogue',
+      cap.models.length === 2 && cap.models[0].id === 'big'
+      && cap.models[0].reasoning.join() === 'low,high,ultra',
+      JSON.stringify(cap.models.map((m) => [m.id, m.reasoning.join('/')])));
+    check('CAT2: a model the provider marks hidden is not offered',
+      !cap.models.some((m) => m.id === 'secret'), 'hidden stays hidden');
+    check('CAT3: a closed catalogue says so, so an unknown name can be refused',
+      cap.closed === true, String(cap.closed));
+    check('CAT4: with no catalogue on disk it says that, rather than reporting no models',
+      /run the codex CLI once/.test(codexCapability(path.join(TMP, 'nope.json')).detail),
+      codexCapability(path.join(TMP, 'nope.json')).detail);
+
+    const routes = resolveRouting({ project: {
+      planner: { provider: 'codex', model: 'small', reasoning: 'ultra' },
+      reviewer: { provider: 'codex', model: 'nope' },
+      oracle: { provider: 'codex', model: 'big', reasoning: 'ultra' },
+    } });
+    const problems = validateRouting(routes, [cap]);
+    const byStage = (st: string) => problems.find((p) => p.stage === st);
+    check('CAT5: a level THIS model cannot use is refused, with the ones it can',
+      byStage('planner')?.code === 'UNSUPPORTED_REASONING'
+      && byStage('planner')?.options?.join() === 'low,high',
+      JSON.stringify(byStage('planner')));
+    check('CAT6: the same level on a model that DOES support it passes',
+      !byStage('oracle'), JSON.stringify(byStage('oracle') ?? 'accepted'));
+    check('CAT7: a model outside a closed catalogue is refused, with the catalogue',
+      byStage('reviewer')?.code === 'UNKNOWN_MODEL'
+      && byStage('reviewer')?.options?.join() === 'big,small',
+      JSON.stringify(byStage('reviewer')));
+
+    // Claude publishes no catalogue; its list is open and must stay open, or a
+    // Zeus release could stop an operator using a model that shipped yesterday.
+    const open: any = { provider: 'claude', source: 'help', closed: false,
+      models: [{ id: 'opus', display: 'opus', reasoning: ['low', 'high'], defaultReasoning: null }],
+      reasoning: ['low', 'high'], detail: '' };
+    const exotic = resolveRouting({ project: {
+      planner: { provider: 'claude', model: 'claude-something-6' },
+    } });
+    check('CAT8: an unlisted model on an OPEN catalogue is passed through, not refused',
+      !validateRouting(exotic, [open]).some((p) => p.field === 'model'),
+      'open catalogues accept unknown names');
+  }
+
+  section('the resolved route reaches the provider argv');
+  {
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'engine', 'providers.ts'), 'utf8');
+    check('RV1: claude is given --model and --effort when Zeus resolved them',
+      /\.\.\.\(r\.model \? \['--model', r\.model\] : \[\]\)/.test(src)
+      && /\.\.\.\(r\.reasoning \? \['--effort', r\.reasoning\] : \[\]\)/.test(src),
+      'claude flags wired');
+    check('RV2: codex is given --model and its own reasoning config key',
+      /model_reasoning_effort=/.test(src), 'codex flags wired');
+    check('RV3: an unresolved field passes NO flag — empty is not the same as absent',
+      /r\.model \? \[/.test(src) && !/'--model', r\.model \?\? ''/.test(src),
+      'no empty flags');
+    const orch = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'engine', 'orchestrator.ts'), 'utf8');
+    check('RV4: a repair routes to the repair stage, not to the implementer one',
+      /rec\.repair \? 'repair' : 'implementer'/.test(orch), 'repair is its own stage');
+    check('RV5: the table is resolved once per engine, not per call',
+      /readonly routing: ResolvedRoute\[\]/.test(orch), 'resolved at construction');
+    check('RV6: what Zeus ASKED for is recorded on the call, separately from the answer',
+      /configuredModel: route\.model, configuredReasoning: route\.reasoning/.test(orch),
+      'configured is recorded');
   }
 
   section('a runner outlives the console that started it');

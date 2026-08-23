@@ -7,6 +7,7 @@
  */
 
 import * as fs from 'fs';
+import { RoutingTable } from './routing';
 import * as path from 'path';
 import * as os from 'os';
 import { parse, stringify, Yaml } from './yaml';
@@ -35,6 +36,15 @@ export interface ProjectConfig {
     maxPlaywrightWorkers: number;
   };
   providers: { planner: string; implementer: string; reviewer: string; billing: string };
+  /**
+   * Which model answers for which pipeline stage, and how hard it thinks.
+   *
+   * Optional and sparse BY DESIGN: an absent stage, or an absent field within
+   * a stage, falls through to the global setting and then to the Zeus default.
+   * Writing the whole table into every project would freeze today's answer
+   * into every config file on disk.
+   */
+  routing?: RoutingTable;
   validation: {
     /** Only 'fastest-safe' exists today; the field makes future strategies explicit. */
     strategy: string;
@@ -79,6 +89,8 @@ export function userDefaultsPath(): string {
 /** Defaults a new project inherits. Never holds a credential. */
 export interface UserDefaults {
   providers?: { planner?: string; implementer?: string; reviewer?: string };
+  /** The global tier of the routing table. Projects override it field by field. */
+  routing?: RoutingTable;
 }
 
 export function readUserDefaults(): UserDefaults | null {

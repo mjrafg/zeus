@@ -20,7 +20,8 @@ import { prepareDependencies, depsCacheRoot, PrepMethod } from './dependencies';
 import { readOnlyGit } from './gitro';
 import { isMissionId, requireScope, ScopeMismatchError } from '../mission/types';
 import { Provider, AgentResponse, Role } from './providers';
-import { ProjectConfig } from '../config';
+import { ProjectConfig, readUserDefaults } from '../config';
+import { PipelineStage, ResolvedRoute, resolveRouting } from '../routing';
 import { adapterById } from '../adapters';
 import { TaskBudgets, mergeBudgets, usageFrom, checkBudgets } from './taskbudget';
 import { buildReviewPayload, DEFAULT_REVIEW_POLICY, ReviewContextPolicy, ReviewInput, reconcileReviewerReport } from './reviewcontext';
@@ -82,6 +83,15 @@ export interface TaskRecord {
   worktree: string;
   baseSha: string;
   cancelRequested: boolean;
+  /**
+   * Whether this task is a retry of a node that already failed.
+   *
+   * Carried on the record so the engine can route it to the `repair` stage
+   * without reading the mission log — the caller that decided to repair is the
+   * one that knows, and asking a lower layer to infer it from a higher layer's
+   * events would be the wrong direction.
+   */
+  repair?: boolean;
 }
 
 export interface EngineOptions {
@@ -150,10 +160,28 @@ export class Engine {
   readonly stateRoot: string;
   readonly projectId: string;
 
+  /**
+   * The routing table this engine is operating under.
+   *
+   * Resolved ONCE, at construction, from project over global over the Zeus
+   * default. Resolving per call would mean an edit to a config file halfway
+   * through a mission silently changing which model wrote the second half of
+   * it, and no way afterwards to say which half was which.
+   */
+  readonly routing: ResolvedRoute[];
+
+  routeFor(stage: PipelineStage): ResolvedRoute {
+    return this.routing.find((r) => r.stage === stage)!;
+  }
+
   constructor(readonly opts: EngineOptions) {
     this.stateRoot = opts.stateRoot
       ?? path.resolve(opts.projectRoot, opts.config.paths?.state ?? '.zeus/state');
     this.projectId = opts.config.project?.name ?? path.basename(opts.projectRoot);
+    this.routing = resolveRouting({
+      project: opts.config.routing ?? null,
+      global: readUserDefaults()?.routing ?? null,
+    });
     this.events = new EventStore(this.stateRoot);
     this.lock = new ProjectLock(this.stateRoot, this.projectId);
     this.taskBudgets = mergeBudgets(opts.taskBudgets);
@@ -299,7 +327,8 @@ export class Engine {
    * task's TASK_CREATED payload is byte-for-byte what it always was — this
    * stage adds a field to missions' tasks, not to everyone's.
    */
-  createTask(description: string, opts: { missionId?: string } = {}): TaskRecord {
+  createTask(description: string,
+    opts: { missionId?: string; repair?: boolean } = {}): TaskRecord {
     const taskId = this.nextTaskId();
     const worktree = path.resolve(this.opts.projectRoot,
       this.opts.config.paths?.worktrees ?? '.zeus/worktrees', taskIdToDir(taskId));
@@ -307,12 +336,14 @@ export class Engine {
       taskId, description, state: 'NEW', phase: 'new',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       worktree, baseSha: this.gitSha(), cancelRequested: false,
+      ...(opts.repair ? { repair: true } : {}),
     };
     if (opts.missionId) requireScope('MISSION', opts.missionId);
     this.record({ taskId, type: 'TASK_CREATED', payload: {
       description, worktree, baseSha: rec.baseSha, projectId: this.projectId,
       adapter: this.opts.config.project?.adapter,
       ...(opts.missionId ? { missionId: opts.missionId } : {}),
+      ...(opts.repair ? { repair: true } : {}),
     } });
     return rec;
   }
@@ -426,10 +457,23 @@ export class Engine {
     }
   }
 
-  private async agent(role: Role, rec: TaskRecord, prompt: string, readOnly: boolean): Promise<AgentResponse> {
+  private async agent(role: Role, rec: TaskRecord, prompt: string, readOnly: boolean,
+    stage?: PipelineStage): Promise<AgentResponse> {
     const provider = role === 'planner' ? this.opts.providers.planner
       : role === 'implementer' ? this.opts.providers.implementer : this.opts.providers.reviewer;
-    this.record({ taskId: rec.taskId, type: 'AGENT_STARTED', payload: { role, provider: provider.id, readOnly } });
+    // A stage is more specific than a role and is used when the caller knows
+    // one: `repair` and `implementer` are both implementers, and an operator
+    // may want a cheaper model for the retry than for the first attempt.
+    const route = this.routeFor(stage ?? (role === 'planner' ? 'planner'
+      : role === 'implementer' ? (rec.repair ? 'repair' : 'implementer') : 'reviewer'));
+    this.record({ taskId: rec.taskId, type: 'AGENT_STARTED', payload: {
+      role, provider: provider.id, readOnly,
+      stage: route.stage,
+      // What Zeus ASKED FOR. What actually answered is read from the stream and
+      // recorded on AGENT_FINISHED; the two are never folded into one field.
+      configuredModel: route.model, configuredReasoning: route.reasoning,
+      reasoningSource: route.source.reasoning,
+    } });
     // The provider span covers the whole invocation; the process instants the
     // supervisor captured are then attached as children, so queue wait, spawn
     // cost and generation are separable rather than one opaque number.
@@ -441,6 +485,7 @@ export class Engine {
     const res = await provider.invoke({
       role, taskId: rec.taskId, projectId: this.projectId, prompt,
       policy: this.policyFor(rec), readOnly,
+      model: route.model, reasoning: route.reasoning, stage: route.stage,
     }, this.opts.supervisor);
     this.spans.end(invokeId, { outcome: String(res.outcome), promptBytes: prompt.length });
     const pt = (res as any).timing;

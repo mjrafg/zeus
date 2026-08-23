@@ -87,6 +87,30 @@ export interface MissionHostInput {
  * what it did: the whole reason integration re-runs checks and re-reads the
  * filesystem is that a report of one's own work cannot be independent of it.
  */
+/**
+ * Whether git ignores a declared write path.
+ *
+ * `git check-ignore` is asked rather than .gitignore being parsed here: the
+ * rules compose across the repo, the worktree and the user's global config,
+ * and a second implementation of them would be wrong in exactly the cases
+ * that matter. A glob is reduced to its literal prefix, because check-ignore
+ * answers about paths and `app/node_modules/**` is a pattern.
+ *
+ * BOTH forms are asked. A rule written `node_modules/` matches directories
+ * only, and check-ignore cannot tell that a path which does not exist yet is
+ * one — so the bare form misses it and the trailing-slash form finds it. A
+ * node that installs dependencies is asked about a directory that its own run
+ * is what creates.
+ */
+function isIgnored(worktree: string, declared: string): boolean {
+  const literal = String(declared).split(/[*?[]/)[0].replace(/\/+$/, '');
+  if (!literal) return false;
+  for (const form of [`${literal}/`, literal]) {
+    if (gitSoft(worktree, ['check-ignore', '-q', '--', form]).ok) return true;
+  }
+  return false;
+}
+
 export function missionHost(input: MissionHostInput): LoopHost {
   const { engine, missionId, projectRoot, oracle } = input;
   const say = input.onEvent ?? (() => {});
@@ -147,6 +171,27 @@ export function missionHost(input: MissionHostInput): LoopHost {
       const staged = gitSoft(rec.worktree, ['diff', '--cached', '--name-only']);
       const committed = gitSoft(rec.worktree, ['log', '--format=%H', `${rec.baseSha}..HEAD`]);
       if (!(staged.ok && staged.out) && !(committed.ok && committed.out)) {
+        // AN EMPTY DIFF IS NOT ALWAYS AN EMPTY NODE.
+        //
+        // A node whose declared writes are all git-ignored does its work
+        // outside the working tree — installing dependencies, warming a cache,
+        // proving a check. It produces no commit BY DESIGN, and the plan said
+        // so: `writes: ['api/node_modules/**', 'app/node_modules/**']`.
+        //
+        // Demanding a diff from one killed a mission. install-workspaces ran
+        // correctly, twice, and both times was called "the node changed
+        // nothing", refused, repaired into the identical result, and escalated
+        // NODE_UNREPAIRABLE — while the install it had just performed was busy
+        // proving three of the mission's criteria.
+        const declared = (ctx.node.writes ?? []).filter((w) => String(w).trim());
+        const effectOnly = declared.length > 0 && declared.every((w) => isIgnored(rec.worktree, w));
+        if (effectOnly) {
+          return {
+            integrated: true, sha: green, touched: [],
+            detail: 'nothing to integrate: every path this node declared is git-ignored, '
+              + 'so its effect is outside the tree and its criteria are what prove it',
+          };
+        }
         return { integrated: false, sha: null, touched: [], detail: 'the node changed nothing' };
       }
       if (staged.ok && staged.out) {

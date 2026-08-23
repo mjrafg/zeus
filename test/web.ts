@@ -2992,6 +2992,66 @@ export async function webSuite(): Promise<void> {
       !uiSrc.slice(open + 1, close).includes('`'), 'template intact');
   }
 
+  section('a node whose work is outside the tree still counts');
+  {
+    // install-workspaces declared writes of api/node_modules/** and
+    // app/node_modules/**, ran correctly, and produced no commit — because
+    // node_modules is git-ignored. The integrator demanded a diff, called it
+    // "the node changed nothing", repaired it into the identical result and
+    // escalated NODE_UNREPAIRABLE. The mission stopped PARTIAL while the
+    // install it had just performed was proving three of its criteria.
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-effect-'));
+    const git = (args: string[]) =>
+      execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'user.email', 't@t']);
+    git(['config', 'user.name', 't']);
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules/\ndist/\n');
+    fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+    git(['add', '-A']);
+    git(['commit', '-qm', 'base']);
+
+    // Both forms, exactly as isIgnored asks them: a `node_modules/` rule
+    // matches directories only, and check-ignore cannot tell that a path which
+    // does not exist yet is one.
+    const ignored = (declared: string) => {
+      const literal = declared.split(/[*?[]/)[0].replace(/\/+$/, '');
+      if (!literal) return false;
+      for (const form of [`${literal}/`, literal]) {
+        try {
+          execFileSync('git', ['-C', repo, 'check-ignore', '-q', '--', form]);
+          return true;
+        } catch { /* try the other form */ }
+      }
+      return false;
+    };
+
+    check('EO1: a declared write under node_modules is recognised as git-ignored',
+      ignored('api/node_modules/**') === true && ignored('app/node_modules/**') === true,
+      'node_modules is ignored');
+    check('EO1b: even though neither directory exists yet — the install creates them',
+      !fs.existsSync(path.join(repo, 'api', 'node_modules')), 'asked before it exists');
+    check('EO2: a glob is reduced to its literal prefix, because check-ignore takes paths',
+      ignored('dist/**') === true, 'globs resolve');
+    check('EO3: a real source path is NOT ignored — this must keep failing loudly',
+      ignored('app/src/i18n/**') === false && ignored('README.md') === false,
+      'source paths still demand a diff');
+
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'host.ts'), 'utf8');
+    check('EO4: an empty diff is only forgiven when EVERY declared path is ignored',
+      /declared\.length > 0 && declared\.every\(\(w\) => isIgnored\(/.test(src),
+      'every, not some');
+    check('EO5: a node that declared nothing is not forgiven — silence is not a claim',
+      /declared\.length > 0 &&/.test(src), 'no declaration, no exemption');
+    check('EO6: git is asked, rather than .gitignore being parsed a second time',
+      /'check-ignore', '-q', '--'/.test(src), 'check-ignore is the authority');
+    check('EO6b: in both forms, so a directory rule is not missed',
+      /for \(const form of \[`\$\{literal\}\/`, literal\]\)/.test(src), 'both forms asked');
+    check('EO7: and the mission green does not move for a node with no commit',
+      /integrated: true, sha: green, touched: \[\]/.test(src), 'green unchanged');
+  }
+
   section('Zeus scratch is never the project\u2019s work');
   {
     // A task worktree saw .zeus-cache/ — the npm cache the install step writes

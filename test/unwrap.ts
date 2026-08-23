@@ -172,6 +172,50 @@ export function unwrapSuite(): void {
   }
 
   // ---------------------------------------------------------------------
+  section('provider streams: what the provider says about itself');
+  {
+    // All of this was arriving on every call and being dropped at the door.
+    // A mission could not say which model wrote its plan, though the answer
+    // was in the first line of the stream it had just parsed.
+    const claude = unwrapProviderStream('claude', claudeStream);
+    const id = claude.identity!;
+    check('UW60: the model that actually answered is read from the stream',
+      typeof id.model === 'string' && id.model.length > 0, String(id.model));
+    check('UW61: with the session and request it ran under',
+      typeof id.sessionId === 'string' && typeof id.requestId === 'string',
+      `${id.sessionId} / ${id.requestId}`);
+    check('UW62: and the client version, so an old CLI is diagnosable',
+      typeof id.clientVersion === 'string', String(id.clientVersion));
+    check('UW63: timing is carried apart from usage — TTFT is not a token count',
+      typeof id.ttftMs === 'number' && typeof id.durationApiMs === 'number',
+      `ttft ${id.ttftMs}ms api ${id.durationApiMs}ms`);
+    check('UW64: the tools the provider OFFERED are listed',
+      Array.isArray(id.toolsAvailable) && id.toolsAvailable!.length > 0,
+      `${id.toolsAvailable?.length} tool(s)`);
+    check('UW65: tools USED is separate from tools offered — said is not did',
+      id.toolsUsed === undefined || Array.isArray(id.toolsUsed),
+      JSON.stringify(id.toolsUsed ?? 'none used in this capture'));
+
+    // Codex reports no model in its stream. That absence must stay an absence.
+    const codex = unwrapProviderStream('codex', codexStream);
+    check('UW66: a provider that reports no model yields no model, not a guess',
+      !codex.identity || codex.identity.model === undefined,
+      JSON.stringify(codex.identity ?? null));
+
+    check('UW67: a stream with nothing to say about itself reports null',
+      unwrapProviderStream('claude', 'not json at all').identity === null,
+      'null, not an empty object');
+
+    const orch = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'engine', 'orchestrator.ts'), 'utf8');
+    check('UW68: configured and actual are recorded as SEPARATE fields',
+      /configuredModel: route\.model/.test(orch) && /identity: res\.identity/.test(orch),
+      'never one ambiguous field');
+    check('UW69: and a mismatch between them is recorded as a discrepancy',
+      /modelDiscrepancy: \{ configured: route\.model, actual: res\.identity\.model \}/.test(orch),
+      'a fallback cannot look like the configured model succeeded');
+  }
+
   section('provider streams: the fixture is a real capture, safely synthesized');
   {
     check('UW50: the fixture carries no real home path',

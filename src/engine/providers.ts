@@ -11,7 +11,9 @@
  */
 
 import { ProcessSupervisor, ExecutionRequest } from './exec';
-import { unwrapProviderStream, ProviderUsage, RateLimitNote } from './unwrap';
+import {
+  unwrapProviderStream, ProviderUsage, RateLimitNote, ProviderIdentity,
+} from './unwrap';
 import { ExecutionPolicy } from './policy';
 import { redactSecrets } from './redact';
 
@@ -55,6 +57,15 @@ export interface AgentResponse {
   infrastructureFailure: string | null;
   /** The provider's own error fields, so a failure is diagnosable from the log. */
   diagnostics?: Record<string, unknown>;
+  /**
+   * What the provider says about ITSELF — the model that actually answered,
+   * the session, the tools it used, its own timing.
+   *
+   * Never merged with what Zeus configured. If Zeus asked for one model and an
+   * alias, router or fallback resolved it to another, that discrepancy is the
+   * fact worth having, and one field could not hold both halves of it.
+   */
+  identity?: ProviderIdentity | null;
   /**
    * Cost and token counts AS THE PROVIDER REPORTED THEM.
    *
@@ -210,6 +221,7 @@ async function runCli(id: string, bin: string, argv: (req: AgentRequest) => stri
     outcome: res.outcome, infrastructureFailure: infra,
     diagnostics,
     ...(stream.usage ? { providerUsage: stream.usage } : {}),
+    ...(stream.identity ? { identity: stream.identity } : {}),
     ...(stream.rateLimit ? { rateLimit: stream.rateLimit } : {}),
     timing: res.timing,
   };

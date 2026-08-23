@@ -511,6 +511,17 @@ export class Engine {
       // a guess that later got spent against.
       ...(res.providerUsage ? { providerUsage: res.providerUsage } : {}),
       ...(res.rateLimit ? { rateLimit: res.rateLimit } : {}),
+      // WHAT ANSWERED, beside what was asked for.
+      //
+      // The provider reports the model that actually handled the call, the
+      // session, the tools it used and its own timing — all of it arriving on
+      // every call and dropped at the door until now. Kept apart from
+      // configuredModel so a provider alias, router or fallback resolving to
+      // something else is visible as a discrepancy rather than erased.
+      ...(res.identity ? { identity: res.identity } : {}),
+      ...(res.identity?.model && route.model && res.identity.model !== route.model
+        ? { modelDiscrepancy: { configured: route.model, actual: res.identity.model } }
+        : {}),
     } });
     return res;
   }

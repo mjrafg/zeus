@@ -72,6 +72,8 @@ export interface StreamExtraction {
    * than the model's payload, which knows nothing about them.
    */
   controlEvent: Record<string, unknown> | null;
+  /** What the provider says about ITSELF: model, session, tools, timing. */
+  identity: ProviderIdentity | null;
 }
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -109,6 +111,99 @@ function rateLimitOf(events: Record<string, unknown>[]): RateLimitNote | null {
       ? info.overageDisabledReason : undefined,
     constrained: status !== 'allowed' || overageStatus === 'rejected',
   };
+}
+
+/**
+ * What the provider says about ITSELF — the model that answered, the session it
+ * ran in, the tools it had, and how long the parts took.
+ *
+ * All of this was already arriving on every call and being dropped at the door.
+ * `unwrapProviderStream` read four things out of the stream: the text, the
+ * result event, the rate-limit event and codex agent messages. So a mission
+ * could not say which model wrote its plan, even though the answer was sitting
+ * in the first line of the stream it had just parsed.
+ *
+ * Kept SEPARATE from what Zeus configured. If Zeus asked for one model and a
+ * provider alias, router or fallback resolved it to another, that discrepancy
+ * is the interesting fact and collapsing the two fields would erase it.
+ */
+export interface ProviderIdentity {
+  /** The model the provider reports actually handled the call. */
+  model?: string;
+  /** Per-model usage, when the provider breaks it down that way. */
+  modelUsage?: Record<string, unknown>;
+  sessionId?: string;
+  requestId?: string;
+  clientVersion?: string;
+  permissionMode?: string;
+  /** Tool names the provider made available for this call. */
+  toolsAvailable?: string[];
+  /** Tools the model actually invoked, in order. */
+  toolsUsed?: string[];
+  ttftMs?: number;
+  ttftStreamMs?: number;
+  timeToRequestMs?: number;
+  durationMs?: number;
+  durationApiMs?: number;
+  stopReason?: string;
+}
+
+function firstString(events: Record<string, unknown>[], key: string): string | undefined {
+  for (const e of events) {
+    const v = e[key];
+    if (typeof v === 'string' && v) return v;
+    const m = e.message as Record<string, unknown> | undefined;
+    if (m && typeof m === 'object' && typeof m[key] === 'string' && m[key]) {
+      return m[key] as string;
+    }
+  }
+  return undefined;
+}
+
+export function identityOf(events: Record<string, unknown>[]): ProviderIdentity | null {
+  const out: ProviderIdentity = {};
+  const result = [...events].reverse().find((e) => e.type === 'result') ?? null;
+  const system = events.find((e) => e.type === 'system') ?? null;
+
+  // The model can be reported on the result, on the init event, or inside an
+  // assistant message. Any of the three is the provider's own word for it.
+  const model = firstString(events, 'model');
+  if (model) out.model = model;
+  if (result && result.modelUsage && typeof result.modelUsage === 'object') {
+    out.modelUsage = result.modelUsage as Record<string, unknown>;
+  }
+  const sid = firstString(events, 'session_id'); if (sid) out.sessionId = sid;
+  const rid = firstString(events, 'request_id'); if (rid) out.requestId = rid;
+  const ver = firstString(events, 'claude_code_version'); if (ver) out.clientVersion = ver;
+  const pm = firstString(events, 'permissionMode'); if (pm) out.permissionMode = pm;
+  const stop = firstString(events, 'stop_reason'); if (stop) out.stopReason = stop;
+
+  if (system && Array.isArray(system.tools)) {
+    out.toolsAvailable = (system.tools as unknown[]).map(String);
+  }
+
+  // Tool CALLS, distinct from tools merely offered. This is the difference
+  // between "the model said it checked something" and "a check ran".
+  const used: string[] = [];
+  for (const e of events) {
+    const m = e.message as Record<string, unknown> | undefined;
+    const content = (m?.content ?? e.content) as unknown[] | undefined;
+    if (!Array.isArray(content)) continue;
+    for (const c of content) {
+      const part = c as Record<string, unknown>;
+      if (part?.type === 'tool_use' && typeof part.name === 'string') used.push(part.name);
+    }
+  }
+  if (used.length) out.toolsUsed = used;
+
+  const r = result ?? {};
+  for (const [k, key] of [['ttftMs', 'ttft_ms'], ['ttftStreamMs', 'ttft_stream_ms'],
+    ['timeToRequestMs', 'time_to_request_ms'], ['durationMs', 'duration_ms'],
+    ['durationApiMs', 'duration_api_ms']] as const) {
+    const v = num(r[key]);
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function usageFromResult(r: Record<string, unknown> | null): ProviderUsage | null {
@@ -171,6 +266,7 @@ function extractCodex(events: Record<string, unknown>[]): { text: string; source
 export function unwrapProviderStream(providerId: string, raw: string): StreamExtraction {
   const { events, nonJsonLines } = parseLines(raw);
   const rateLimit = rateLimitOf(events);
+  const identity = identityOf(events);
   const control = [...events].reverse().find((e) => e.type === 'result' || e.type === 'turn.completed')
     ?? null;
   const usage = providerId === 'codex'
@@ -180,13 +276,13 @@ export function unwrapProviderStream(providerId: string, raw: string): StreamExt
 
   if (!events.length) {
     return { text: raw, source: 'plain-text', events: 0, nonJsonLines, usage: null,
-      rateLimit: null, controlEvent: null };
+      rateLimit: null, controlEvent: null, identity: null };
   }
   const extracted = providerId === 'codex' ? extractCodex(events) : extractClaude(events);
   if (!extracted) {
     return { text: raw, source: 'plain-text', events: events.length, nonJsonLines, usage,
-      rateLimit, controlEvent: control };
+      rateLimit, controlEvent: control, identity };
   }
   return { text: extracted.text, source: extracted.source, events: events.length, nonJsonLines,
-    usage, rateLimit, controlEvent: control };
+    usage, rateLimit, controlEvent: control, identity };
 }

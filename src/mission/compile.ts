@@ -13,6 +13,7 @@
  * and the critic may only push it UP.
  */
 
+import { Section, assemble, checklist } from './context';
 import { createHash } from 'crypto';
 import { Provider, AgentResponse } from '../engine/providers';
 import { ProcessSupervisor } from '../engine/exec';
@@ -168,24 +169,42 @@ const COMPILE_HEADER = [
  * outage as NEEDS_RECONCILIATION rather than a verdict.
  */
 export async function compileOracle(input: CompileInput): Promise<CompileResult> {
-  const priorSections = input.prior ? [
-    `--- your previous attempt (oracle v${input.prior.version}) ---\n`
-      + JSON.stringify(input.prior.criteria, null, 1),
-    `--- an independent critic's findings on that attempt ---\n`
-      + input.prior.findings.map((f) => `${f.code} ${f.criterionId ?? ''}: ${f.detail ?? ''}`).join('\n'),
-    'Answer these findings. Remove criteria the critic showed to be beyond the goal,',
-    'repair evaluators it showed do not measure what they claim, and declare any',
-    'authority it says is undeclared. Produce the FULL criteria set again.',
-  ] : [];
+  // Assembled as SECTIONS, so the manifest is derived from what was delivered
+  // rather than declared beside it. A caller cannot claim it forwarded the
+  // critic's findings and then not forward them: the claim IS the forwarding.
+  const sections: Section[] = [];
+  if (input.prior) {
+    sections.push({
+      kind: 'previous-oracle',
+      label: `your previous attempt (oracle v${input.prior.version})`,
+      content: JSON.stringify(input.prior.criteria, null, 1),
+    });
+    sections.push({
+      kind: 'blocking-findings',
+      label: "an independent critic's findings on that attempt",
+      content: input.prior.findings
+        .map((f) => `${f.code} ${f.criterionId ?? ''}: ${f.detail ?? ''}`).join('\n'),
+    });
+    sections.push({
+      kind: 'revision-instruction',
+      label: 'what to do with them',
+      content: [
+        'Answer these findings. Remove criteria the critic showed to be beyond the goal,',
+        'repair evaluators it showed do not measure what they claim, and declare any',
+        'authority it says is undeclared. Produce the FULL criteria set again.',
+      ].join('\n'),
+    });
+  }
+  sections.push({ kind: 'mission-goal', label: 'mission goal', content: input.goal });
+  sections.push({ kind: 'declared-commands', label: 'declared commands',
+    content: JSON.stringify(input.context.commands, null, 1) });
+  sections.push({ kind: 'failing-checks', label: 'currently failing checks',
+    content: (input.context.failingChecks ?? []).join('\n') || '(none)' });
+  sections.push({ kind: 'recorded-findings', label: 'recorded findings',
+    content: (input.context.findings ?? []).join('\n') || '(none)' });
 
-  const prompt = [
-    COMPILE_HEADER, '',
-    ...priorSections,
-    `--- mission goal ---\n${input.goal}`,
-    `--- declared commands ---\n${JSON.stringify(input.context.commands, null, 1)}`,
-    `--- currently failing checks ---\n${(input.context.failingChecks ?? []).join('\n') || '(none)'}`,
-    `--- recorded findings ---\n${(input.context.findings ?? []).join('\n') || '(none)'}`,
-  ].join('\n');
+  const assembled = assemble(COMPILE_HEADER, sections);
+  const prompt = assembled.prompt;
 
   let res: AgentResponse;
   try {
@@ -197,8 +216,12 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
     input.trace?.('MODEL_CALL_STARTED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
-      promptHash: `sha256:${createHash('sha256').update(prompt).digest('hex').slice(0, 32)}`,
-      promptBytes: prompt.length, pid: process.pid,
+      promptHash: assembled.promptHash, promptBytes: assembled.promptBytes,
+      // The checklist a reader wants before opening anything, and the full
+      // manifest behind it. Both derived from the array that built the prompt.
+      manifest: assembled.manifest, delivered: assembled.delivered,
+      checklist: checklist(assembled.manifest),
+      pid: process.pid,
       startedAt: new Date().toISOString(),
     });
     res = await input.provider.invoke({
@@ -358,8 +381,16 @@ export async function critiqueOracle(input: {
     input.trace?.('MODEL_CALL_STARTED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
-      promptHash: `sha256:${createHash('sha256').update(payload.prompt).digest('hex').slice(0, 32)}`,
-      promptBytes: payload.prompt.length, pid: process.pid,
+      promptHash: payload.promptHash, promptBytes: payload.promptBytes,
+      // The critic's manifest comes from buildReviewPayload, which has carried
+      // per-section hashes and a delivered/configured split since M2. A second
+      // manifest here would be a second answer to the same question.
+      manifest: Object.entries(payload.hashes).map(([label, hash]) => ({
+        kind: 'other', label, hash, bytes: 0, included: true,
+      })),
+      delivered: payload.deliveredContext,
+      configuredContext: payload.configuredContext,
+      pid: process.pid,
       startedAt: new Date().toISOString(),
     });
     res = await input.provider.invoke({

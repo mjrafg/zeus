@@ -11,6 +11,7 @@
  * standing rules about probes and shell loops are stated rather than assumed.
  */
 
+import { Section, assemble, checklist } from './context';
 import { createHash } from 'crypto';
 import { Provider, AgentResponse } from '../engine/providers';
 import { ProcessSupervisor } from '../engine/exec';
@@ -261,47 +262,78 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
   }));
   const blocking = (input.prior?.critic ?? []).filter((f) => f.severity === 'BLOCKING');
   const advisory = (input.prior?.critic ?? []).filter((f) => f.severity !== 'BLOCKING');
-  const priorSections = input.prior ? [
-    `--- your previous plan (v${input.prior.version}) ---\n${JSON.stringify(input.prior.graph.nodes, null, 1)}`,
-    blocking.length
-      ? `--- BLOCKING findings against that plan (each MUST be resolved) ---\n${
-        blocking.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')}`
-      : '',
-    advisory.length
-      ? `--- advisory findings ---\n${
-        advisory.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')}`
-      : '',
-    input.prior.findings.length
-      ? `--- validator findings ---\n${
-        input.prior.findings.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')}`
-      : '',
-    '',
-    'THIS IS A REVISION, NOT A NEW PLAN.',
-    'Keep every node that no finding objects to, with its slug unchanged, so the',
-    'difference between the two plans is exactly the fix. Change dependencies,',
-    'write sets and descriptions only where a finding requires it, and add or',
-    'remove nodes only where a finding requires that. Reproducing an unrelated',
-    'node with a new slug is not a revision; it destroys the reviewer\'s ability',
-    'to see what actually changed.',
-    '',
-    ...(blocking.length ? [
-      'Reply with {"nodes":[...], "resolutions":[...]} where resolutions has one',
-      'entry per BLOCKING finding:',
-      '  {"finding":"<the finding CODE>","how":"what changed in the plan, and where"}',
-      'A blocking finding with no resolution is a plan that has not answered its',
-      'critic, and it is refused before anyone reads it.',
-    ] : []),
-  ].filter(Boolean) : [];
+  // SECTIONS, so the manifest is derived from what was delivered rather than
+  // declared beside it. This is the block that answers "did the critic's
+  // findings reach the next planner?" — a question that previously could only
+  // be answered by reading the plan that came back and inferring, which is how
+  // two plans in a row repeated the same mistake before anyone noticed nothing
+  // had ever passed `prior`.
+  const sections: Section[] = [];
+  if (input.prior) {
+    sections.push({
+      kind: 'previous-plan',
+      label: `your previous plan (v${input.prior.version})`,
+      content: JSON.stringify(input.prior.graph.nodes, null, 1),
+    });
+    // Recorded even when empty, with the reason. "There were no blocking
+    // findings" and "the blocking findings were not passed" are different
+    // facts, and only one of them is a bug.
+    sections.push({
+      kind: 'blocking-findings',
+      label: 'BLOCKING findings against that plan (each MUST be resolved)',
+      content: blocking.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n'),
+      ...(blocking.length ? {} : { excludedReason: 'the critic raised none' }),
+    });
+    sections.push({
+      kind: 'advisory-findings',
+      label: 'advisory findings',
+      content: advisory.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n'),
+      ...(advisory.length ? {} : { excludedReason: 'the critic raised none' }),
+    });
+    sections.push({
+      kind: 'validator-findings',
+      label: 'validator findings',
+      content: input.prior.findings
+        .map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n'),
+      ...(input.prior.findings.length ? {} : { excludedReason: 'the validator raised none' }),
+    });
+    sections.push({
+      kind: 'revision-instruction',
+      label: 'this is a revision, not a new plan',
+      content: [
+        // Kept emphatic in the PROMPT, not only in the label. The label names
+        // the section; this line is the instruction the model has to act on,
+        // and softening it was a real change to what the planner is told.
+        'THIS IS A REVISION, NOT A NEW PLAN.',
+        'Keep every node that no finding objects to, with its slug unchanged, so the',
+        'difference between the two plans is exactly the fix. Change dependencies,',
+        'write sets and descriptions only where a finding requires it, and add or',
+        'remove nodes only where a finding requires that. Reproducing an unrelated',
+        "node with a new slug is not a revision; it destroys the reviewer's ability",
+        'to see what actually changed.',
+        ...(blocking.length ? [
+          '',
+          'Reply with {"nodes":[...], "resolutions":[...]} where resolutions has one',
+          'entry per BLOCKING finding:',
+          '  {"finding":"<the finding CODE>","how":"what changed in the plan, and where"}',
+          'A blocking finding with no resolution is a plan that has not answered its',
+          'critic, and it is refused before anyone reads it.',
+        ] : []),
+      ].join('\n'),
+    });
+  }
+  sections.push({ kind: 'mission-goal', label: 'mission goal', content: input.goal });
+  sections.push({ kind: 'accepted-criteria', label: 'accepted criteria',
+    content: JSON.stringify(criteriaView, null, 1) });
+  sections.push({ kind: 'declared-commands', label: 'declared commands',
+    content: JSON.stringify(input.context.commands, null, 1) });
+  sections.push({ kind: 'failing-checks', label: 'currently failing checks',
+    content: (input.context.failingChecks ?? []).join('\n') || '(none)' });
+  sections.push({ kind: 'recorded-findings', label: 'recorded findings',
+    content: (input.context.findings ?? []).join('\n') || '(none)' });
 
-  const prompt = [
-    PLAN_HEADER, '',
-    ...priorSections,
-    `--- mission goal ---\n${input.goal}`,
-    `--- accepted criteria ---\n${JSON.stringify(criteriaView, null, 1)}`,
-    `--- declared commands ---\n${JSON.stringify(input.context.commands, null, 1)}`,
-    `--- currently failing checks ---\n${(input.context.failingChecks ?? []).join('\n') || '(none)'}`,
-    `--- recorded findings ---\n${(input.context.findings ?? []).join('\n') || '(none)'}`,
-  ].join('\n');
+  const assembled = assemble(PLAN_HEADER, sections);
+  const prompt = assembled.prompt;
 
   const empty: PlanGraph = { version: 0, nodes: [] };
   const fail = (why: string, raw = ''): PlanResult => ({
@@ -320,8 +352,10 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
     input.trace?.('MODEL_CALL_STARTED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
-      promptHash: `sha256:${createHash('sha256').update(prompt).digest('hex').slice(0, 32)}`,
-      promptBytes: prompt.length, pid: process.pid,
+      promptHash: assembled.promptHash, promptBytes: assembled.promptBytes,
+      manifest: assembled.manifest, delivered: assembled.delivered,
+      checklist: checklist(assembled.manifest),
+      pid: process.pid,
       startedAt: new Date().toISOString(),
     });
     res = await input.provider.invoke({
@@ -539,8 +573,16 @@ export async function critiquePlan(input: {
     input.trace?.('MODEL_CALL_STARTED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
-      promptHash: `sha256:${createHash('sha256').update(payload.prompt).digest('hex').slice(0, 32)}`,
-      promptBytes: payload.prompt.length, pid: process.pid,
+      promptHash: payload.promptHash, promptBytes: payload.promptBytes,
+      // The critic's manifest comes from buildReviewPayload, which has carried
+      // per-section hashes and a delivered/configured split since M2. A second
+      // manifest here would be a second answer to the same question.
+      manifest: Object.entries(payload.hashes).map(([label, hash]) => ({
+        kind: 'other', label, hash, bytes: 0, included: true,
+      })),
+      delivered: payload.deliveredContext,
+      configuredContext: payload.configuredContext,
+      pid: process.pid,
       startedAt: new Date().toISOString(),
     });
     res = await input.provider.invoke({

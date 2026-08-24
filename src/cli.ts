@@ -1682,6 +1682,9 @@ async function cmdMission(argv: string[]): Promise<number> {
           + ` · ${c.configuredReasoning ?? 'provider default'}   ${state}`);
         out(`  ${' '.repeat(14)} ${C.dim}${c.traceCallId}  ${c.wallMs ?? '?'}ms`
           + `  prompt ${c.promptBytes ?? '?'}B${C.x}`);
+        if (c.delivered?.length && !wanted) {
+          out(`  ${' '.repeat(14)} ${C.dim}context: ${c.delivered.join(' ')}${C.x}`);
+        }
         // Asked-for and answered are shown together only when they DISAGREE.
         // Printing "got X" beside "asked X" on every line trains the eye to
         // skip the one line where they differ.
@@ -1700,6 +1703,14 @@ async function cmdMission(argv: string[]): Promise<number> {
           out(`  ${' '.repeat(14)} ${C.dim}usage ${JSON.stringify(c.usage)}${C.x}`);
           out(`  ${' '.repeat(14)} ${C.dim}timing ${JSON.stringify(c.providerTiming)}${C.x}`);
           if (c.toolsUsed) out(`  ${' '.repeat(14)} ${C.dim}tools ${c.toolsUsed.join(', ')}${C.x}`);
+        // What the model was GIVEN. The reason this exists: "did the critic's
+        // findings reach the next planner" used to be answerable only by
+        // reading the plan that came back.
+        for (const m of (c.manifest ?? []) as Array<Record<string, unknown>>) {
+          const mark = m.included ? `${C.g}✓${C.x}` : `${C.dim}—${C.x}`;
+          out(`  ${' '.repeat(14)} ${mark} ${String(m.label)}`
+            + ` ${C.dim}${m.bytes}B${m.excludedReason ? ` — ${m.excludedReason}` : ''}${C.x}`);
+        }
         }
       }
       out('');

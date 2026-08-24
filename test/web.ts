@@ -44,6 +44,7 @@ const node = (id: string): TaskNode => ({ nodeId: id, description: 'd', dependsO
 import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import { readConfig } from '../src/config';
+import { assemble, checklist } from '../src/mission/context';
 import { detectProject, nodePackageDirs } from '../src/adapters';
 import {
   PIPELINE_STAGES, STAGE_ROLE, ZEUS_DEFAULT_ROUTING, resolveRouting,
@@ -2862,6 +2863,61 @@ export async function webSuite(): Promise<void> {
         < UI_HTML.indexOf('</b> is running on this mission'), 'stated first');
     check('ORP7: and says nothing was lost, because the log is the record',
       UI_HTML.includes('Nothing was lost \u2014 the log is the record'), 'reassured');
+  }
+
+  section('what the model was given, derived from the giving');
+  {
+    // The question this exists for: "did the critic's findings reach the next
+    // planner?" Two plans in a row repeated the same mistake and it took a
+    // code read to establish that nothing had ever passed `prior`.
+    const a = assemble('HEADER', [
+      { kind: 'mission-goal', label: 'mission goal', content: 'localise the page' },
+      { kind: 'blocking-findings', label: 'BLOCKING findings',
+        content: 'INCOMPLETE_CHROME: the header is never translated' },
+      { kind: 'advisory-findings', label: 'advisory findings', content: '',
+        excludedReason: 'the critic raised none' },
+    ]);
+    check('CX1: the prompt carries every included section, in order',
+      a.prompt.indexOf('mission goal') < a.prompt.indexOf('BLOCKING findings')
+      && a.prompt.includes('INCOMPLETE_CHROME'), 'ordered and present');
+    check('CX2: a withheld section is NOT in the prompt',
+      !a.prompt.includes('advisory findings'), 'withheld means absent from the text');
+    check('CX3: but it IS in the manifest, with the reason it was withheld',
+      a.manifest.length === 3
+      && a.manifest[2].included === false
+      && a.manifest[2].excludedReason === 'the critic raised none',
+      JSON.stringify(a.manifest[2]));
+    check('CX4: every section is hashed, so a later reader can check the claim',
+      a.manifest.every((m) => m.hash.startsWith('sha256:')), 'hashed');
+    check('CX5: the manifest is derived from the SAME array that built the prompt',
+      a.delivered.join() === 'mission-goal,blocking-findings',
+      a.delivered.join());
+    check('CX6: the checklist tells present from withheld from empty',
+      JSON.stringify(checklist(a.manifest).map((c) => [c.kind, c.state]))
+        === JSON.stringify([['mission-goal', 'present'], ['blocking-findings', 'present'],
+          ['advisory-findings', 'withheld']]),
+      JSON.stringify(checklist(a.manifest).map((c) => [c.kind, c.state])));
+    check('CX7: an included-but-empty section reads absent, not present',
+      checklist(assemble('H', [{ kind: 'repo-evidence', label: 'evidence', content: '' }])
+        .manifest)[0].state === 'absent', 'empty is absent');
+
+    // The property that matters: a caller cannot say it forwarded the findings
+    // and then not forward them, because the statement IS the forwarding.
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'planner.ts'), 'utf8');
+    check('CX8: the planner assembles sections rather than concatenating strings',
+      /const assembled = assemble\(PLAN_HEADER, sections\)/.test(src)
+      && /kind: 'blocking-findings'/.test(src), 'sections, not a string');
+    check('CX9: and records the manifest on the call that used it',
+      /manifest: assembled\.manifest, delivered: assembled\.delivered/.test(src),
+      'manifest travels with the call');
+    const csrc = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'compile.ts'), 'utf8');
+    check('CX10: the compiler does the same, so both planning stages are comparable',
+      /const assembled = assemble\(COMPILE_HEADER, sections\)/.test(csrc),
+      'compiler assembles too');
+    check('CX11: the critics reuse the payload manifest they already built',
+      /delivered: payload\.deliveredContext/.test(csrc), 'one manifest, not two');
   }
 
   section('the trace pairs every model call, and knows a dead one');

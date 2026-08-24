@@ -287,6 +287,10 @@ export interface TraceCall {
   modelDiscrepancy: { configured: string; actual: string } | null;
   promptHash: string | null;
   promptBytes: number | null;
+  /** What the model was actually given, derived from the assembly itself. */
+  manifest: Array<Record<string, unknown>> | null;
+  delivered: string[] | null;
+  checklist: Array<Record<string, unknown>> | null;
   outcome: string | null;
   wallMs: number | null;
   providerTiming: Record<string, unknown> | null;
@@ -334,6 +338,9 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
           reasoningSource: p.reasoningSource ?? null,
           actualModel: null, modelDiscrepancy: null,
           promptHash: p.promptHash ?? null, promptBytes: p.promptBytes ?? null,
+          manifest: Array.isArray(p.manifest) ? p.manifest : null,
+          delivered: Array.isArray(p.delivered) ? p.delivered : null,
+          checklist: Array.isArray(p.checklist) ? p.checklist : null,
           outcome: null, wallMs: null, providerTiming: null, usage: null,
           toolsUsed: null, parsed: null, infrastructureFailure: null,
           startedAt: p.startedAt ?? e.ts, finishedAt: null,

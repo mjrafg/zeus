@@ -319,6 +319,14 @@ async function loadTrace(m) {
         ? ' · ttft ' + c.providerTiming.ttftMs + 'ms' : '')
       + (c.toolsUsed && c.toolsUsed.length ? ' · tools ' + esc(c.toolsUsed.join(', ')) : '')
       + '</div>';
+    // The context checklist, derived from what was assembled. A withheld
+    // section shows its reason, because an absent one and a deliberately
+    // withheld one are different facts and only one of them is a bug.
+    if (c.manifest && c.manifest.length) {
+      h += '<div class="meta">' + c.manifest.map((s) => (s.included ? '✓ ' : '— ')
+        + esc(s.label) + (s.excludedReason ? ' (' + esc(s.excludedReason) + ')' : ''))
+        .join(' · ') + '</div>';
+    }
     // Shown only when they DISAGREE. Printing "got X" beside "asked X" on
     // every row trains the eye to skip the one row where they differ.
     if (c.modelDiscrepancy) {

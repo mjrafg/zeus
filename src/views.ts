@@ -291,6 +291,12 @@ export interface TraceCall {
   manifest: Array<Record<string, unknown>> | null;
   delivered: string[] | null;
   checklist: Array<Record<string, unknown>> | null;
+  /** The policy this call captured when it began. Never re-read afterwards. */
+  traceLevel: string | null;
+  traceLevelSource: string | null;
+  /** References, not content. Content is fetched deliberately, never listed. */
+  promptBlob: Record<string, unknown> | null;
+  responseBlob: Record<string, unknown> | null;
   outcome: string | null;
   wallMs: number | null;
   providerTiming: Record<string, unknown> | null;
@@ -341,6 +347,10 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
           manifest: Array.isArray(p.manifest) ? p.manifest : null,
           delivered: Array.isArray(p.delivered) ? p.delivered : null,
           checklist: Array.isArray(p.checklist) ? p.checklist : null,
+          traceLevel: p.traceLevel ?? null,
+          traceLevelSource: p.traceLevelSource ?? null,
+          promptBlob: p.promptBlob ?? null,
+          responseBlob: null,
           outcome: null, wallMs: null, providerTiming: null, usage: null,
           toolsUsed: null, parsed: null, infrastructureFailure: null,
           startedAt: p.startedAt ?? e.ts, finishedAt: null,
@@ -359,6 +369,7 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
         call.toolsUsed = p.toolsUsed ?? null;
         call.parsed = p.parsed ?? null;
         call.infrastructureFailure = p.infrastructureFailure ?? null;
+        call.responseBlob = p.responseBlob ?? null;
         call.finishedAt = p.finishedAt ?? e.ts;
         call.status = 'COMPLETED';
       }
@@ -374,6 +385,67 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
     try { process.kill(call.pid, 0); alive = true; } catch { alive = false; }
     return alive ? call : { ...call, status: 'ABANDONED' as const };
   });
+}
+
+export interface CallComparison {
+  a: string;
+  b: string;
+  /** Sections both calls got, byte for byte. */
+  same: string[];
+  /** In b and not in a — what the second call was told that the first was not. */
+  added: string[];
+  /** In a and not in b — what the second call LOST. */
+  removed: string[];
+  /** In both, but different content. */
+  changed: string[];
+  modelChanged: { from: string | null; to: string | null } | null;
+  reasoningChanged: { from: string | null; to: string | null } | null;
+  costDeltaMs: number | null;
+}
+
+/**
+ * What the second call was given that the first was not.
+ *
+ * Two planner calls in a row repeated the same mistake because the second was
+ * never given the critic's findings on the first. Establishing that took a
+ * code read. Compared by SECTION HASH, this is one line: `blocking-findings`
+ * appears in neither, or in both, and the answer is not an inference from the
+ * plan that came back.
+ */
+export function compareCalls(calls: TraceCall[], aId: string, bId: string): CallComparison | null {
+  const a = calls.find((c) => c.traceCallId === aId);
+  const b = calls.find((c) => c.traceCallId === bId);
+  if (!a || !b) return null;
+
+  const index = (c: TraceCall) => {
+    const m = new Map<string, string>();
+    for (const entry of (c.manifest ?? [])) {
+      const e = entry as any;
+      // A withheld section was not given, whatever its hash says.
+      if (e.included === false) continue;
+      m.set(String(e.label), String(e.hash));
+    }
+    return m;
+  };
+  const ma = index(a); const mb = index(b);
+
+  const same: string[] = []; const changed: string[] = [];
+  for (const [label, hash] of ma) {
+    if (!mb.has(label)) continue;
+    (mb.get(label) === hash ? same : changed).push(label);
+  }
+  return {
+    a: aId, b: bId,
+    same: same.sort(),
+    changed: changed.sort(),
+    added: [...mb.keys()].filter((l) => !ma.has(l)).sort(),
+    removed: [...ma.keys()].filter((l) => !mb.has(l)).sort(),
+    modelChanged: (a.configuredModel ?? null) === (b.configuredModel ?? null) ? null
+      : { from: a.configuredModel ?? null, to: b.configuredModel ?? null },
+    reasoningChanged: (a.configuredReasoning ?? null) === (b.configuredReasoning ?? null) ? null
+      : { from: a.configuredReasoning ?? null, to: b.configuredReasoning ?? null },
+    costDeltaMs: (a.wallMs !== null && b.wallMs !== null) ? b.wallMs - a.wallMs : null,
+  };
 }
 
 /** The oracle a mission accepted, or null. Read from the record, not a cache. */

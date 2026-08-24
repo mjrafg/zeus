@@ -25,7 +25,7 @@ import {
 } from '../src/web/tail';
 import { UI_HTML } from '../src/web/ui';
 import {
-  missionStatusView, missionReportView, missionBundle, missionTrace,
+  missionStatusView, missionReportView, missionBundle, missionTrace, compareCalls,
 } from '../src/views';
 import {
   findingsDigest, pendingDecision, awaitingHuman, consentSubject,
@@ -2867,6 +2867,68 @@ export async function webSuite(): Promise<void> {
         < UI_HTML.indexOf('</b> is running on this mission'), 'stated first');
     check('ORP7: and says nothing was lost, because the log is the record',
       UI_HTML.includes('Nothing was lost \u2014 the log is the record'), 'reassured');
+  }
+
+  section('comparing two calls answers the replanning question directly');
+  {
+    // The bug this exists for: two planner calls in a row repeated the same
+    // mistake because the second was never given the critic's findings on the
+    // first, and establishing that took a code read. By section hash it is one
+    // line — blocking-findings is in neither, or in both.
+    const mk = (id: string, sections: Array<[string, string, boolean?]>,
+      model: string | null, ms: number) => ({
+      traceCallId: id, stage: 'planner', provider: 'codex',
+      configuredModel: model, configuredReasoning: 'high', actualModel: model,
+      modelDiscrepancy: null, promptHash: null, promptBytes: null,
+      manifest: sections.map(([label, hash, excluded]) => ({
+        kind: 'other', label, hash, bytes: hash.length,
+        included: excluded !== true,
+      })),
+      delivered: null, checklist: null, traceLevel: 'normal', traceLevelSource: 'zeus-default',
+      promptBlob: null, responseBlob: null,
+      outcome: 'COMPLETED', wallMs: ms, providerTiming: null, usage: null, toolsUsed: null,
+      parsed: null, infrastructureFailure: null,
+      startedAt: null, finishedAt: null, pid: null, status: 'COMPLETED' as const,
+    });
+
+    const v1 = mk('TC-v1', [['mission goal', 'h-goal'], ['accepted criteria', 'h-crit']],
+      'gpt-5.5', 40_000);
+    const v2 = mk('TC-v2', [['mission goal', 'h-goal'], ['accepted criteria', 'h-crit-2'],
+      ['BLOCKING findings', 'h-block']], 'gpt-5.6-sol', 61_000);
+
+    const cmp = compareCalls([v1, v2] as any, 'TC-v1', 'TC-v2')!;
+    check('CMP1: the findings the second call gained are named as ADDED',
+      cmp.added.join() === 'BLOCKING findings', JSON.stringify(cmp.added));
+    check('CMP2: a section both got, byte for byte, is SAME',
+      cmp.same.join() === 'mission goal', JSON.stringify(cmp.same));
+    check('CMP3: a section both got with different content is CHANGED, not same',
+      cmp.changed.join() === 'accepted criteria', JSON.stringify(cmp.changed));
+    check('CMP4: a model or effort change is surfaced beside the context change',
+      cmp.modelChanged?.to === 'gpt-5.6-sol' && cmp.reasoningChanged === null,
+      JSON.stringify([cmp.modelChanged, cmp.reasoningChanged]));
+    check('CMP5: and the duration difference, so a slower call is visible',
+      cmp.costDeltaMs === 21_000, String(cmp.costDeltaMs));
+
+    // The regression, stated as a test: a v2 that lost the findings.
+    const lost = compareCalls([v2, v1] as any, 'TC-v2', 'TC-v1')!;
+    check('CMP6: a call that LOST a section is named, which is the bug we shipped',
+      lost.removed.join() === 'BLOCKING findings', JSON.stringify(lost.removed));
+
+    // A withheld section was not given, whatever its hash says.
+    const withheld = mk('TC-w', [['mission goal', 'h-goal'],
+      ['BLOCKING findings', 'h-block', true]], 'gpt-5.5', 10);
+    const w = compareCalls([v2, withheld] as any, 'TC-v2', 'TC-w')!;
+    check('CMP7: a withheld section counts as not given, not as given-and-equal',
+      w.removed.includes('BLOCKING findings'), JSON.stringify(w.removed));
+
+    check('CMP8: an unknown call id yields nothing rather than a misleading diff',
+      compareCalls([v1] as any, 'TC-v1', 'TC-nope') === null, 'null for unknown');
+
+    const cli = fs.readFileSync(path.join(__dirname, '..', 'src', 'cli.ts'), 'utf8');
+    check('CMP9: stored content is never printed without --raw',
+      /if \(rest\.includes\('--raw'\)\) \{/.test(cli)
+      && /--raw prints what was kept/.test(cli),
+      'a duration check should not paste a repository into a shared terminal');
   }
 
   section('how much of a call is kept, and for how long');

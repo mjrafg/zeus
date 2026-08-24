@@ -39,7 +39,7 @@ import {
   mergeMissionBudgets, BudgetNegotiation, MissionBudgets,
 } from './mission/progress';
 import {
-  missionStatusView, missionListView, missionReportView, missionTrace,
+  missionStatusView, missionListView, missionReportView, missionTrace, compareCalls,
 } from './views';
 import {
   startWebServer, defaultSpawnRun, zeusCliArgv, ProjectTarget,
@@ -53,7 +53,7 @@ import {
   resolveRouting, validateRouting, renderRouting, providerCapabilities,
   STAGE_LABEL, STAGE_DESCRIPTION,
 } from './routing';
-import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING } from './trace';
+import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING, TraceStore } from './trace';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -1687,6 +1687,33 @@ async function cmdMission(argv: string[]): Promise<number> {
       const eff = traceLevelFor(missions, id, ctx.root);
       out(`${C.dim}trace ${eff.level} · ${eff.source}${C.x}`);
       const calls = missionTrace(missions, id);
+      // Comparing two calls is the question replanning raises, so it is a
+      // flag on the same command rather than a separate one nobody finds.
+      const ci = rest.indexOf('--compare');
+      if (ci >= 0) {
+        const [x, y] = String(rest[ci + 1] ?? '').split(',');
+        const cmp = compareCalls(calls, x, y);
+        if (!cmp) { err('usage: --compare <traceCallIdA>,<traceCallIdB>'); return 2; }
+        if (json) { out(JSON.stringify(cmp, null, 1)); return 0; }
+        out(`${C.b}${x}${C.x} → ${C.b}${y}${C.x}`);
+        for (const [label, list, colour] of [
+          ['added', cmp.added, C.g], ['removed', cmp.removed, C.r],
+          ['changed', cmp.changed, C.y], ['same', cmp.same, C.dim],
+        ] as const) {
+          if (list.length) out(`  ${colour}${label.padEnd(8)}${C.x} ${list.join(', ')}`);
+        }
+        if (cmp.modelChanged) {
+          out(`  ${C.y}model${C.x}    ${cmp.modelChanged.from} → ${cmp.modelChanged.to}`);
+        }
+        if (cmp.reasoningChanged) {
+          out(`  ${C.y}effort${C.x}   ${cmp.reasoningChanged.from} → ${cmp.reasoningChanged.to}`);
+        }
+        if (cmp.costDeltaMs !== null) {
+          out(`  ${C.dim}duration ${cmp.costDeltaMs >= 0 ? '+' : ''}${cmp.costDeltaMs}ms${C.x}`);
+        }
+        return 0;
+      }
+
       const wanted = rest.indexOf('--call') >= 0 ? rest[rest.indexOf('--call') + 1] : null;
       const shown = wanted ? calls.filter((c) => c.traceCallId === wanted) : calls;
       if (json) { out(JSON.stringify(shown, null, 1)); return 0; }
@@ -1729,6 +1756,31 @@ async function cmdMission(argv: string[]): Promise<number> {
           out(`  ${' '.repeat(14)} ${C.dim}usage ${JSON.stringify(c.usage)}${C.x}`);
           out(`  ${' '.repeat(14)} ${C.dim}timing ${JSON.stringify(c.providerTiming)}${C.x}`);
           if (c.toolsUsed) out(`  ${' '.repeat(14)} ${C.dim}tools ${c.toolsUsed.join(', ')}${C.x}`);
+        out(`  ${' '.repeat(14)} ${C.dim}trace ${c.traceLevel ?? 'normal'}`
+          + ` · ${c.traceLevelSource ?? 'zeus-default'}${C.x}`);
+        for (const [what, ref] of [['prompt', c.promptBlob], ['response', c.responseBlob]] as const) {
+          if (!ref) continue;
+          const r = ref as any;
+          out(`  ${' '.repeat(14)} ${C.dim}${what} kept: ${r.bytes}B stored ${r.storedBytes}B`
+            + `${r.redacted ? ', redacted' : `, ${C.y}RAW${C.x}${C.dim}`}`
+            + `${r.truncated ? ', truncated' : ''}${C.x}`);
+        }
+        // CONTENT IS NEVER PRINTED WITHOUT --raw. A trace command someone runs
+        // to check a duration should not paste a repository into a terminal
+        // that is being screen-shared.
+        if (rest.includes('--raw')) {
+          const store = new TraceStore(engine.stateRoot);
+          for (const [what, ref] of [['prompt', c.promptBlob], ['response', c.responseBlob]] as const) {
+            const body = store.get(ref as any);
+            out('');
+            out(`  ${C.b}--- ${what} ---${C.x}`);
+            out(body === null
+              ? `  ${C.dim}(not kept at this level, or expired)${C.x}`
+              : body);
+          }
+        } else if (c.promptBlob || c.responseBlob) {
+          out(`  ${' '.repeat(14)} ${C.dim}--raw prints what was kept${C.x}`);
+        }
         // What the model was GIVEN. The reason this exists: "did the critic's
         // findings reach the next planner" used to be answerable only by
         // reading the plan that came back.

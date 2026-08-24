@@ -3435,6 +3435,21 @@ export async function webSuite(): Promise<void> {
       /no user bus to /.test(src)
       && /restarting the console will kill it/.test(src),
       'the fallback admits what it is');
+    // A transient unit does not inherit this process's environment. The first
+    // cut assumed it did: node was found because argv[0] is absolute, npm was
+    // not, and every mission was refused with "npm is not on PATH" on a host
+    // where npm is plainly installed.
+    check('OU2b: the unit is given the environment the work needs, by name',
+      /--setenv=\$\{k\}=\$\{process\.env\[k\]\}/.test(src)
+      && /'PATH', 'HOME'/.test(src), 'PATH travels with it');
+    check('OU2c: by NAME, not wholesale — unit properties are readable',
+      /Named variables, not the whole environment/.test(src)
+      && !/\.\.\.Object\.entries\(process\.env\)/.test(src),
+      'secrets do not get a second home');
+    check('OU2d: and the unit writes to the log the caller was promised',
+      /--property=StandardOutput=append:\$\{logFile\}/.test(src),
+      'the journal is not where the message says to look');
+
     check('OU3: the stronger path says it survives, so the two are told apart',
       /it survives a restart of this console/.test(src), 'the strong path says so');
   }

@@ -248,13 +248,38 @@ export function zeusCliArgv(): string[] {
  * stronger one.
  */
 function spawnInOwnUnit(projectRoot: string, missionId: string, argv: string[],
-  out: number | 'ignore'): { ok: boolean; pid: number | null; detail: string } | null {
+  out: number | 'ignore', logFile: string | null):
+  { ok: boolean; pid: number | null; detail: string } | null {
   const env = systemdUserEnv();
   if (!env.XDG_RUNTIME_DIR) return null;
   const unit = `zeus-run-${missionId.replace(/[^A-Za-z0-9]+/g, '-')}-${Date.now()}`;
+  // A transient unit does NOT inherit this process's environment. The first
+  // cut assumed it did, and the runner started with a minimal PATH: node was
+  // found because argv[0] is absolute, and npm was not — so the readiness gate
+  // refused every mission with "npm is not on PATH" on a host where npm is
+  // plainly installed. Leaving the cgroup must not mean leaving the
+  // environment the work needs.
+  //
+  // Named variables, not the whole environment: unit properties are readable
+  // with `systemctl show`, and copying every secret this process holds into
+  // them would be a new place for them to live.
+  const passthrough = ['PATH', 'HOME', 'LANG', 'NODE_OPTIONS',
+    'ZEUS_CLAUDE_BIN', 'ZEUS_CODEX_BIN', 'CODEX_HOME', 'NVM_DIR'];
+  const setenv = passthrough
+    .filter((k) => process.env[k])
+    .map((k) => `--setenv=${k}=${process.env[k]}`);
   const r = spawnSync('systemd-run', [
     '--user', '--quiet', '--collect', `--unit=${unit}`,
     `--working-directory=${projectRoot}`,
+    ...setenv,
+    // The unit's output goes to the journal by default, not to the fd handed
+    // to systemd-run — so the log this function promises was empty on this
+    // path while the reason for a failure sat somewhere the message never
+    // mentioned. Point the unit itself at the same file.
+    ...(logFile ? [
+      `--property=StandardOutput=append:${logFile}`,
+      `--property=StandardError=append:${logFile}`,
+    ] : []),
     ...argv, 'mission', 'run', missionId,
   ], { encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
     stdio: ['ignore', out, out] });
@@ -287,7 +312,7 @@ export function defaultSpawnRun(projectRoot: string, missionId: string):
     out = fs.openSync(logFile, 'a');
   } catch { out = 'ignore'; logFile = null; }
   try {
-    const own = spawnInOwnUnit(projectRoot, missionId, [process.execPath, ...args], out);
+    const own = spawnInOwnUnit(projectRoot, missionId, [process.execPath, ...args], out, logFile);
     if (own) {
       if (typeof out === 'number') fs.closeSync(out);
       return { ...own,

@@ -3188,8 +3188,13 @@ export async function webSuite(): Promise<void> {
     check('TC8: the console shows what answered only when it DIFFERS from what was asked',
       /if \(c\.modelDiscrepancy\) \{/.test(UI_HTML)
       && /answered by <b>/.test(UI_HTML), 'discrepancy is the signal');
-    check('TC9: and says plainly that prompts are not stored',
-      /the log keeps a hash[\s\S]{0,40}never the words/.test(UI_HTML), 'stated on the page');
+    // The footer claimed nothing was stored while audit was busy storing it.
+    // A small lie is what makes a reader stop believing the rest of the page.
+    check('TC9: what is said about storage comes from the LEVEL, not a fixed string',
+      /const kept = d\.calls\.some\(\(c\) => c\.promptBlob \|\| c\.responseBlob\)/.test(UI_HTML)
+      && /Prompts and replies are kept at/.test(UI_HTML)
+      && /are not stored at/.test(UI_HTML),
+      'both truths are available, and the level picks one');
   }
 
   section('every stage of the pipeline routes on its own');

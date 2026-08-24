@@ -1792,7 +1792,14 @@ async function cmdMission(argv: string[]): Promise<number> {
         }
       }
       out('');
-      out(`  ${C.dim}prompts and raw replies are not stored; the log keeps a hash and a size${C.x}`);
+      // Said from the LEVEL, not from a fixed string. The footer claimed
+      // nothing was stored while audit was busy storing it, which is the kind
+      // of small lie that makes a reader stop believing the rest of the page.
+      const kept = shown.some((c) => c.promptBlob || c.responseBlob);
+      out(kept
+        ? `  ${C.dim}prompts and replies ARE kept at ${eff.level} — --raw prints them${C.x}`
+        : `  ${C.dim}prompts and raw replies are not stored at ${eff.level};`
+          + ` the log keeps a hash and a size${C.x}`);
       return 0;
     }
 

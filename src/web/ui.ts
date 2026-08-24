@@ -341,8 +341,15 @@ async function loadTrace(m) {
     }
     h += '</div>';
   }
-  h += '<p class="dim">Prompts and raw replies are not stored \u2014 the log keeps a hash '
-    + 'and a size, never the words.</p>';
+  // From the level, not from a fixed string: the footer claimed nothing was
+  // stored while audit was busy storing it.
+  const kept = d.calls.some((c) => c.promptBlob || c.responseBlob);
+  const lvl = (d.calls.find((c) => c.traceLevel) || {}).traceLevel || 'normal';
+  h += '<p class="dim">' + (kept
+    ? 'Prompts and replies are kept at ' + esc(lvl)
+      + '. Use <code>zeus mission trace &lt;id&gt; --call &lt;id&gt; --raw</code> to read them.'
+    : 'Prompts and raw replies are not stored at ' + esc(lvl)
+      + ' \u2014 the log keeps a hash and a size, never the words.') + '</p>';
   slot.innerHTML = h;
 }
 

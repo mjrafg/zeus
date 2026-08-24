@@ -297,11 +297,15 @@ async function loadTrace(m) {
   try { d = await api(scope('/missions/' + encodeURIComponent(m.missionId.split('/').pop()) + '/trace')); }
   catch { return; }
   if (!d.calls || !d.calls.length) {
-    slot.innerHTML = '<h2>agent trace</h2><p class="dim">No model calls traced. '
-      + 'This mission may predate the trace.</p>';
+    // The control still renders. Before the first call is exactly when raising
+    // the level is worth anything — afterwards it cannot reach back.
+    slot.innerHTML = '<h2>agent trace</h2>' + traceControl(d)
+      + '<p class="dim">No model calls traced yet.</p>';
+    wireTraceControl(m, d);
     return;
   }
-  let h = '<h2>agent trace <span class="dim">' + d.calls.length + ' model call(s)</span></h2>';
+  let h = '<h2>agent trace <span class="dim">' + d.calls.length + ' model call(s)</span></h2>'
+    + traceControl(d);
   for (const c of d.calls) {
     const lost = c.status === 'ABANDONED';
     const failed = c.outcome && c.outcome !== 'COMPLETED';
@@ -344,13 +348,79 @@ async function loadTrace(m) {
   // From the level, not from a fixed string: the footer claimed nothing was
   // stored while audit was busy storing it.
   const kept = d.calls.some((c) => c.promptBlob || c.responseBlob);
+  // The level these calls RAN AT, which is not necessarily the level set now:
+  // raising it cannot reach back and fill in words that were never written.
   const lvl = (d.calls.find((c) => c.traceLevel) || {}).traceLevel || 'normal';
   h += '<p class="dim">' + (kept
-    ? 'Prompts and replies are kept at ' + esc(lvl)
-      + '. Use <code>zeus mission trace &lt;id&gt; --call &lt;id&gt; --raw</code> to read them.'
-    : 'Prompts and raw replies are not stored at ' + esc(lvl)
-      + ' \u2014 the log keeps a hash and a size, never the words.') + '</p>';
+    ? 'These calls ran at ' + esc(lvl)
+      + ', so their prompts and replies are kept. Use '
+      + '<code>zeus mission trace &lt;id&gt; --call &lt;id&gt; --raw</code> to read them.'
+    : 'These calls ran at ' + esc(lvl)
+      + ', which stores no prompts or raw replies \u2014 the log keeps a hash and a '
+      + 'size, never the words.') + '</p>';
   slot.innerHTML = h;
+  wireTraceControl(m, d);
+}
+
+/**
+ * How much of the NEXT calls is kept, as a control rather than a fact.
+ *
+ * The level was readable on this page and settable only from a terminal, so
+ * the console could tell you prompts were not being stored and offer no way to
+ * start storing them. It shows the effective level and the tier that decided
+ * it: "audit" and "audit, because the project sets it" are different things to
+ * someone deciding whether to change it here or in the project config.
+ */
+function traceControl(d) {
+  const t = d.trace || {};
+  const cur = t.level || 'normal';
+  const levels = d.levels || ['normal', 'audit', 'debug'];
+  let h = '<div class="acts"><label for="tracelvl" class="dim">trace level</label> '
+    + '<select id="tracelvl">';
+  for (const l of levels) {
+    h += '<option value="' + esc(l) + '"' + (l === cur ? ' selected' : '') + '>'
+      + esc(l) + '</option>';
+  }
+  h += '</select> <button id="tracego" class="ghost">apply</button>'
+    + '<span class="dim">now <b>' + esc(cur) + '</b>'
+    + (t.source ? ' \u00b7 ' + esc(t.source) : '') + '</span></div>';
+  h += '<p class="dim">normal keeps a hash and a size \u00b7 audit keeps redacted '
+    + 'prompts and replies \u00b7 debug keeps them raw. A change applies to calls made '
+    + 'after it \u2014 it cannot reach back.</p>';
+  return h;
+}
+
+function wireTraceControl(m, d) {
+  const go = $('tracego');
+  if (!go) return;
+  go.onclick = async () => {
+    const to = $('tracelvl').value;
+    const from = (d.trace && d.trace.level) || 'normal';
+    if (to === from) { bubble('Trace is already ' + esc(to) + '.', false); return; }
+    let ack = false;
+    if (to === 'debug') {
+      // Debug is never turned on by inheritance or by accident. The warning is
+      // shown BEFORE it applies and the person has to say they read it — the
+      // server refuses the change otherwise, so this is not the only guard.
+      if (!confirm((d.debugWarning || 'Debug traces may contain source code and secrets.')
+        + '  Turn debug on for ' + m.missionId + '?')) return;
+      ack = true;
+    }
+    go.disabled = true;
+    const r = await apiPost('/missions/' + encodeURIComponent(m.missionId.split('/').pop())
+      + '/trace', { level: to, acknowledged: ack });
+    go.disabled = false;
+    if (r.status >= 400) {
+      bubble('<span class="bad">'
+        + esc((r.json && (r.json.detail || r.json.error)) || r.status) + '</span>', false);
+      return;
+    }
+    if (r.json && r.json.unchanged) { bubble('Trace is already ' + esc(to) + '.', false); return; }
+    bubble('Trace on <b>' + esc(m.missionId) + '</b> ' + esc(from)
+      + ' &rarr; <b>' + esc(to) + '</b>. Calls already made keep the level they '
+      + 'were made under.', false);
+    loadTrace(m);
+  };
 }
 
 /**

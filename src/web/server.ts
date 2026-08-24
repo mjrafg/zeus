@@ -522,7 +522,13 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         const id = resolveId(decodeURIComponent(traceMatch[1]), sc.projectId);
         if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
         if (!sc.missions.mission(id)) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
-        send(res, 200, { missionId: id, calls: missionTrace(sc.missions, id) });
+        // The EFFECTIVE level, not one inferred from a past call. The page read
+        // the level off the newest traced call, which is the level that call RAN
+        // under — stale the moment the level changes, and absent entirely before
+        // the first call. A control has to show the setting it sets.
+        send(res, 200, { missionId: id, calls: missionTrace(sc.missions, id),
+          trace: traceLevelFor(sc.missions, id, sc.root),
+          levels: TRACE_LEVELS, debugWarning: DEBUG_WARNING });
         return;
       }
 

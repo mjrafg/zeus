@@ -3190,11 +3190,13 @@ export async function webSuite(): Promise<void> {
       && /answered by <b>/.test(UI_HTML), 'discrepancy is the signal');
     // The footer claimed nothing was stored while audit was busy storing it.
     // A small lie is what makes a reader stop believing the rest of the page.
+    // Pinned as a property rather than as prose: BOTH branches must name the
+    // level they describe, so neither can drift back into asserting a fixed
+    // fact about storage that the level contradicts.
     check('TC9: what is said about storage comes from the LEVEL, not a fixed string',
       /const kept = d\.calls\.some\(\(c\) => c\.promptBlob \|\| c\.responseBlob\)/.test(UI_HTML)
-      && /Prompts and replies are kept at/.test(UI_HTML)
-      && /are not stored at/.test(UI_HTML),
-      'both truths are available, and the level picks one');
+      && (UI_HTML.match(/ran at ' \+ esc\(lvl\)/g) || []).length === 2,
+      'both truths are available, and each names the level it is describing');
   }
 
   section('every stage of the pipeline routes on its own');
@@ -3665,6 +3667,47 @@ export async function webSuite(): Promise<void> {
     const close = uiSrc.lastIndexOf('`');
     check('PV4: no stray backtick inside the UI template — it would truncate the page',
       !uiSrc.slice(open + 1, close).includes('`'), 'template intact');
+
+    // PV4 guards one way to break the page. It is not the only one: the
+    // template is TypeScript, so an escape like \n inside it becomes a REAL
+    // newline in the emitted script, and a real newline inside a single-quoted
+    // JS string is a syntax error. The file still reads fine. Parse the script
+    // the browser is actually handed instead of guessing at the ways to ruin it.
+    const script = UI_HTML.slice(UI_HTML.indexOf('>', UI_HTML.indexOf('<script')) + 1,
+      UI_HTML.lastIndexOf('</script>'));
+    let parsed = '';
+    try { new Function(script); } catch (e: any) { parsed = String(e && e.message || e); }
+    check('PV5: the page script parses — the browser gets valid JavaScript',
+      parsed === '' && script.length > 1000, parsed || `${script.length} bytes`);
+  }
+
+  section('the console can change how much of a mission is kept');
+  {
+    // The level was readable on this page and settable only from a terminal:
+    // the console told you prompts were not being stored and offered no way to
+    // start storing them.
+    check('TLC1: the trace panel has a level selector, not just a level',
+      UI_HTML.includes('id="tracelvl"') && UI_HTML.includes('id="tracego"'),
+      'selector present');
+    check('TLC2: it posts to the same endpoint the CLI uses',
+      UI_HTML.includes("+ '/trace', { level: to, acknowledged: ack }"),
+      'POST /missions/:id/trace');
+    check('TLC3: debug is acknowledged before it applies, not after',
+      /if \(to === 'debug'\)/.test(UI_HTML) && UI_HTML.includes('debugWarning')
+      && UI_HTML.includes('acknowledged: ack'), 'the warning gates the request');
+    check('TLC4: and the acknowledgement is not invented for the other levels',
+      UI_HTML.includes('let ack = false;'), 'ack defaults to false');
+    check('TLC5: the control renders before the first call, when it still matters',
+      UI_HTML.includes("'<h2>agent trace</h2>' + traceControl(d)"),
+      'rendered on the empty branch too');
+    check('TLC6: it says a change cannot reach back',
+      UI_HTML.includes('it cannot reach back'), 'the limit is stated where it is set');
+    // The footer used to claim prompts were not stored while audit was storing
+    // them. It now describes the CALLS, which is a different fact from the
+    // setting — and both are on screen at once, so they must not be confused.
+    check('TLC7: the footer describes the calls, the control describes the setting',
+      UI_HTML.includes('These calls ran at ') && UI_HTML.includes('now <b>'),
+      'the two facts are told apart');
   }
 
   section('the whole record of a mission, as one document');

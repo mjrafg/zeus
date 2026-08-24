@@ -12,7 +12,7 @@
  * file where neither half could be read.
  */
 
-import type { PriorAttempt } from './attempt';
+import { lastFailedAttempt, type PriorAttempt } from './attempt';
 import { Achievement, PlanGraph, TaskNode, TerminationReason } from './types';
 import { CriterionOutcome, Oracle } from './oracle';
 import { MissionRegistry } from './registry';
@@ -120,13 +120,7 @@ export async function runMissionLoop(
 
   const state: ScheduleState = { done: new Set(), abandoned: new Set() };
   const repairsFor = new Map<string, number>();
-  /** The attempt that failed at each node, so its successor is not sent in blind. */
-  const lastAttempt = new Map<string, PriorAttempt>();
-  const remember = (nodeId: string, taskId: string, reason: string): void => {
-    const prior = host.priorAttempt?.(taskId, reason);
-    if (prior) lastAttempt.set(nodeId, prior);
-    else lastAttempt.delete(nodeId);
-  };
+
   const outcomes = new Map<string, CriterionOutcome>();
   let cycles = 0;
 
@@ -294,7 +288,12 @@ export async function runMissionLoop(
     /* -- spawn, through the one door -------------------------------------- */
 
     const repair = (repairsFor.get(node.nodeId) ?? 0) > 0;
-    const prior = repair ? (lastAttempt.get(node.nodeId) ?? null) : null;
+    // Read from the LOG, not from a map that lives for one `mission run`. A
+    // repair inside a run would otherwise carry the findings while a fresh run
+    // of the same mission started blind again — the same defect, surviving in
+    // the gap between two processes.
+    const failed = lastFailedAttempt(missions.events.read(missionId), node.nodeId);
+    const prior = failed ? (host.priorAttempt?.(failed.taskId, failed.reason) ?? null) : null;
     const taskId = host.createTask(node, { missionId, repair, prior });
     const decision = missions.spawnNode(missionId, taskId, node.nodeId, {
       repair, reason: repair ? 'repair after a failed integration' : undefined,
@@ -347,7 +346,6 @@ export async function runMissionLoop(
       });
       if (used < REPAIRS_PER_NODE) {
         repairsFor.set(node.nodeId, used + 1);
-        remember(node.nodeId, taskId, integration.detail || `task ${exec.state}`);
         continue;                                   // one repair, then no more
       }
       // A second failure is not a worse first failure. Escalating rather than
@@ -392,8 +390,6 @@ export async function runMissionLoop(
       const used = repairsFor.get(node.nodeId) ?? 0;
       if (used < REPAIRS_PER_NODE) {
         repairsFor.set(node.nodeId, used + 1);
-        remember(node.nodeId, taskId,
-          `it broke ${broken.length} previously proven criterion(s): ${broken.join(', ')}`);
         continue;
       }
       refuse('INVARIANT_BROKEN_TWICE', `${node.nodeId} broke ${broken.join(', ')} twice`);
@@ -408,7 +404,6 @@ export async function runMissionLoop(
     host.advanceRatchet(integration.sha);
     state.done.add(node.nodeId);
     repairsFor.delete(node.nodeId);
-    lastAttempt.delete(node.nodeId);
 
     missions.recordIntegration(missionId, {
       nodeId: node.nodeId, taskId, planVersion, integrated: true, sha: integration.sha,

@@ -16,7 +16,9 @@ import { check, section } from './harness';
 import { main } from '../src/cli';
 import { EventStore, StoredEvent } from '../src/engine/events';
 import { MissionRegistry } from '../src/mission/registry';
-import { blockingFindings, repairBrief } from '../src/mission/attempt';
+import {
+  blockingFindings, lastFailedAttempt, priorAttempt, repairBrief, type PriorAttempt,
+} from '../src/mission/attempt';
 import { PlanGraph, TaskNode } from '../src/mission/types';
 import { Criterion, Oracle } from '../src/mission/oracle';
 import {
@@ -190,6 +192,115 @@ export async function executionSuite(): Promise<void> {
       dupes.length === 1, JSON.stringify(dupes));
     check('PA9: and the NEWEST round wins the wording',
       dupes[0]?.claim === 'the annual price is untranslated', JSON.stringify(dupes));
+
+    // The first cut kept the failed attempt in a Map that lived for one
+    // `mission run`, so a repair inside that run carried the findings and a
+    // FRESH run of the same mission started blind again — the same defect,
+    // surviving in the gap between two processes.
+    const log = [
+      { type: 'INTEGRATION_RESULT',
+        payload: { nodeId: 'N-1', taskId: 'T-1', integrated: false, reason: 'review refused it' } },
+      { type: 'INTEGRATION_RESULT',
+        payload: { nodeId: 'N-2', taskId: 'T-2', integrated: true, reason: 'clean' } },
+    ];
+    check('PA10: the failed attempt is found in the LOG, so a new process sees it',
+      lastFailedAttempt(log, 'N-1')?.taskId === 'T-1',
+      JSON.stringify(lastFailedAttempt(log, 'N-1')));
+    check('PA11: the reason travels with it, not just the id',
+      lastFailedAttempt(log, 'N-1')?.reason === 'review refused it');
+    check('PA12: a node that LANDED has nothing to answer for',
+      lastFailedAttempt(log, 'N-2') === null, 'no prior for a success');
+    check('PA13: a node with no history is not a repair',
+      lastFailedAttempt(log, 'N-9') === null, 'no prior for an untried node');
+
+    // A node can fail, be repaired, land, and be spawned again by a later
+    // plan. Handing that spawn the OLD failure would make it answer for
+    // something already fixed.
+    const healed = [...log, { type: 'INTEGRATION_RESULT',
+      payload: { nodeId: 'N-1', taskId: 'T-3', integrated: true, reason: 'clean' } }];
+    check('PA14: a failure that was later fixed is not handed to the next attempt',
+      lastFailedAttempt(healed, 'N-1') === null, 'newest record for the node wins');
+  }
+
+  section('mission repair: the findings outlive the process that found them');
+  {
+    // The runner is killed, restarted, resumed. None of that may cost a repair
+    // its predecessor's findings: an in-memory map would carry them inside one
+    // `mission run` and lose them at the process boundary, which is the same
+    // defect wearing a different hat.
+    const dir = path.join(TMP, `xproc${storeSeq += 1}`);
+    const plan = graphOf([node('p/M-0001/N-0001',
+      { affectedCriteria: ['p/M-0001/C-0001'] })]);
+
+    /* -- process 1: it fails a node, then the runner DIES ------------------ */
+    const first = new MissionRegistry({ events: new EventStore(dir), projectId: 'p' });
+    const { missionId, oracle } = armed(first, [criterion('p/M-0001/C-0001')], plan);
+    let spawns = 0;
+    let died = false;
+    try {
+      await runMissionLoop(first, fakeHost({
+        createTask: () => `p/T-${String(spawns += 1).padStart(4, '0')}`,
+        // The second cycle never completes: this is SIGKILL, not a clean stop,
+        // so nothing gets to write a summary and the log is all that is left.
+        runNode: async (taskId): Promise<NodeExecution> => {
+          if (spawns > 1) throw new Error('the runner was killed');
+          return { taskId, state: 'COMPLETED', evidence: [], detail: 'ok' };
+        },
+        integrate: async () => ({ integrated: false, sha: null, touched: [],
+          detail: 'a reviewer refused it' }),
+      }), { missionId, oracle });
+    } catch { died = true; }
+
+    check('PA15: the first process died mid-flight, without terminating the mission',
+      died && !first.mission(missionId)?.terminated, 'a killed runner writes no verdict');
+
+    /* -- process 2: a fresh registry over the same store ------------------- */
+    // Nothing survives in memory. If the repair still learns what refused its
+    // predecessor, it learned it from the log.
+    const second = new MissionRegistry({ events: new EventStore(dir), projectId: 'p' });
+    let handed: PriorAttempt | null | undefined;
+    let askedFor: string | null = null;
+    await runMissionLoop(second, fakeHost({
+      createTask: (_nd, ctx: any) => { handed = ctx?.prior; return 'p/T-9001'; },
+      priorAttempt: (taskId, reason) => {
+        askedFor = taskId;
+        return { taskId, reason, failedChecks: [],
+          findings: [{ severity: 'IMPORTANT', claim: 'html lang is set globally' }] };
+      },
+      integrate: async () => ({ integrated: true, sha: 'sha9', touched: [], detail: 'clean' }),
+    }), { missionId, oracle });
+
+    check('PA16: a fresh process asks about the task the DEAD one spawned',
+      askedFor === 'p/T-0001', String(askedFor));
+    check('PA17: and the repair is handed its predecessor, not a blank slate',
+      !!handed && handed.findings.length === 1, JSON.stringify(handed));
+    check('PA18: with the reason recovered from the log, not invented',
+      handed?.reason === 'a reviewer refused it', String(handed?.reason));
+
+    /* -- and the WORDS are durable too, not just the reference ------------- */
+    // `priorAttempt` reads the failed task's own log. That log is on disk, so
+    // a new process reads the same findings the dead one recorded.
+    const store = new EventStore(dir);
+    store.append({ taskId: 'p/T-0001', type: 'FINDINGS', payload: { findings: [
+      { severity: 'IMPORTANT', claim: 'the annual price renders untranslated' },
+      { severity: 'SUGGESTION', claim: 'prefer the tu register' },
+    ] } });
+    store.append({ taskId: 'p/T-0001', type: 'CHECK_RESULT',
+      payload: { name: 'build', outcome: 'FAILED' } });
+
+    // logs() is the only thing priorAttempt asks an engine for, so a reader
+    // over the same directory is the whole dependency.
+    const reader = { logs: (id: string) => new EventStore(dir).read(id) } as any;
+    const recovered = priorAttempt(reader, 'p/T-0001', 'a reviewer refused it');
+    check('PA19: the findings themselves survive the process that recorded them',
+      recovered?.findings[0]?.claim === 'the annual price renders untranslated',
+      JSON.stringify(recovered?.findings));
+    check('PA20: still blocking-only after the round trip',
+      recovered?.findings.length === 1, JSON.stringify(recovered?.findings));
+    check('PA21: and the failed check comes back with it',
+      recovered?.failedChecks[0]?.name === 'build', JSON.stringify(recovered?.failedChecks));
+    check('PA22: a task that recorded nothing yields no prior, not an empty brief',
+      priorAttempt(reader, 'p/T-nothing', 'r') === null, 'silence is not a finding');
   }
 
 

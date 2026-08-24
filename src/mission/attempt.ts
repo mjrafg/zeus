@@ -120,3 +120,33 @@ export function repairBrief(prior: PriorAttempt): string {
     + ' attempt got right; change only what these findings require.');
   return lines.join('\n');
 }
+
+/**
+ * The newest attempt at a node that did not land, read from the mission log.
+ *
+ * Deliberately NOT an in-memory map. The first cut remembered the failed
+ * attempt in a Map that lived for one `mission run`, so a repair inside that
+ * run carried the findings and a fresh run of the same mission started blind
+ * again — the same defect, surviving in the gap between two processes.
+ *
+ * Enforcement derives from the event log, so the successor of a failed attempt
+ * is found the same way: the newest INTEGRATION_RESULT for this node that did
+ * not integrate names the task whose reviewer refused it.
+ */
+export function lastFailedAttempt(events: Array<{ type: string; payload: unknown }>,
+  nodeId: string): { taskId: string; reason: string } | null {
+  for (const e of [...events].reverse()) {
+    if (e.type !== 'INTEGRATION_RESULT') continue;
+    const p = (e.payload ?? {}) as any;
+    if (p.nodeId !== nodeId) continue;
+    // The newest record for this node wins, integrated or not: a node that
+    // landed has nothing to answer for, and stopping at the first match is
+    // what keeps a stale failure from being handed to a successor of a
+    // later success.
+    if (p.integrated) return null;
+    return typeof p.taskId === 'string'
+      ? { taskId: p.taskId, reason: String(p.reason ?? 'a previous attempt did not land') }
+      : null;
+  }
+  return null;
+}

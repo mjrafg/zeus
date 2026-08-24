@@ -759,20 +759,41 @@ async function eventScaleSuite(): Promise<void> {
   for (let i = 0; i < N; i += 1) store.append({ taskId: id, type: 'NOTE', payload: { i } });
   const totalMs = Date.now() - t0;
 
-  // Timing the last 500 against the first 500 shows whether cost grows with
-  // history: an O(n) append would make the tail dramatically slower.
+  // Timing the tail against the head shows whether cost grows with history: an
+  // O(n) append would make the tail dramatically slower.
+  //
+  // The MINIMUM of several windows, not one measurement of each. This test
+  // failed the commit gate three times on a box that was also serving a live
+  // console, and every time it passed on a rerun — a single wall-clock sample
+  // under load measures the load, not the property. Noise only ever ADDS time,
+  // so the fastest window is the closest thing to the real per-append cost and
+  // the comparison stops depending on what else the machine was doing.
   const store2 = new EventStore(path.join(TMP, 'scale-state-2'));
   const id2 = 'p/T-SCALE2';
-  const tFirst0 = Date.now();
-  for (let i = 0; i < 500; i += 1) store2.append({ taskId: id2, type: 'NOTE', payload: { i } });
-  const firstMs = Date.now() - tFirst0;
-  for (let i = 500; i < 3500; i += 1) store2.append({ taskId: id2, type: 'NOTE', payload: { i } });
-  const tLast0 = Date.now();
-  for (let i = 3500; i < 4000; i += 1) store2.append({ taskId: id2, type: 'NOTE', payload: { i } });
-  const lastMs = Date.now() - tLast0;
+  const WINDOW = 150;
+  const windows = 3;
+  const timeWindow = (from: number): number => {
+    const t = Date.now();
+    for (let i = from; i < from + WINDOW; i += 1) {
+      store2.append({ taskId: id2, type: 'NOTE', payload: { i } });
+    }
+    return (Date.now() - t) / WINDOW;
+  };
 
+  let head = Infinity;
+  for (let w = 0; w < windows; w += 1) head = Math.min(head, timeWindow(w * WINDOW));
+  for (let i = windows * WINDOW; i < 3500; i += 1) {
+    store2.append({ taskId: id2, type: 'NOTE', payload: { i } });
+  }
+  let tail = Infinity;
+  for (let w = 0; w < windows; w += 1) tail = Math.min(tail, timeWindow(3500 + w * WINDOW));
+
+  // At 3500 events of history an O(n) append would be an order of magnitude
+  // slower per event, so 4x still catches it decisively while leaving room for
+  // a scheduler that had other ideas.
   check('ES1: appends stay flat as history grows (no full rescan)',
-    lastMs < firstMs * 3 + 200, `first500=${firstMs}ms last500=${lastMs}ms (after 3500 events)`);
+    tail < head * 4 + 0.5,
+    `head=${head.toFixed(3)}ms/ev tail=${tail.toFixed(3)}ms/ev (best of ${windows} windows, after 3500)`);
   check('ES2: the whole history is present and verifies',
     store.verify(id).ok && store.read(id).length === N, `${N} events in ${totalMs}ms`);
   check('ES3: sequences are contiguous and the chain links',

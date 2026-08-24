@@ -1685,7 +1685,10 @@ async function cmdMission(argv: string[]): Promise<number> {
       }
 
       const eff = traceLevelFor(missions, id, ctx.root);
-      out(`${C.dim}trace ${eff.level} · ${eff.source}${C.x}`);
+      // NOT under --json. A human line before the payload makes the output
+      // unparseable, which defeats the flag: the first thing anyone does with
+      // --json is pipe it, and the pipe is where it broke.
+      if (!json) out(`${C.dim}trace ${eff.level} · ${eff.source}${C.x}`);
       const calls = missionTrace(missions, id);
       // Comparing two calls is the question replanning raises, so it is a
       // flag on the same command rather than a separate one nobody finds.

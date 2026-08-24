@@ -17,6 +17,10 @@ import { MissionRegistry, PlanTrigger } from './registry';
 import { Engine } from '../engine/orchestrator';
 import { Provider } from '../engine/providers';
 import { PipelineStage } from '../routing';
+import {
+  EffectiveTrace, TraceLevel, isTraceLevel, resolveTraceLevel, TraceStore, BlobRef,
+} from '../trace';
+import { readConfig, readUserDefaults } from '../config';
 import { ExecutionPolicy } from '../engine/policy';
 import {
   Criterion, Oracle, OracleFinding, ProjectContext,
@@ -175,10 +179,23 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
   missionId?: string): {
   provider: Provider;
   model: string | null; reasoning: string | null; stage: string;
+  traceLevel: TraceLevel;
+  traceLevelSource: string;
+  keep: (content: string) => BlobRef | null;
   trace?: (type: string, payload: Record<string, unknown>) => void;
 } {
   const r = engine.routeFor(stage);
+  // SNAPSHOTTED HERE, at call start. Someone raising the level from audit to
+  // debug while a provider call is already running must not retroactively
+  // change what that call kept — the policy travels with the call.
+  const trace = (missions && missionId)
+    ? traceLevelFor(missions, missionId, engine.opts.projectRoot)
+    : { level: 'normal' as TraceLevel, source: 'zeus-default' as const };
+  const store = new TraceStore(engine.stateRoot);
   return {
+    traceLevel: trace.level,
+    traceLevelSource: trace.source,
+    keep: (content: string) => store.put(content, trace.level),
     // The PROVIDER the route names, not the one the role happens to hold. The
     // first cut passed the model and the effort and left the provider behind,
     // so a project routing its oracle to codex sent a codex model name to the
@@ -401,6 +418,30 @@ export function priorPlanFor(missions: MissionRegistry, missionId: string):
       critic: Array.isArray(critic) ? critic : [],
     },
   };
+}
+
+/**
+ * How much of this mission's model calls is kept, and which tier decided.
+ *
+ * Replayed from the log like every budget revision, so a level raised an hour
+ * ago survives a restart and a level raised DURING a call does not reach back
+ * and change what that call captured.
+ */
+export function traceLevelFor(missions: MissionRegistry, missionId: string,
+  projectRoot?: string): EffectiveTrace {
+  let mission: TraceLevel | null = null;
+  for (const e of missions.events.read(missionId)) {
+    if (e.type !== 'MISSION_TRACE_LEVEL_REVISED') continue;
+    const to = (e.payload as any)?.to;
+    if (isTraceLevel(to)) mission = to;
+  }
+  const project = projectRoot ? readConfig(projectRoot)?.trace?.level : undefined;
+  const global = readUserDefaults()?.trace?.level;
+  return resolveTraceLevel({
+    mission,
+    project: isTraceLevel(project) ? project : null,
+    global: isTraceLevel(global) ? global : null,
+  });
 }
 
 /** How much of its OWN replanning this mission has spent. */

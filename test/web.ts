@@ -45,6 +45,10 @@ import { routeFor, carriesCredentials, draftCreationCard } from '../src/create';
 import { extractZip } from '../src/zip';
 import { readConfig } from '../src/config';
 import { assemble, checklist } from '../src/mission/context';
+import {
+  resolveTraceLevel, retains, TraceStore, MAX_BLOB_BYTES,
+} from '../src/trace';
+import { traceLevelFor } from '../src/mission/operations';
 import { detectProject, nodePackageDirs } from '../src/adapters';
 import {
   PIPELINE_STAGES, STAGE_ROLE, ZEUS_DEFAULT_ROUTING, resolveRouting,
@@ -231,7 +235,7 @@ export async function webSuite(): Promise<void> {
       // the console read one object rather than two that could drift.
       delete apiCore.phase; delete apiCore.cost; delete apiCore.pendingDecision;
       delete apiCore.usage; delete apiCore.running; delete apiCore.blockedBy;
-      delete apiCore.abandonedRun;
+      delete apiCore.abandonedRun; delete apiCore.trace;
       check('WS1: the API mission record deep-equals the CLI view — one serializer',
         JSON.stringify(apiCore) === JSON.stringify(JSON.parse(JSON.stringify(view))),
         'shapes identical');
@@ -258,7 +262,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 14 && WRITE_ROUTES.length === 13,
+      READ_ROUTES.length === 14 && WRITE_ROUTES.length === 14,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -2863,6 +2867,142 @@ export async function webSuite(): Promise<void> {
         < UI_HTML.indexOf('</b> is running on this mission'), 'stated first');
     check('ORP7: and says nothing was lost, because the log is the record',
       UI_HTML.includes('Nothing was lost \u2014 the log is the record'), 'reassured');
+  }
+
+  section('how much of a call is kept, and for how long');
+  {
+    check('TL1: mission over project over global over the shipped default',
+      resolveTraceLevel({ mission: 'debug', project: 'audit', global: 'normal' }).level === 'debug'
+      && resolveTraceLevel({ project: 'audit', global: 'normal' }).source === 'project'
+      && resolveTraceLevel({ global: 'audit' }).source === 'global'
+      && resolveTraceLevel({}).source === 'zeus-default',
+      'precedence holds');
+    check('TL2: the shipped default is normal — debug never arrives by inheritance',
+      resolveTraceLevel({}).level === 'normal', resolveTraceLevel({}).level);
+    check('TL3: a level nobody recognises is ignored rather than obeyed',
+      resolveTraceLevel({ mission: 'verbose' as any, project: 'audit' }).level === 'audit',
+      'unknown falls through');
+
+    check('TL4: every level keeps the same skeleton; only content differs',
+      retains('normal').prompt === false && retains('audit').prompt === true
+      && retains('debug').prompt === true,
+      'structure is not a level decision');
+    check('TL5: audit redacts and debug does not, and each says which it is',
+      retains('audit').redacted === true && retains('debug').redacted === false,
+      'the flag is on the ref, not inferred from the level');
+    check('TL6: debug expires soonest, normal metadata never',
+      retains('debug').defaultTtlHours === 72
+      && retains('audit').defaultTtlHours === 720
+      && retains('normal').defaultTtlHours === null,
+      JSON.stringify([retains('debug').defaultTtlHours, retains('audit').defaultTtlHours]));
+
+    const store = new TraceStore(fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-trace-')));
+    const secret = 'here is a key sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIIIJJJJKKKK and more text';
+    check('TL7: at normal, nothing is kept at all',
+      store.put(secret, 'normal') === null, 'no blob');
+
+    const audit = store.put(secret, 'audit')!;
+    const readBack = store.get(audit)!;
+    check('TL8: at audit the content is REDACTED BEFORE it reaches disk',
+      !readBack.includes('sk-ant-api03-AAAABBBBCCCC') && audit.redacted === true,
+      readBack.slice(0, 60));
+    check('TL8b: and the surrounding text survives — redaction is not deletion',
+      readBack.includes('here is a key') && readBack.includes('and more text'),
+      'structure preserved');
+
+    const dbg = store.put(secret, 'debug')!;
+    check('TL9: at debug it is kept raw, and the ref says so rather than implying it',
+      store.get(dbg)!.includes('sk-ant-api03-AAAABBBBCCCC') && dbg.redacted === false,
+      'raw and labelled');
+
+    const twice = store.put('identical body', 'debug')!;
+    const again = store.put('identical body', 'debug')!;
+    check('TL10: identical content is stored once — safe because blobs never change',
+      twice.hash === again.hash, twice.hash.slice(0, 20));
+
+    const big = store.put('x'.repeat(MAX_BLOB_BYTES + 5000), 'debug')!;
+    check('TL11: oversized content is cut and SAYS it was, with both sizes',
+      big.truncated === true && big.bytes > big.storedBytes
+      && store.get(big)!.includes('[truncated by Zeus:'),
+      `${big.bytes} -> ${big.storedBytes}`);
+
+    // Expiry has to be real. Hiding expired bytes from a viewer while they sit
+    // on disk is the same defect as redacting in the viewer.
+    const swept = store.sweep(Date.now() + 100 * 3600_000);
+    check('TL12: a sweep really unlinks expired blobs rather than hiding them',
+      swept.removed > 0 && store.get(dbg) === null,
+      `${swept.removed} removed, ${swept.freedBytes} bytes freed`);
+
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'trace.ts'), 'utf8');
+    check('TL13: redaction is in the STORE, not in a reader',
+      /REDACTION HAPPENS HERE, before the bytes reach disk/.test(src)
+      && /redactPayload/.test(src), 'the boundary is the store');
+  }
+
+  section('changing the level affects the next call, not the last one');
+  {
+    const fx = fixture();
+    const rec = fx.missions.create('a goal whose trace level moves', 'base0');
+    const id = rec.missionId;
+    const priorHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-xdg2-'));
+
+    let server: RunningServer | null = null;
+    try {
+      check('TR-L1: a mission starts at the shipped default, and says which tier that was',
+        traceLevelFor(fx.missions, id, fx.root).level === 'normal'
+        && traceLevelFor(fx.missions, id, fx.root).source === 'zeus-default',
+        JSON.stringify(traceLevelFor(fx.missions, id, fx.root)));
+
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+
+      const debugNoAck = await post(server, '/api/missions/M-0001/trace', { level: 'debug' });
+      check('TR-L2: debug is refused until the warning is acknowledged',
+        debugNoAck.status === 409 && debugNoAck.json.error === 'DEBUG_NOT_ACKNOWLEDGED'
+        && /secrets, credentials/.test(debugNoAck.json.warning),
+        debugNoAck.json?.warning?.slice(0, 50));
+
+      const toAudit = await post(server, '/api/missions/M-0001/trace', { level: 'audit' });
+      check('TR-L3: a level a person chose is recorded as a revision, from and to',
+        toAudit.status === 200 && toAudit.json.from === 'normal' && toAudit.json.to === 'audit'
+        && fx.store.read(id).some((e: any) => e.type === 'MISSION_TRACE_LEVEL_REVISED'
+          && e.payload.decidedBy === 'user-confirmed'),
+        JSON.stringify([toAudit.json?.from, toAudit.json?.to]));
+      check('TR-L4: and it becomes the mission tier, beating project and global',
+        traceLevelFor(fx.missions, id, fx.root).level === 'audit'
+        && traceLevelFor(fx.missions, id, fx.root).source === 'mission',
+        JSON.stringify(traceLevelFor(fx.missions, id, fx.root)));
+
+      const ack = await post(server, '/api/missions/M-0001/trace',
+        { level: 'debug', acknowledged: true });
+      check('TR-L5: acknowledged, debug is accepted',
+        ack.status === 200 && ack.json.to === 'debug', `${ack.status} ${ack.json?.to}`);
+      check('TR-L6: history is not rewritten — the earlier revision still says audit',
+        fx.store.read(id).filter((e: any) => e.type === 'MISSION_TRACE_LEVEL_REVISED')
+          .map((e: any) => e.payload.to).join() === 'audit,debug',
+        'both revisions stand');
+
+      const same = await post(server, '/api/missions/M-0001/trace',
+        { level: 'debug', acknowledged: true });
+      check('TR-L7: setting it to what it already is records nothing',
+        same.json.unchanged === true
+        && fx.store.read(id).filter((e: any) => e.type === 'MISSION_TRACE_LEVEL_REVISED').length === 2,
+        'no empty revision');
+
+      const bad = await post(server, '/api/missions/M-0001/trace', { level: 'loud' });
+      check('TR-L8: a level nobody recognises is refused with the ones that exist',
+        bad.status === 400 && /normal, audit, debug/.test(bad.json.detail), bad.json?.detail);
+    } finally {
+      await server?.close();
+      if (priorHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = priorHome;
+    }
+
+    const ops = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    check('TR-L9: the policy is snapshotted at call start, not read during the call',
+      /SNAPSHOTTED HERE, at call start/.test(ops), 'a running call keeps its policy');
   }
 
   section('what the model was given, derived from the giving');

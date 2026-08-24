@@ -56,6 +56,11 @@ export interface CompileInput {
    * prompt hash and the provider's own identity are both out of reach.
    */
   trace?: (type: string, payload: Record<string, unknown>) => void;
+  /** The trace policy that applied when this call began. Snapshotted, not read. */
+  traceLevel?: string;
+  traceLevelSource?: string;
+  /** Keeps content under that policy, or returns null when the level keeps none. */
+  keep?: (content: string) => unknown;
 
   supervisor: ProcessSupervisor;
   policy: ExecutionPolicy;
@@ -221,6 +226,12 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
       // manifest behind it. Both derived from the array that built the prompt.
       manifest: assembled.manifest, delivered: assembled.delivered,
       checklist: checklist(assembled.manifest),
+      traceLevel: input.traceLevel ?? 'normal',
+      traceLevelSource: input.traceLevelSource ?? 'zeus-default',
+      // At normal this is null and only the hash above survives. At audit and
+      // debug the words are kept in a blob — redacted before they reach disk
+      // for audit, raw for debug — and referenced by hash from here.
+      ...(input.keep ? { promptBlob: input.keep(prompt) } : {}),
       pid: process.pid,
       startedAt: new Date().toISOString(),
     });
@@ -243,6 +254,11 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
       ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
+      // The provider-visible reply, BEFORE Zeus turned it into a structured
+      // object. The parsed result is what Zeus made of it; this is what it was
+      // given, and presenting the first as though it were the second is how a
+      // parsing bug becomes invisible.
+      ...(input.keep ? { responseBlob: input.keep(res.raw ?? res.text ?? '') } : {}),
       finishedAt: new Date().toISOString(),
     });
   } catch (e: any) {
@@ -343,6 +359,11 @@ export async function critiqueOracle(input: {
   /** The model and effort Zeus resolved for this stage. Null = provider decides. */
   model?: string | null; reasoning?: string | null; stage?: string;
   trace?: (type: string, payload: Record<string, unknown>) => void;
+  /** The trace policy that applied when this call began. Snapshotted, not read. */
+  traceLevel?: string;
+  traceLevelSource?: string;
+  /** Keeps content under that policy, or returns null when the level keeps none. */
+  keep?: (content: string) => unknown;
   /** Extra sections a caller wants delivered — used by tests to prove refusal. */
   extraInputs?: Array<{ kind: any; label: string; content: string }>;
 }): Promise<CritiqueResult> {
@@ -390,6 +411,12 @@ export async function critiqueOracle(input: {
       })),
       delivered: payload.deliveredContext,
       configuredContext: payload.configuredContext,
+      traceLevel: input.traceLevel ?? 'normal',
+      traceLevelSource: input.traceLevelSource ?? 'zeus-default',
+      // At normal this is null and only the hash above survives. At audit and
+      // debug the words are kept in a blob — redacted before they reach disk
+      // for audit, raw for debug — and referenced by hash from here.
+      ...(input.keep ? { promptBlob: input.keep(payload.prompt) } : {}),
       pid: process.pid,
       startedAt: new Date().toISOString(),
     });
@@ -412,6 +439,11 @@ export async function critiqueOracle(input: {
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
       ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
+      // The provider-visible reply, BEFORE Zeus turned it into a structured
+      // object. The parsed result is what Zeus made of it; this is what it was
+      // given, and presenting the first as though it were the second is how a
+      // parsing bug becomes invisible.
+      ...(input.keep ? { responseBlob: input.keep(res.raw ?? res.text ?? '') } : {}),
       finishedAt: new Date().toISOString(),
     });
   } catch (e: any) {

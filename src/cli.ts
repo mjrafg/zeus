@@ -47,12 +47,13 @@ import {
 import { defaultProjectsRoot } from './projects';
 import {
   compileMissionOracle, planMissionGraph, recompileMissionOracle,
-  MAX_ORACLE_RECOMPILES, budgetsFor, liveRun,
+  MAX_ORACLE_RECOMPILES, budgetsFor, liveRun, traceLevelFor,
 } from './mission/operations';
 import {
   resolveRouting, validateRouting, renderRouting, providerCapabilities,
   STAGE_LABEL, STAGE_DESCRIPTION,
 } from './routing';
+import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING } from './trace';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -1657,9 +1658,34 @@ async function cmdMission(argv: string[]): Promise<number> {
 
     case 'trace': {
       const raw = rest.find((a) => !a.startsWith('--'));
-      if (!raw) { err('usage: zeus mission trace <id> [--call <traceCallId>] [--json]'); return 2; }
+      if (!raw) {
+        err('usage: zeus mission trace <id> [--call <id>] [--level normal|audit|debug] [--json]');
+        return 2;
+      }
       const id = resolve(raw);
       if (!missions.mission(id)) { err(`unknown mission ${id}`); return 2; }
+
+      const li = rest.indexOf('--level');
+      if (li >= 0) {
+        const to = rest[li + 1];
+        if (!isTraceLevel(to)) {
+          err(`${C.r}✗${C.x} --level takes ${TRACE_LEVELS.join(', ')}`);
+          return 2;
+        }
+        const before = traceLevelFor(missions, id, ctx.root);
+        if (to === 'debug' && !rest.includes('--yes')) {
+          err(`${C.y}!${C.x} ${DEBUG_WARNING}`);
+          err(`  ${C.dim}re-run with --yes to turn it on for ${missionLabel(id)}${C.x}`);
+          return 1;
+        }
+        missions.recordTraceLevel(id, { from: before.level, to, decidedBy: 'user-confirmed' });
+        out(`${C.g}✓${C.x} ${id} trace ${before.level} → ${C.b}${to}${C.x}`);
+        out(`  ${C.dim}calls already made keep the level they were made under${C.x}`);
+        return 0;
+      }
+
+      const eff = traceLevelFor(missions, id, ctx.root);
+      out(`${C.dim}trace ${eff.level} · ${eff.source}${C.x}`);
       const calls = missionTrace(missions, id);
       const wanted = rest.indexOf('--call') >= 0 ? rest[rest.indexOf('--call') + 1] : null;
       const shown = wanted ? calls.filter((c) => c.traceCallId === wanted) : calls;

@@ -23,6 +23,7 @@ import {
   PIPELINE_STAGES, STAGE_LABEL, STAGE_DESCRIPTION, STAGE_ROLE,
   resolveRouting, validateRouting, providerCapabilities,
 } from '../routing';
+import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING } from '../trace';
 import { MissionRegistry } from '../mission/registry';
 import { isMissionId, isTaskId, scopeOf } from '../mission/types';
 import {
@@ -35,6 +36,7 @@ import {
 } from '../mission/consent';
 import {
   CompileResult, PlanOperationResult, OperationContext, budgetsFor, liveRun,
+  traceLevelFor,
 } from '../mission/operations';
 import { missionUsage, MissionBudgets, checkMissionBudgets } from '../mission/progress';
 import {
@@ -148,6 +150,7 @@ export const WRITE_ROUTES = [
   'POST /api/projects/draft',
   'POST /api/projects/decide',
   'POST /api/routing',
+  'POST /api/missions/:id/trace',
 ] as const;
 
 /**
@@ -588,6 +591,10 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           // "plan again" button. The findings that actually stand were on the
           // log and on no screen. A dead end has to say what it is.
           blockedBy: blockedBy(sc.missions, id),
+          // The level and the tier that decided it, together — "Debug" and
+          // "Debug, because this mission was switched to it" are different
+          // things to someone deciding whether to switch it back.
+          trace: traceLevelFor(sc.missions, id, sc.root),
         });
         return;
       }
@@ -1039,7 +1046,7 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       return;
     }
 
-    const m = /^\/api\/missions\/([^/]+)\/(compile|plan|run|cancel|confirm|evaluate|budget)$/
+    const m = /^\/api\/missions\/([^/]+)\/(compile|plan|run|cancel|confirm|evaluate|budget|trace)$/
       .exec(url.pathname);
     if (!m) { send(res, 404, { error: 'NO_SUCH_ROUTE', path: url.pathname }); return; }
     const id = resolveId(decodeURIComponent(m[1]), wsc.projectId);
@@ -1144,6 +1151,34 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       });
       send(res, 200, { missionId: id, limit, from: before[limit], to,
         budgets: budgetsFor(wsc.missions, id) });
+      return;
+    }
+
+    // ---- trace: change how much of the NEXT calls is kept ------------------
+    if (action === 'trace') {
+      const to = String(body?.level ?? '');
+      if (!isTraceLevel(to)) {
+        send(res, 400, { error: 'BAD_TRACE_LEVEL', detail: `takes ${TRACE_LEVELS.join(', ')}` });
+        return;
+      }
+      const before = traceLevelFor(wsc.missions, id, wsc.root);
+      // Debug is never turned on by inheritance or by accident. The warning is
+      // shown BEFORE it applies, and the caller has to say it read it.
+      if (to === 'debug' && body?.acknowledged !== true) {
+        send(res, 409, { error: 'DEBUG_NOT_ACKNOWLEDGED', warning: DEBUG_WARNING,
+          detail: 'send acknowledged:true to turn debug on for this mission' });
+        return;
+      }
+      if (to === before.level) {
+        send(res, 200, { missionId: id, unchanged: true, trace: before });
+        return;
+      }
+      wsc.missions.recordTraceLevel(id, {
+        from: before.level, to, decidedBy: 'user-confirmed',
+      });
+      send(res, 200, { missionId: id, from: before.level, to,
+        trace: traceLevelFor(wsc.missions, id, wsc.root),
+        detail: 'calls already made keep the level they were made under' });
       return;
     }
 

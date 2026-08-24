@@ -729,6 +729,22 @@ export class MissionRegistry {
     this.append(missionId, 'MISSION_OPERATION', { ...spec, at: new Date().toISOString() });
   }
 
+  /**
+   * A change to how much of this mission's calls are kept.
+   *
+   * An event, like every budget revision, and for the same reason: it must
+   * survive a restart and it must not rewrite history. Calls already made
+   * under normal stay normal, because each captured the policy that applied
+   * when it began — raising the level affects what comes next and nothing else.
+   */
+  recordTraceLevel(missionId: string, spec: {
+    from: string; to: string; decidedBy: string;
+  }): void {
+    this.append(missionId, 'MISSION_TRACE_LEVEL_REVISED', {
+      ...spec, at: new Date().toISOString(),
+    });
+  }
+
   /** A reconciliation between what the log says and what the world shows. */
   recordReconciliation(missionId: string, spec: {
     kind: string; expected: string; observed: string; resolution: string;

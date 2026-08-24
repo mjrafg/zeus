@@ -45,6 +45,14 @@ export interface ProjectConfig {
    * into every config file on disk.
    */
   routing?: RoutingTable;
+  /**
+   * How much of each model call this project keeps.
+   *
+   * A project may sit at audit while Zeus globally sits at normal — that is
+   * what the tier is for. Debug is never inherited; it has to be asked for at
+   * the level it applies to.
+   */
+  trace?: { level?: string };
   validation: {
     /** Only 'fastest-safe' exists today; the field makes future strategies explicit. */
     strategy: string;
@@ -91,6 +99,8 @@ export interface UserDefaults {
   providers?: { planner?: string; implementer?: string; reviewer?: string };
   /** The global tier of the routing table. Projects override it field by field. */
   routing?: RoutingTable;
+  /** The global trace level. Normal unless a person says otherwise. */
+  trace?: { level?: string };
 }
 
 export function readUserDefaults(): UserDefaults | null {

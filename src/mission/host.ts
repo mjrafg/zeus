@@ -16,6 +16,7 @@ import { Provider } from '../engine/providers';
 import { GitAccess, revalidateForIntegration } from '../validation/revalidate';
 import { Tier } from '../validation/tier';
 import { Oracle } from './oracle';
+import { priorAttempt, repairBrief, type PriorAttempt } from './attempt';
 import { PlanGraph, TaskNode } from './types';
 import { advanceRatchet, readRatchet } from './ratchet';
 import { acceptedCommands, evaluateCriteria } from './evaluate';
@@ -133,11 +134,22 @@ export function missionHost(input: MissionHostInput): LoopHost {
   let lastTaskId: string | null = null;
 
   return {
-    createTask(node: TaskNode, opts: { repair?: boolean } = {}): string {
-      const rec = engine.createTask(node.description,
+    createTask(node: TaskNode, opts: { repair?: boolean; prior?: PriorAttempt | null } = {}): string {
+      // A repair used to receive the node description byte-for-byte, so the
+      // second attempt re-derived its design from the same words that produced
+      // the first one — with no way to know which claims a reviewer had
+      // already refused. The findings that refused it travel with it now.
+      const description = opts.prior
+        ? `${node.description}\n${repairBrief(opts.prior)}`
+        : node.description;
+      const rec = engine.createTask(description,
         { missionId, ...(opts.repair ? { repair: true } : {}) });
       tasks.set(rec.taskId, rec);
       return rec.taskId;
+    },
+
+    priorAttempt(taskId: string, reason: string): PriorAttempt | null {
+      return priorAttempt(engine, taskId, reason);
     },
 
     async runNode(taskId: string, node: TaskNode): Promise<NodeExecution> {

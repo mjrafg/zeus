@@ -16,6 +16,7 @@ import { check, section } from './harness';
 import { main } from '../src/cli';
 import { EventStore, StoredEvent } from '../src/engine/events';
 import { MissionRegistry } from '../src/mission/registry';
+import { blockingFindings, repairBrief } from '../src/mission/attempt';
 import { PlanGraph, TaskNode } from '../src/mission/types';
 import { Criterion, Oracle } from '../src/mission/oracle';
 import {
@@ -113,6 +114,85 @@ const evs = (missions: MissionRegistry, id: string): StoredEvent[] => missions.e
 const typesOf = (missions: MissionRegistry, id: string): string[] => evs(missions, id).map((e) => e.type);
 
 export async function executionSuite(): Promise<void> {
+  section('mission repair: the second attempt is told what refused the first');
+  {
+    // A repair used to be a boolean. The task was told THAT it was a repair
+    // and never WHAT had gone wrong, so the second attempt re-derived its
+    // design from the same words that produced the first one. Observed on
+    // talkbridge/M-0016, where three review rounds converged on the same two
+    // blockers and the repair task's prompt contained neither.
+    const missions = freshRegistry();
+    const plan = graphOf([node('p/M-0001/N-0001',
+      { affectedCriteria: ['p/M-0001/C-0001'] })]);
+    const { missionId, oracle } = armed(missions, [criterion('p/M-0001/C-0001')], plan);
+
+    const refused = {
+      taskId: 'p/T-0001',
+      findings: [
+        { severity: 'IMPORTANT', claim: 'html lang is set globally while other routes stay English' },
+        { severity: 'IMPORTANT', claim: 'the annual price renders $79.99/year untranslated', file: 'landing.jsx' },
+      ],
+      failedChecks: [{ name: 'build', outcome: 'FAILED' }],
+      reason: 'a reviewer refused it',
+    };
+    const descriptions: string[] = [];
+    let attempt = 0;
+    let n = 0;
+    await runMissionLoop(missions, fakeHost({
+      createTask: (nd, ctx: any) => {
+        // The host is what folds the prior attempt into the description; the
+        // stub does the same so the test sees what a designer would receive.
+        descriptions.push(ctx?.prior
+          ? `${nd.description}\n${repairBrief(ctx.prior)}` : nd.description);
+        return `p/T-${String(n += 1).padStart(4, '0')}`;
+      },
+      priorAttempt: () => refused,
+      // fail once, then succeed, so exactly one repair is scheduled
+      integrate: async () => (attempt++ === 0
+        ? { integrated: false, sha: null, touched: [], detail: 'review refused it' }
+        : { integrated: true, sha: 'sha1', touched: [], detail: 'clean' }),
+    }), { missionId, oracle });
+
+    const [first, second] = descriptions;
+    check('PA1: a repair is actually scheduled, so there are two attempts',
+      descriptions.length >= 2, `attempts=${descriptions.length}`);
+    check('PA2: the FIRST attempt carries no findings — there are none yet',
+      !!first && !/REPAIR OF A FAILED ATTEMPT/.test(first), 'a first attempt is not a repair');
+    check('PA3: the second attempt is told it is a repair, not a fresh start',
+      !!second && /THIS IS A REPAIR OF A FAILED ATTEMPT, NOT A FRESH START/.test(second),
+      'the emphatic line survives');
+    check('PA4: and it carries the actual blocking claims, not just a flag',
+      !!second && /html lang is set globally/.test(second)
+      && /\$79\.99\/year untranslated/.test(second),
+      'both blockers travel');
+    check('PA5: the failed check travels too',
+      !!second && /build: FAILED/.test(second), 'a repair does not re-break a proven check');
+    check('PA6: the second attempt still contains the original task',
+      !!second && !!first && second.startsWith(first), 'findings are added, not substituted');
+
+    // SUGGESTION is advice, not a refusal. Listing it under "every one of these
+    // must be resolved" would turn taste into a blocker.
+    const mixed = blockingFindings([[
+      { severity: 'SUGGESTION', claim: 'prefer the tu register' },
+      { severity: 'CRITICAL', claim: 'the build does not run' },
+    ]]);
+    check('PA7: CRITICAL blocks and SUGGESTION does not',
+      mixed.length === 1 && mixed[0].claim === 'the build does not run',
+      JSON.stringify(mixed));
+
+    // A reviewer that expands twice says the same thing three times, and three
+    // copies of one blocker reads as three blockers.
+    const dupes = blockingFindings([
+      [{ severity: 'IMPORTANT', claim: 'the annual price is untranslated' }],
+      [{ severity: 'IMPORTANT', claim: 'The Annual Price Is Untranslated' }],
+    ]);
+    check('PA8: the same claim from two review rounds is one finding',
+      dupes.length === 1, JSON.stringify(dupes));
+    check('PA9: and the NEWEST round wins the wording',
+      dupes[0]?.claim === 'the annual price is untranslated', JSON.stringify(dupes));
+  }
+
+
   section('mission stage 3: planning is gated on an accepted contract');
   {
     const missions = freshRegistry();

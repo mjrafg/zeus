@@ -12,6 +12,7 @@
  * file where neither half could be read.
  */
 
+import type { PriorAttempt } from './attempt';
 import { Achievement, PlanGraph, TaskNode, TerminationReason } from './types';
 import { CriterionOutcome, Oracle } from './oracle';
 import { MissionRegistry } from './registry';
@@ -53,7 +54,14 @@ export interface EvaluationOutcome {
 
 export interface LoopHost {
   /** Creates a task id for a node without recording anything on the mission. */
-  createTask(node: TaskNode, ctx: { missionId: string; repair: boolean }): string;
+  createTask(node: TaskNode,
+    ctx: { missionId: string; repair: boolean; prior?: PriorAttempt | null }): string;
+  /**
+   * What a failed attempt at this node left behind, for its successor to answer.
+   * Optional: a host with no event log to read simply sends the repair in blind,
+   * which is what every host did before this existed.
+   */
+  priorAttempt?(taskId: string, reason: string): PriorAttempt | null;
   /** Runs one node to a terminal task state. */
   runNode(taskId: string, node: TaskNode, ctx: { baseSha: string; repair: boolean }): Promise<NodeExecution>;
   /** Revalidates and integrates onto the mission's current green. */
@@ -112,6 +120,13 @@ export async function runMissionLoop(
 
   const state: ScheduleState = { done: new Set(), abandoned: new Set() };
   const repairsFor = new Map<string, number>();
+  /** The attempt that failed at each node, so its successor is not sent in blind. */
+  const lastAttempt = new Map<string, PriorAttempt>();
+  const remember = (nodeId: string, taskId: string, reason: string): void => {
+    const prior = host.priorAttempt?.(taskId, reason);
+    if (prior) lastAttempt.set(nodeId, prior);
+    else lastAttempt.delete(nodeId);
+  };
   const outcomes = new Map<string, CriterionOutcome>();
   let cycles = 0;
 
@@ -279,7 +294,8 @@ export async function runMissionLoop(
     /* -- spawn, through the one door -------------------------------------- */
 
     const repair = (repairsFor.get(node.nodeId) ?? 0) > 0;
-    const taskId = host.createTask(node, { missionId, repair });
+    const prior = repair ? (lastAttempt.get(node.nodeId) ?? null) : null;
+    const taskId = host.createTask(node, { missionId, repair, prior });
     const decision = missions.spawnNode(missionId, taskId, node.nodeId, {
       repair, reason: repair ? 'repair after a failed integration' : undefined,
     });
@@ -331,6 +347,7 @@ export async function runMissionLoop(
       });
       if (used < REPAIRS_PER_NODE) {
         repairsFor.set(node.nodeId, used + 1);
+        remember(node.nodeId, taskId, integration.detail || `task ${exec.state}`);
         continue;                                   // one repair, then no more
       }
       // A second failure is not a worse first failure. Escalating rather than
@@ -373,7 +390,12 @@ export async function runMissionLoop(
       host.rollback?.(integration.sha);
       for (const id of broken) outcomes.set(id, before.get(id)!);
       const used = repairsFor.get(node.nodeId) ?? 0;
-      if (used < REPAIRS_PER_NODE) { repairsFor.set(node.nodeId, used + 1); continue; }
+      if (used < REPAIRS_PER_NODE) {
+        repairsFor.set(node.nodeId, used + 1);
+        remember(node.nodeId, taskId,
+          `it broke ${broken.length} previously proven criterion(s): ${broken.join(', ')}`);
+        continue;
+      }
       refuse('INVARIANT_BROKEN_TWICE', `${node.nodeId} broke ${broken.join(', ')} twice`);
       state.abandoned.add(node.nodeId);
       continue;
@@ -386,6 +408,7 @@ export async function runMissionLoop(
     host.advanceRatchet(integration.sha);
     state.done.add(node.nodeId);
     repairsFor.delete(node.nodeId);
+    lastAttempt.delete(node.nodeId);
 
     missions.recordIntegration(missionId, {
       nodeId: node.nodeId, taskId, planVersion, integrated: true, sha: integration.sha,

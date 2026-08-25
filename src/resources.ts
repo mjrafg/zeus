@@ -118,8 +118,15 @@ export function workerEnv(limits: GovernorLimits): Record<string, string> {
 }
 
 /** Appends an explicit worker flag when we recognise the runner. */
+/**
+ * Same rule, same hole: matching a joined argv means matching payload text.
+ * See the note on the copy in engine/exec.ts — a prompt mentioning playwright
+ * appended --workers to a provider CLI and silently disabled the plan critic.
+ */
+const MAX_MATCHABLE_ARG = 256;
+
 export function boundedArgs(command: string, args: string[], limits: GovernorLimits): string[] {
-  const joined = `${command} ${args.join(' ')}`;
+  const joined = `${command} ${args.filter((a) => a.length <= MAX_MATCHABLE_ARG).join(' ')}`;
   const w = Math.max(1, limits.maxTestWorkers);
   const has = (flag: string) => args.some((a) => a.startsWith(flag));
   if (/\bjest\b/.test(joined) && !has('--maxWorkers') && !has('-w')) return [...args, `--maxWorkers=${w}`];

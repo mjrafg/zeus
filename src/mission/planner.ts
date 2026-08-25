@@ -734,6 +734,19 @@ export interface PlanAcceptance {
 }
 
 export function planAcceptance(critique: PlanCritique): PlanAcceptance {
+  // `ok` is the only field that means "this critic produced a verdict".
+  //
+  // It existed and NOTHING read it. Both critics return valid:true with an
+  // empty findings list when the provider crashes, times out or answers
+  // unparseably — and an empty findings list is exactly what a clean critique
+  // produces. So a plan whose critic never answered read as a plan the critic
+  // had approved, and FLOWed straight into execution. The contamination door
+  // at least stopped the mission; this one opened it.
+  if (critique.ok === false && critique.valid) {
+    return { decision: 'UNCRITIQUED', blocking: [], advisory: [],
+      reasons: [`Zeus could not obtain a second opinion: ${critique.infrastructureFailure
+        ?? 'the plan critic did not answer'}. The plan itself was never reviewed.`] };
+  }
   if (!critique.valid) {
     // NOT a rejection, though it was one until M-0027 spent four planner calls
     // proving otherwise. A contaminated payload is a fault in how ZEUS

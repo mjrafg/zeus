@@ -338,9 +338,33 @@ export function workerEnv(b: Budgets): Record<string, string> {
   };
 }
 
-/** Adds an explicit worker bound when the runner is recognised. */
-export function boundedArgs(command: string, args: string[], b: Budgets): string[] {
-  const joined = `${command} ${args.join(' ')}`;
+/**
+ * Adds an explicit worker bound when the runner is recognised.
+ *
+ * MATCHES ON THE COMMAND LINE, NOT ON PAYLOAD TEXT. It used to join every
+ * argument, and an agent invocation carries its whole prompt as a positional
+ * argument — so a prompt that merely MENTIONED playwright caused Zeus to
+ * append `--workers=4` to the codex CLI, which rejected the invocation with
+ * "unexpected argument '--workers'" and exited in 258ms.
+ *
+ * The consequences were not local. That failed call was the plan critic; a
+ * critic that fails returns no findings, no findings read as a clean critique,
+ * and the plan was auto-accepted with no second opinion. A prompt containing
+ * the word "playwright" silently disabled review.
+ *
+ * "jest", "vitest", "mvn" and — worst of all — "go" plus "test" are the same
+ * trap, and those words appear in ordinary prose about a repository.
+ *
+ * Two guards, because either alone would leave the door ajar: agent calls are
+ * never test runners and are skipped wholesale, and no argument long enough to
+ * be a payload is matched against, whoever the caller is.
+ */
+const MAX_MATCHABLE_ARG = 256;
+
+export function boundedArgs(command: string, args: string[], b: Budgets,
+  cls?: ExecClass): string[] {
+  if (cls === 'agent') return args;
+  const joined = `${command} ${args.filter((a) => a.length <= MAX_MATCHABLE_ARG).join(' ')}`;
   const w = Math.max(1, b.maxTestWorkers);
   const has = (flag: string) => args.some((a) => a.startsWith(flag));
   if (/\bjest\b/.test(joined) && !has('--maxWorkers') && !has('-w')) return [...args, `--maxWorkers=${w}`];
@@ -421,7 +445,7 @@ export class ProcessSupervisor {
     const startedAt = Date.now();
 
     // ---- isolation: strongest practical backend ----------------------------
-    const bounded = boundedArgs(req.command, req.args, budgets);
+    const bounded = boundedArgs(req.command, req.args, budgets, req.cls);
     const wrapped = wrap(req.command, bounded, {
       policy: req.policy, budgets, jobId: req.id,
       confineFilesystem: req.confineFilesystem ?? false,

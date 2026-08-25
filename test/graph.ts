@@ -17,6 +17,7 @@ import { bootstrapArgv, probe } from '../src/graph/access';
 import { toolsFor, graphToolIds, MCP_CAPABLE } from '../src/engine/providers';
 import { assemble } from '../src/mission/context';
 import { proposeAcceptance } from '../src/mission/compile';
+import { boundedArgs } from '../src/engine/exec';
 import { ORACLE_CRITIQUE_POLICY, PLAN_CRITIQUE_POLICY } from '../src/engine/reviewcontext';
 import { planAcceptance } from '../src/mission/planner';
 import type { Criterion } from '../src/mission/oracle';
@@ -569,7 +570,7 @@ export async function graphSuite(): Promise<void> {
 
     const ops = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
     check('CR7: both compile paths pass whether the critique actually ran',
-      (ops.match(/nextFindings, critique\.valid\)|findings, critique\.valid\)/g) ?? []).length === 2,
+      (ops.match(/critique\.ok === true\)/g) ?? []).length === 2,
       'recompile and first-compile');
   }
 
@@ -644,6 +645,90 @@ export async function graphSuite(): Promise<void> {
       PLAN_CRITIQUE_POLICY.forbidden.includes('planner-reasoning' as any)
       && PLAN_CRITIQUE_POLICY.forbidden.includes('planner-transcript' as any),
       'the real contamination is still forbidden');
+  }
+
+  section('a crashed critic is not a clean critic');
+  {
+    // The worse half of the same bug, found by auditing the other levels.
+    // Both critics return valid:true with an EMPTY findings list when the
+    // provider crashes, times out or answers unparseably — and an empty
+    // findings list is exactly what a clean critique produces. `ok` is the
+    // only field that distinguishes them, and nothing in the codebase read it.
+    //
+    // The contamination door at least stopped the mission. This one opened it:
+    // a plan whose critic never answered FLOWed straight into execution.
+    const crashed = planAcceptance({ ok: false, valid: true, findings: [],
+      infrastructureFailure: 'critic provider threw: ECONNRESET' } as any);
+    check('CRA1: a plan critic that crashed does not let the plan flow',
+      crashed.decision !== 'FLOW', crashed.decision);
+    check('CRA2: it is UNCRITIQUED — no verdict was produced',
+      crashed.decision === 'UNCRITIQUED', crashed.decision);
+    check('CRA3: and it names the actual failure, not a generic one',
+      crashed.reasons.join(' ').includes('ECONNRESET'), crashed.reasons.join(' '));
+    check('CRA4: a real clean critique is still told apart from it',
+      planAcceptance({ ok: true, valid: true, findings: [] } as any).decision === 'FLOW',
+      'clean still flows');
+
+    // Same door on the oracle side: proposeAcceptance must key on ok, not valid.
+    const ops = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    check('CRA5: the oracle acceptance keys on ok, not on valid',
+      (ops.match(/critique\.ok === true\)/g) ?? []).length === 2
+      && !/nextFindings, critique\.valid\)/.test(ops),
+      'both compile paths use ok');
+    check('CRA6: and the record says WHICH failure it was',
+      /the critic did not answer/.test(ops), 'provider failure named separately');
+
+    // The judge and the task reviewer already had this right, and are the
+    // model the critics have now been brought up to.
+    const ev = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'evaluate.ts'), 'utf8');
+    const orc = fs.readFileSync(path.join(__dirname, '..', 'src', 'engine', 'orchestrator.ts'), 'utf8');
+    check('CRA7: the AI judge already fails closed to UNEVALUATED, not FAILED',
+      /outcome: 'UNEVALUATED'/.test(ev) && /JUDGE_CONTEXT_CONTAMINATED/.test(ev),
+      'nothing was decided, so nothing is claimed');
+    check('CRA8: the task reviewer already escalates and blames Zeus, not the change',
+      /this is a defect in Zeus, not in the change under review/.test(orc),
+      'the model the critics now follow');
+  }
+
+  section('a worker cap is about the command, not about the prompt');
+  {
+    // The actual cause of the plan-critic failure the user asked about.
+    // boundedArgs joined EVERY argument, and an agent invocation carries its
+    // whole prompt as a positional argument — so a plan that mentioned
+    // playwright made Zeus append --workers=4 to the codex CLI. codex answered
+    // "unexpected argument '--workers' found" and exited in 258ms.
+    const b: any = { maxTestWorkers: 4, maxPlaywrightWorkers: 2 };
+    const prompt = 'Review this plan. The app uses playwright for e2e and jest '
+      + 'for unit tests; go through each node and test whether it holds. mvn is '
+      + 'not used. vitest is not used.';
+
+    check('BW1: a prompt mentioning playwright does NOT get --workers appended',
+      !boundedArgs('codex', ['exec', '--json', prompt], b, 'agent')
+        .some((a) => a.startsWith('--workers')),
+      boundedArgs('codex', ['exec', '--json', prompt], b, 'agent').join(' ').slice(0, 90));
+    check('BW2: nor jest, vitest, go-test or mvn flags',
+      boundedArgs('codex', ['exec', prompt], b, 'agent')
+        .every((a) => !/^(--maxWorkers|-p=|-T)/.test(a)), 'no runner flags on an agent call');
+    check('BW3: an agent call comes back byte-identical',
+      boundedArgs('claude', ['-p', prompt], b, 'agent').join('\u0000')
+        === ['-p', prompt].join('\u0000'), 'untouched');
+
+    // Belt and braces: even without the class, a payload-sized argument is not
+    // a command line and must not be matched against.
+    check('BW4: a payload-length argument is not matched even with no class given',
+      !boundedArgs('codex', ['exec', prompt], b)
+        .some((a) => a.startsWith('--workers')), 'long args excluded');
+
+    // And the rule still does its actual job on a real command line.
+    check('BW5: a real playwright command still gets its worker bound',
+      boundedArgs('npx', ['playwright', 'test'], b, 'light')
+        .includes('--workers=2'), boundedArgs('npx', ['playwright', 'test'], b, 'light').join(' '));
+    check('BW6: a real jest command still gets its worker bound',
+      boundedArgs('npx', ['jest'], b, 'heavy').includes('--maxWorkers=4'),
+      boundedArgs('npx', ['jest'], b, 'heavy').join(' '));
+    check('BW7: and an explicit bound the caller already set is respected',
+      boundedArgs('npx', ['playwright', 'test', '--workers=1'], b, 'light')
+        .filter((a) => a.startsWith('--workers')).length === 1, 'not doubled');
   }
 
   section('version compatibility is compared, not string-matched');

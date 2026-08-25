@@ -16,7 +16,7 @@ import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { ensure, health, type GraphState, type GraphFault } from './graphify';
 import { repoIndex, intelSection, type RepoIndex } from './intel';
-import type { GraphAccess } from '../engine/providers';
+import { MCP_CAPABLE, type GraphAccess } from '../engine/providers';
 
 /** Stages that reason about the repository. All of them, in practice. */
 export const REPO_AWARE = new Set([
@@ -105,6 +105,11 @@ export function attach(opts: {
   projectId: string;
   sourceDir: string;
   stateRoot: string;
+  /**
+   * The provider that will run this call. Tools are attached only for
+   * providers that can actually use them; see MCP_CAPABLE.
+   */
+  providerId?: string;
   /** Where the MCP server appends what it answered, for the evidence manifest. */
   logPath: string | null;
   /** argv[0] and the script path Zeus itself was started with. */
@@ -116,6 +121,19 @@ export function attach(opts: {
   const revision = opts.revision ?? revisionOf(opts.sourceDir);
   const index = repoIndex(opts.sourceDir, revision);
   const h = health();
+
+  // Before anything else: a provider that cannot use the tools must not be
+  // told it has them. It still gets the deterministic index below.
+  if (opts.providerId && !MCP_CAPABLE.has(opts.providerId)) {
+    return {
+      access: null, state: null, index, fault: null, graphifyVersion: h.version,
+      logPath: null,
+      section: intelSection({ projectId: opts.projectId, index, graph: null,
+        graphAvailable: false, graphifyVersion: h.version,
+        unavailableBecause: `the ${opts.providerId} CLI cancels MCP tool calls in`
+          + ' non-interactive runs, and the ways around that would remove its sandbox' }),
+    };
+  }
 
   if (!h.ok || !revision) {
     const state: GraphState | null = null;

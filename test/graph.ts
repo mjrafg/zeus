@@ -14,7 +14,7 @@ import { atLeast, graphDirFor, readState, loadGraph } from '../src/graph/graphif
 import { TOOLS, callTool, PROTOCOL } from '../src/graph/mcp';
 import { repoIndex, intelSection, readGraphOps, renderEvidence } from '../src/graph/intel';
 import { bootstrapArgv, probe } from '../src/graph/access';
-import { toolsFor, graphToolIds } from '../src/engine/providers';
+import { toolsFor, graphToolIds, MCP_CAPABLE } from '../src/engine/providers';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-graph-'));
 
@@ -390,6 +390,34 @@ export async function graphSuite(): Promise<void> {
       !mute.ok, mute.detail);
     check('BP6: and the detail names what went wrong rather than going quiet',
       dead.detail.length > 20, dead.detail);
+  }
+
+  section('a provider that cannot use a tool is not told it has one');
+  {
+    // MEASURED against codex 0.147.0: it discovers the tools, begins the call,
+    // then fails it with "user cancelled MCP tool call". The documented ways
+    // past that gate — --approve-for-me (workspace-write sandbox) and
+    // --dangerously-bypass-approvals-and-sandbox (no sandbox) — both hand a
+    // READ-ONLY critic the ability to write.
+    check('MCP1: claude is known to use MCP tools non-interactively',
+      MCP_CAPABLE.has('claude'), [...MCP_CAPABLE].join(','));
+    check('MCP2: codex is not, so it is not offered them',
+      !MCP_CAPABLE.has('codex'), [...MCP_CAPABLE].join(','));
+
+    const blind = intelSection({ projectId: 'p', index: repoIndex(path.join(TMP, 'repo'), 'abc123'),
+      graph: null, graphAvailable: false, graphifyVersion: '0.9.49',
+      unavailableBecause: 'the codex CLI cancels MCP tool calls in non-interactive runs' });
+    check('MCP3: the prompt says WHY, not just that it is unavailable',
+      /cancels MCP tool calls/.test(blind), 'reason stated');
+    check('MCP4: and offers no tool it cannot honour',
+      !/graph_search {2,}find/.test(blind), 'no phantom tools');
+    // The deterministic index is the larger half of the fix and costs nothing,
+    // so it is delivered either way.
+    check('MCP5: but the deterministic repository index is still delivered',
+      /Tracked files:/.test(blind) && /Top-level directories|Package manifests/.test(blind),
+      'orientation survives');
+    check('MCP6: including the source-of-truth instruction',
+      /could not verify/.test(blind), 'still told to verify');
   }
 
   section('version compatibility is compared, not string-matched');

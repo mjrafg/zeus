@@ -216,6 +216,7 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
     ? attach({
       projectId: engine.projectId,
       sourceDir: engine.opts.projectRoot,
+      providerId: engine.providerFor(stage).id,
       stateRoot: engine.stateRoot,
       logPath: evidenceLogPath(engine.stateRoot, `${stage}-${Date.now()}-${process.pid}`),
       execPath: process.execPath,

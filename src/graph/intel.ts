@@ -102,6 +102,8 @@ export function intelSection(opts: {
   graph: GraphState | null;
   graphAvailable: boolean;
   graphifyVersion: string | null;
+  /** Said plainly when the reason is not a fault of the graph itself. */
+  unavailableBecause?: string;
 }): string {
   const L: string[] = [];
   const g = opts.graph;
@@ -126,8 +128,8 @@ export function intelSection(opts: {
     L.push('  Read, Grep, Glob    the source itself');
   } else {
     L.push('Graphify: UNAVAILABLE');
-    L.push(`Graph status: ${g?.fault ?? 'GRAPHIFY_UNAVAILABLE'}`
-      + `${g?.detail ? ` — ${g.detail}` : ''}`);
+    L.push(`Graph status: ${opts.unavailableBecause
+      ?? `${g?.fault ?? 'GRAPHIFY_UNAVAILABLE'}${g?.detail ? ` — ${g.detail}` : ''}`}`);
     L.push('');
     L.push('You have NO graph tools for this call. Use Read, Grep and Glob, and');
     L.push('state plainly in your answer which repository facts you could not verify.');

@@ -297,6 +297,26 @@ export interface GraphAccess {
   logPath: string | null;
 }
 
+/**
+ * Which providers can actually USE an MCP tool in a non-interactive run.
+ *
+ * MEASURED, not assumed. claude accepts --mcp-config and calls the tools. codex
+ * discovers them, begins the call, and then fails it with "user cancelled MCP
+ * tool call": its exec mode routes MCP calls through an approval gate that has
+ * nobody to ask. The documented ways past it — --approve-for-me, which switches
+ * the sandbox to workspace-write, and --dangerously-bypass-approvals-and-sandbox,
+ * which removes the sandbox — both hand a READ-ONLY critic the ability to write,
+ * and no amount of repository intelligence is worth that trade.
+ *
+ * default_tools_approval_mode (auto|prompt|writes|approve) and enabled_tools were
+ * both tried against codex 0.147.0 and did not change the outcome.
+ *
+ * So the codex path is told the truth: no graph tools, and the prompt says so.
+ * It still receives the deterministic repository index, which is the larger
+ * half of the fix and costs nothing.
+ */
+export const MCP_CAPABLE = new Set(['claude']);
+
 /** The graph tools, named so a --allowed-tools entry can name them. */
 export const GRAPH_TOOL_NAMES = [
   'graph_search', 'graph_dependencies', 'graph_dependents',

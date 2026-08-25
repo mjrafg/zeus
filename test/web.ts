@@ -3116,8 +3116,9 @@ export async function webSuite(): Promise<void> {
     const csrc = fs.readFileSync(
       path.join(__dirname, '..', 'src', 'mission', 'compile.ts'), 'utf8');
     check('CX10: the compiler does the same, so both planning stages are comparable',
-      /const assembled = assemble\(COMPILE_HEADER, sections\)/.test(csrc),
-      'compiler assembles too');
+      /const assembled = assemble\(header, sections\)/.test(csrc)
+      && /join\('.n'\) : COMPILE_HEADER;/.test(csrc),
+      'compiler assembles too — from a header composed for this call');
     check('CX11: the critics reuse the payload manifest they already built',
       /delivered: payload\.deliveredContext/.test(csrc), 'one manifest, not two');
   }

@@ -15,6 +15,7 @@ import { TOOLS, callTool, PROTOCOL } from '../src/graph/mcp';
 import { repoIndex, intelSection, readGraphOps, renderEvidence } from '../src/graph/intel';
 import { bootstrapArgv, probe } from '../src/graph/access';
 import { toolsFor, graphToolIds, MCP_CAPABLE } from '../src/engine/providers';
+import { assemble } from '../src/mission/context';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-graph-'));
 
@@ -418,6 +419,40 @@ export async function graphSuite(): Promise<void> {
       'orientation survives');
     check('MCP6: including the source-of-truth instruction',
       /could not verify/.test(blind), 'still told to verify');
+  }
+
+  section('the order of an instruction is part of the instruction');
+  {
+    const comp = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'compile.ts'), 'utf8');
+    // The first Oracle to hold graph tools made ZERO queries. The tools were
+    // attached, the intelligence section was delivered, and "Reply with ONLY a
+    // JSON object" — the second line of the header — had already told it to
+    // answer immediately. A permission buried a page later does not survive a
+    // constraint stated at the top.
+    check('OH1: with tools attached, investigation is demanded FIRST',
+      /INVESTIGATE THE REPOSITORY FIRST, THEN ANSWER\./.test(comp), 'directive present');
+    // Source order is not prompt order: COMPILE_HEADER is declared near the top
+    // of the file and composed near the bottom. Assemble a real prompt and read
+    // the thing the model actually receives.
+    const composed = assemble([
+      'INVESTIGATE THE REPOSITORY FIRST, THEN ANSWER.', '',
+      'The "reply with ONLY a JSON object" rule below governs your FINAL MESSAGE.',
+      '', 'Compile this mission goal into a CONTRACT: Reply with ONLY a JSON object:',
+    ].join('\n'), [{ kind: 'mission-goal', label: 'mission goal', content: 'g' }]);
+    check('OH2: and it precedes the only-JSON rule in the assembled prompt',
+      composed.prompt.indexOf('INVESTIGATE THE REPOSITORY FIRST')
+        < composed.prompt.indexOf('Reply with ONLY a JSON object'),
+      'ordered in what the model receives');
+    // The constraint is about the final message, not about whether to explore,
+    // and that has to be said in the same breath as the constraint.
+    check('OH3: the only-JSON rule is scoped to the FINAL MESSAGE',
+      /governs your FINAL MESSAGE/.test(comp)
+      && /Tool calls are not your final message/.test(comp), 'scoped');
+    check('OH4: it names the failure it exists to prevent',
+      /attach the wrong verification/.test(comp), 'the reason is stated');
+    // Without tools the directive would be a lie.
+    check('OH5: with no tools attached, the header is unchanged',
+      /: COMPILE_HEADER;/.test(comp), 'conditional on repoGraph');
   }
 
   section('version compatibility is compared, not string-matched');

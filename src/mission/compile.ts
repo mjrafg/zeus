@@ -223,7 +223,29 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
   sections.push({ kind: 'recorded-findings', label: 'recorded findings',
     content: (input.context.findings ?? []).join('\n') || '(none)' });
 
-  const assembled = assemble(COMPILE_HEADER, sections);
+  // "Reply with ONLY a JSON object" is the second line of the header, and a
+  // model reads that as "answer now". The first Oracle to hold graph tools
+  // made zero queries: the tools were attached, the intelligence section was
+  // delivered, and the header had already told it to produce JSON immediately.
+  //
+  // The ONLY-JSON rule governs the FINAL MESSAGE. Tool calls are not the final
+  // message, and the difference has to be stated in the same breath as the
+  // constraint rather than a page later.
+  const header = input.repoGraph ? [
+    'INVESTIGATE THE REPOSITORY FIRST, THEN ANSWER.',
+    '',
+    'You have repository tools. Use them before you write a single criterion:',
+    'find the code the goal is about, read it, and find the command that',
+    'actually verifies THAT code. A contract written from the goal alone will',
+    'attach the wrong verification — that is the specific failure this exists',
+    'to prevent.',
+    '',
+    'The "reply with ONLY a JSON object" rule below governs your FINAL MESSAGE.',
+    'Tool calls are not your final message. Make as many as you need first.',
+    '',
+    COMPILE_HEADER,
+  ].join('\n') : COMPILE_HEADER;
+  const assembled = assemble(header, sections);
   const prompt = assembled.prompt;
 
   let res: AgentResponse;

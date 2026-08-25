@@ -25,6 +25,12 @@ export type ReviewInputKind =
   // to be possible.
   | 'mission-goal' | 'compiled-criteria' | 'project-commands' | 'evidence-summary'
   | 'criterion-rubric' | 'judged-artifact'
+  // A deterministic description of the repository — directories, manifests,
+  // revision. Orientation, not argument: the thing these policies exist to
+  // keep out is another agent's REASONING, and a machine-generated index is
+  // the opposite of that. A critic that cannot see the repository can only
+  // check a contract against itself.
+  | 'repository-intelligence'
   | 'accepted-criteria' | 'task-plan' | 'validator-findings' | 'planner-transcript'
   | 'compiler-transcript' | 'compiler-reasoning' | 'critic-verdict' | 'judge-verdict';
 
@@ -48,7 +54,8 @@ export interface ReviewContextPolicy {
  * opinion into a proofread.
  */
 export const ORACLE_CRITIQUE_POLICY: ReviewContextPolicy = {
-  allowed: ['mission-goal', 'compiled-criteria', 'project-commands', 'evidence-summary'],
+  allowed: ['mission-goal', 'compiled-criteria', 'project-commands', 'evidence-summary',
+    'repository-intelligence'],
   forbidden: [
     'compiler-transcript', 'compiler-reasoning', 'critic-verdict',
     'planner-reasoning', 'planner-plan', 'implementer-transcript', 'implementer-rationale',

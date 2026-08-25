@@ -146,8 +146,12 @@ export async function recompileMissionOracle(ctx: OperationContext,
   });
   const nextFindings: CriticFindingRef[] = critique.valid
     ? (critique.findings as CriticFindingRef[]) : [];
+  // critique.valid is false when the critic never produced a verdict — a
+  // refused payload, a provider failure, an unparseable reply. Passing that
+  // through as "no findings" is what let M-0024 accept a contract 0 seconds
+  // after compiling it, with no second opinion anywhere in the log.
   const proposal = proposeAcceptance(compiled.criteria, ctx.context,
-    critique.valid ? critique.modeOpinion : null, nextFindings);
+    critique.valid ? critique.modeOpinion : null, nextFindings, critique.valid);
   const oracle: Oracle = {
     missionId, version: prior.version + 1, criteria: compiled.criteria,
     acceptanceMode: proposal.mode, compiledAt: new Date().toISOString(),
@@ -343,8 +347,10 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
     ...route(engine, 'oracle-critic', missions, missionId),
   });
   const findings: CriticFindingRef[] = critique.valid ? (critique.findings as CriticFindingRef[]) : [];
+  // Same rule on the first-compile path: a critique that did not happen is not
+  // a critique that found nothing.
   const proposal = proposeAcceptance(compiled.criteria, ctx.context,
-    critique.valid ? critique.modeOpinion : null, findings);
+    critique.valid ? critique.modeOpinion : null, findings, critique.valid);
 
   const oracle: Oracle = {
     missionId, version: (rec.oracleVersion ?? 0) + 1, criteria: compiled.criteria,

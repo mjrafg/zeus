@@ -568,6 +568,14 @@ export interface AcceptanceProposal {
   escalatedByFindings: boolean;
   /** False whenever a human must look before this oracle can be accepted. */
   autoAcceptable: boolean;
+  /**
+   * The independent critique did not happen at all.
+   *
+   * Distinct from "it ran and found nothing", which is what an empty findings
+   * list used to mean for both cases — and why a contract could be accepted on
+   * the strength of a check that was never performed.
+   */
+  critiqueMissing: boolean;
 }
 
 /**
@@ -580,16 +588,45 @@ export interface AcceptanceProposal {
  */
 export function proposeAcceptance(criteria: Criterion[], ctx: ProjectContext,
   criticOpinion: AcceptanceMode | null,
-  findings: CriticFindingRef[] = []): AcceptanceProposal {
+  findings: CriticFindingRef[] = [],
+  /**
+   * Whether the independent critique actually HAPPENED.
+   *
+   * Defaults to true so every existing caller keeps its meaning; the callers
+   * that know a critique was refused, failed or never dispatched pass false.
+   */
+  critiqueRan = true): AcceptanceProposal {
   const computed = computeAcceptanceMode(criteria, ctx);
   const byOpinion = applyCriticMode(computed.mode, criticOpinion);
   const floor = findingsFloor(findings);
   const withFloor = applyCriticMode(byOpinion.mode, floor.floor);
+
+  // A CRITIC THAT COULD NOT RUN IS NOT A CRITIC THAT FOUND NOTHING.
+  //
+  // The two were indistinguishable here: a refused or failed critique produced
+  // no findings and no opinion, and an empty findings list is exactly what a
+  // clean critique produces — so the fast path accepted the contract on the
+  // strength of a check that never happened. Seen on talkbridge/M-0024, where
+  // the critic's payload was refused by policy, no model was ever called, and
+  // the oracle was accepted 0 seconds later with escalatedByCritic: false.
+  //
+  // The independent second opinion is the thing acceptance rests on. When it
+  // is missing, a human looks.
+  if (!critiqueRan) {
+    return {
+      computed, floor, mode: 'REQUIRED_CONSENT',
+      escalatedByCritic: true,
+      escalatedByFindings: withFloor.escalated,
+      autoAcceptable: false,
+      critiqueMissing: true,
+    };
+  }
   return {
     computed, floor, mode: withFloor.mode,
     escalatedByCritic: byOpinion.escalated,
     escalatedByFindings: withFloor.escalated,
     // A findings-free critique keeps the old fast path; anything else stops.
     autoAcceptable: floor.autoAcceptable,
+    critiqueMissing: false,
   };
 }

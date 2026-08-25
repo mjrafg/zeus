@@ -16,8 +16,17 @@ import { repoIndex, intelSection, readGraphOps, renderEvidence } from '../src/gr
 import { bootstrapArgv, probe } from '../src/graph/access';
 import { toolsFor, graphToolIds, MCP_CAPABLE } from '../src/engine/providers';
 import { assemble } from '../src/mission/context';
+import { proposeAcceptance } from '../src/mission/compile';
+import { ORACLE_CRITIQUE_POLICY } from '../src/engine/reviewcontext';
+import type { Criterion } from '../src/mission/oracle';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-graph-'));
+
+const criterion = (id: string): Criterion => ({
+  criterionId: id, type: 'EXECUTABLE', statement: 'the unit tests pass',
+  evaluator: { kind: 'command', command: 'npm test', expect: 'PASSED' } as any,
+  affectedBy: [], required: true, requiresAuthority: [], derivedFrom: ['check:unitTest'],
+});
 
 /** The fixture from the requirement: a frontend in app/, a backend in api/. */
 const FIXTURE: Graph = {
@@ -526,6 +535,62 @@ export async function graphSuite(): Promise<void> {
       'planner and plan-critic');
     check('GTR7: and both record whether they held tools',
       (pl.match(/graphAttached: !!input\.repoGraph,/g) ?? []).length === 2, 'both traced');
+  }
+
+  section('a critic that could not run is not a critic that found nothing');
+  {
+    // Seen on talkbridge/M-0024. The critic's payload was refused by policy,
+    // no model was ever called, and the oracle was ACCEPTED zero seconds after
+    // it compiled — with escalatedByCritic: false. A refused critique produced
+    // no findings, and an empty findings list is exactly what a CLEAN critique
+    // produces, so the fast path could not tell them apart.
+    const crit = [criterion('p/M-0001/C-0001')];
+    const ctx: any = { commands: { unitTest: 'npm test' }, failingChecks: [], findings: [] };
+
+    const ran = proposeAcceptance(crit, ctx, null, [], true);
+    const never = proposeAcceptance(crit, ctx, null, [], false);
+
+    check('CR1: a clean critique still keeps the fast path',
+      ran.autoAcceptable === true && ran.critiqueMissing === false,
+      JSON.stringify({ mode: ran.mode, auto: ran.autoAcceptable }));
+    check('CR2: a critique that never happened is NOT auto-acceptable',
+      never.autoAcceptable === false, JSON.stringify(never));
+    check('CR3: and it demands a human, not a softer mode',
+      never.mode === 'REQUIRED_CONSENT', never.mode);
+    check('CR4: the two are distinguishable in the record',
+      never.critiqueMissing === true && ran.critiqueMissing === false,
+      'critiqueMissing tells them apart');
+    check('CR5: and it is recorded as an escalation, not as silent agreement',
+      never.escalatedByCritic === true, 'escalated');
+    // Default true, so every pre-existing caller keeps its meaning.
+    check('CR6: callers that do not say default to "it ran"',
+      proposeAcceptance(crit, ctx, null, []).critiqueMissing === false, 'default preserved');
+
+    const ops = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    check('CR7: both compile paths pass whether the critique actually ran',
+      (ops.match(/nextFindings, critique\.valid\)|findings, critique\.valid\)/g) ?? []).length === 2,
+      'recompile and first-compile');
+  }
+
+  section('orientation is not contamination');
+  {
+    // My own bug, and the reason the critic above could not run: the
+    // repository-intelligence section was refused by the review payload
+    // policy, which took the whole critique down with it.
+    const rc = fs.readFileSync(path.join(__dirname, '..', 'src', 'engine', 'reviewcontext.ts'), 'utf8');
+    check('OC1: the oracle critic may see the repository index',
+      ORACLE_CRITIQUE_POLICY.allowed.includes('repository-intelligence' as any),
+      ORACLE_CRITIQUE_POLICY.allowed.join(', '));
+    // The policy exists to keep another agent's ARGUMENT out. A deterministic
+    // index is the opposite of an argument.
+    check('OC2: but still not the compiler’s reasoning',
+      ORACLE_CRITIQUE_POLICY.forbidden.includes('compiler-reasoning' as any)
+      && ORACLE_CRITIQUE_POLICY.forbidden.includes('compiler-transcript' as any),
+      'the real contamination is still forbidden');
+    check('OC3: nor a previous verdict',
+      ORACLE_CRITIQUE_POLICY.forbidden.includes('critic-verdict' as any), 'still blind to verdicts');
+    check('OC4: and the reason it is allowed is written down',
+      /Orientation, not argument/.test(rc), 'the distinction is explained');
   }
 
   section('version compatibility is compared, not string-matched');

@@ -13,6 +13,7 @@ import type { Graph } from '../src/graph/query';
 import { atLeast, graphDirFor, readState, loadGraph } from '../src/graph/graphify';
 import { TOOLS, callTool, PROTOCOL } from '../src/graph/mcp';
 import { repoIndex, intelSection, readGraphOps, renderEvidence } from '../src/graph/intel';
+import { bootstrapArgv, probe } from '../src/graph/access';
 import { toolsFor, graphToolIds } from '../src/engine/providers';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-graph-'));
@@ -359,6 +360,36 @@ export async function graphSuite(): Promise<void> {
     check('GW10: the MCP server is spawned from Zeus’s entry point, not from argv',
       /ZEUS_CLI_PATH = require\('path'\)\.resolve\(__dirname/.test(src),
       'resolved from the module');
+  }
+
+  section('a declared tool that never answers is worse than no tool');
+  {
+    // Found live. node cannot parse a .ts file, so `node src/cli.ts graph-mcp`
+    // exited instantly with a SyntaxError; the provider had a tool that never
+    // answered, the trace recorded graphAttached: true, and an Oracle spent a
+    // full call believing it had repository intelligence it did not have —
+    // exactly the failure this feature exists to prevent.
+    const tsEntry = path.join(TMP, 'cli.ts');
+    const jsEntry = path.join(TMP, 'cli.js');
+    check('BP1: under ts-node the loader is reused, not replaced by bare node',
+      bootstrapArgv(tsEntry).args.some((a) => /ts-node/.test(a)),
+      JSON.stringify(bootstrapArgv(tsEntry)));
+    check('BP2: compiled JS needs no loader',
+      bootstrapArgv(jsEntry).args.join(' ') === jsEntry,
+      JSON.stringify(bootstrapArgv(jsEntry)));
+    check('BP3: and the interpreter is this process’s own',
+      bootstrapArgv(jsEntry).command === process.execPath, 'same node');
+
+    // The claim has to be EARNED by a real handshake, not assumed from a file
+    // existing on disk.
+    const dead = probe(process.execPath, ['-e', 'process.exit(1)'], 8_000);
+    check('BP4: a server that dies is reported as failed, not as attached',
+      !dead.ok && /did not answer tools\/list/.test(dead.detail), dead.detail);
+    const mute = probe(process.execPath, ['-e', 'setTimeout(()=>{},50)'], 4_000);
+    check('BP5: a server that answers nothing is failed too',
+      !mute.ok, mute.detail);
+    check('BP6: and the detail names what went wrong rather than going quiet',
+      dead.detail.length > 20, dead.detail);
   }
 
   section('version compatibility is compared, not string-matched');

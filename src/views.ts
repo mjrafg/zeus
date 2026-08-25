@@ -375,6 +375,16 @@ export interface TraceCall {
   /** References, not content. Content is fetched deliberately, never listed. */
   promptBlob: Record<string, unknown> | null;
   responseBlob: Record<string, unknown> | null;
+  /**
+   * Whether this call HELD repository tools, and what it actually asked.
+   *
+   * Both, because they answer different questions. A call with no ops and no
+   * attachment had nothing to ask with; a call with tools and no ops chose not
+   * to ask, and that was a real bug once — the tools were attached, the server
+   * was running, and the prompt had already told the model to answer.
+   */
+  graphAttached: boolean | null;
+  graphOps: Array<Record<string, unknown>> | null;
   outcome: string | null;
   wallMs: number | null;
   providerTiming: Record<string, unknown> | null;
@@ -428,6 +438,8 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
           traceLevel: p.traceLevel ?? null,
           traceLevelSource: p.traceLevelSource ?? null,
           promptBlob: p.promptBlob ?? null,
+          graphAttached: typeof p.graphAttached === 'boolean' ? p.graphAttached : null,
+          graphOps: null,
           responseBlob: null,
           outcome: null, wallMs: null, providerTiming: null, usage: null,
           toolsUsed: null, parsed: null, infrastructureFailure: null,
@@ -442,6 +454,8 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
         call.modelDiscrepancy = p.modelDiscrepancy ?? null;
         call.outcome = p.outcome ?? null;
         call.wallMs = typeof p.wallMs === 'number' ? p.wallMs : null;
+        // From the graph server's own log, carried onto the call it belongs to.
+        call.graphOps = Array.isArray(p.graphOps) ? p.graphOps as any : null;
         call.providerTiming = p.providerTiming ?? null;
         call.usage = p.usage ?? null;
         call.toolsUsed = p.toolsUsed ?? null;

@@ -497,6 +497,37 @@ export async function graphSuite(): Promise<void> {
       /STALE — repository is at/.test(cli), 'staleness surfaced');
   }
 
+  section('the trace shows the exploration, not a claim about it');
+  {
+    const ui = fs.readFileSync(path.join(__dirname, '..', 'src', 'web', 'ui.ts'), 'utf8');
+    const vw = fs.readFileSync(path.join(__dirname, '..', 'src', 'views.ts'), 'utf8');
+    const pl = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'planner.ts'), 'utf8');
+
+    check('GTR1: graph ops are correlated onto the model call they belong to',
+      /call\.graphOps = Array\.isArray\(p\.graphOps\)/.test(vw), 'carried onto the call');
+    check('GTR2: the console renders the queries with results and timing',
+      /Repository exploration/.test(ui) && /result\(s\)/.test(ui) && /op\.ms/.test(ui),
+      'rendered');
+    // Two different facts. A call with tools and no queries chose not to ask —
+    // which was a real bug once, and invisible if the view conflates it with
+    // having had nothing to ask with.
+    check('GTR3: "held tools and asked nothing" is shown as its own state',
+      /Repository tools were attached; this call made/.test(ui), 'told apart');
+    check('GTR4: truncation and failure are shown rather than smoothed over',
+      /truncated/.test(ui) && /FAILED/.test(ui), 'both surfaced');
+
+    // The planner needed the same ordering fix as the compiler, for the same
+    // reason: a plan written without looking guesses which files a change
+    // touches, and every node inherits the guess.
+    check('GTR5: the planner investigates before planning',
+      /INVESTIGATE THE REPOSITORY FIRST, THEN PLAN\./.test(pl), 'planner directive');
+    check('GTR6: the planner and its critic both hold their own access',
+      (pl.match(/graph: input\.repoGraph \?\? null,/g) ?? []).length === 2,
+      'planner and plan-critic');
+    check('GTR7: and both record whether they held tools',
+      (pl.match(/graphAttached: !!input\.repoGraph,/g) ?? []).length === 2, 'both traced');
+  }
+
   section('version compatibility is compared, not string-matched');
   {
     check('GV1: a newer patch satisfies a minimum', atLeast('0.9.49', '0.9.0'));

@@ -11,6 +11,8 @@
  * standing rules about probes and shell loops are stated rather than assumed.
  */
 
+import { readGraphOps } from '../graph/intel';
+import type { GraphAccess } from '../engine/providers';
 import { Section, assemble, checklist } from './context';
 import { createHash } from 'crypto';
 import { Provider, AgentResponse } from '../engine/providers';
@@ -157,6 +159,12 @@ export interface PlanInput {
   trace?: (type: string, payload: Record<string, unknown>) => void;
   /** The trace policy that applied when this call began. Snapshotted, not read. */
   traceLevel?: string;
+  /** The MCP server for this call's repository graph, or null. */
+  repoGraph?: GraphAccess | null;
+  /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
+  intel?: string | null;
+  /** Where the graph server appends what it answered, for the manifest. */
+  graphLogPath?: string | null;
   traceLevelSource?: string;
   /** Keeps content under that policy, or returns null when the level keeps none. */
   keep?: (content: string) => unknown;
@@ -327,6 +335,11 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
       ].join('\n'),
     });
   }
+  // A plan is written against a repository. Orientation comes first.
+  if (input.intel) {
+    sections.push({ kind: 'repository-intelligence',
+      label: 'the repository you are planning against', content: input.intel });
+  }
   sections.push({ kind: 'mission-goal', label: 'mission goal', content: input.goal });
   sections.push({ kind: 'accepted-criteria', label: 'accepted criteria',
     content: JSON.stringify(criteriaView, null, 1) });
@@ -337,7 +350,22 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
   sections.push({ kind: 'recorded-findings', label: 'recorded findings',
     content: (input.context.findings ?? []).join('\n') || '(none)' });
 
-  const assembled = assemble(PLAN_HEADER, sections);
+  // Same ordering rule the compiler needed: a header that opens with an output
+  // format tells a model to produce output, and a permission stated later does
+  // not undo it.
+  const planHeader = input.repoGraph ? [
+    'INVESTIGATE THE REPOSITORY FIRST, THEN PLAN.',
+    '',
+    'You have repository tools. A plan written without looking at the code',
+    'guesses at which files a change touches, and every node inherits the guess.',
+    'Find the real files, their dependencies and what depends on them first.',
+    '',
+    'Any "reply with ONLY" rule below governs your FINAL MESSAGE. Tool calls are',
+    'not your final message. Make as many as you need first.',
+    '',
+    PLAN_HEADER,
+  ].join('\n') : PLAN_HEADER;
+  const assembled = assemble(planHeader, sections);
   const prompt = assembled.prompt;
 
   const empty: PlanGraph = { version: 0, nodes: [] };
@@ -361,6 +389,7 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
       manifest: assembled.manifest, delivered: assembled.delivered,
       checklist: checklist(assembled.manifest),
       traceLevel: input.traceLevel ?? 'normal',
+      graphAttached: !!input.repoGraph,
       traceLevelSource: input.traceLevelSource ?? 'zeus-default',
       // At normal this is null and only the hash above survives. At audit and
       // debug the words are kept in a blob — redacted before they reach disk
@@ -373,6 +402,8 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
       role: 'planner', taskId: input.missionId, projectId: input.projectId,
       model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt, policy: input.policy, readOnly: true,
+      // Read-only AND graph-holding: the MCP server has no write path.
+      graph: input.repoGraph ?? null,
     }, input.supervisor);
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
@@ -387,6 +418,10 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
         structuredKeys: res.structured ? Object.keys(res.structured) : [] },
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
+      ...(input.graphLogPath ? (() => {
+        const ops = readGraphOps(input.graphLogPath!);
+        return { graphOps: ops, graphQueryCount: ops.length };
+      })() : {}),
       ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
       // The provider-visible reply, BEFORE Zeus turned it into a structured
       // object. The parsed result is what Zeus made of it; this is what it was
@@ -547,6 +582,12 @@ export async function critiquePlan(input: {
   trace?: (type: string, payload: Record<string, unknown>) => void;
   /** The trace policy that applied when this call began. Snapshotted, not read. */
   traceLevel?: string;
+  /** The MCP server for this call's repository graph, or null. */
+  repoGraph?: GraphAccess | null;
+  /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
+  intel?: string | null;
+  /** Where the graph server appends what it answered, for the manifest. */
+  graphLogPath?: string | null;
   traceLevelSource?: string;
   /** Keeps content under that policy, or returns null when the level keeps none. */
   keep?: (content: string) => unknown;
@@ -570,6 +611,8 @@ export async function critiquePlan(input: {
       { kind: 'validator-findings', label: 'VALIDATOR FINDINGS',
         content: input.validation.findings.map((f) => `${f.code} ${f.nodeId ?? ''}: ${f.detail}`).join('\n')
           || '(the deterministic validator found nothing)' },
+      ...(input.intel ? [{ kind: 'repository-intelligence' as any,
+        label: 'the repository this plan is against', content: input.intel }] : []),
       ...(input.extraInputs ?? []),
     ],
   });
@@ -604,6 +647,7 @@ export async function critiquePlan(input: {
       delivered: payload.deliveredContext,
       configuredContext: payload.configuredContext,
       traceLevel: input.traceLevel ?? 'normal',
+      graphAttached: !!input.repoGraph,
       traceLevelSource: input.traceLevelSource ?? 'zeus-default',
       // At normal this is null and only the hash above survives. At audit and
       // debug the words are kept in a blob — redacted before they reach disk
@@ -616,6 +660,10 @@ export async function critiquePlan(input: {
       role: 'reviewer', taskId: input.missionId, projectId: input.projectId,
       model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt: payload.prompt, policy: input.policy, readOnly: true,
+      // The plan critic's OWN access, for the same reason the oracle critic has
+      // it: a critic limited to what the planner chose to look at is reviewing
+      // the planner's reading rather than the repository.
+      graph: input.repoGraph ?? null,
     }, input.supervisor);
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
@@ -630,6 +678,10 @@ export async function critiquePlan(input: {
         structuredKeys: res.structured ? Object.keys(res.structured) : [] },
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
+      ...(input.graphLogPath ? (() => {
+        const ops = readGraphOps(input.graphLogPath!);
+        return { graphOps: ops, graphQueryCount: ops.length };
+      })() : {}),
       ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
       // The provider-visible reply, BEFORE Zeus turned it into a structured
       // object. The parsed result is what Zeus made of it; this is what it was

@@ -340,6 +340,29 @@ async function loadTrace(m) {
     if (lost) {
       h += '<div class="warn">pid ' + esc(a2s(c.pid)) + ' opened this call and is gone</div>';
     }
+    // The exploration itself, from the server's log rather than the reply. This
+    // is the difference between "the agent said it looked" and "the agent
+    // looked", and it is the only version worth showing.
+    if (c.graphOps && c.graphOps.length) {
+      h += '<div class="meta">Repository exploration \u2014 ' + c.graphOps.length + ' query(s)</div>';
+      h += '<ol class="graphops">';
+      for (const op of c.graphOps.slice(0, 40)) {
+        const a = op.args || {};
+        const q = a.term != null ? a.term : ((a.from || '') + ' \u2192 ' + (a.to || ''));
+        h += '<li><span class="who">' + esc(op.tool || '?') + '</span> '
+          + '<code>' + esc(String(q)) + '</code> '
+          + '<span class="dim">' + (op.results == null ? '?' : op.results) + ' result(s)'
+          + (op.ms == null ? '' : ' \u00b7 ' + op.ms + 'ms')
+          + (op.truncated ? ' \u00b7 truncated' : '')
+          + (op.ok === false ? ' \u00b7 FAILED' : '') + '</span></li>';
+      }
+      h += '</ol>';
+    } else if (c.graphAttached) {
+      // Held the tools and asked nothing. Worth saying, because it is a
+      // different fact from having had nothing to ask with.
+      h += '<div class="meta dim">Repository tools were attached; this call made '
+        + 'no graph queries.</div>';
+    }
     if (c.infrastructureFailure) {
       h += '<div class="meta bad">' + esc(String(c.infrastructureFailure).slice(0, 160)) + '</div>';
     }

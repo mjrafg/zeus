@@ -3108,7 +3108,8 @@ export async function webSuite(): Promise<void> {
     const src = fs.readFileSync(
       path.join(__dirname, '..', 'src', 'mission', 'planner.ts'), 'utf8');
     check('CX8: the planner assembles sections rather than concatenating strings',
-      /const assembled = assemble\(PLAN_HEADER, sections\)/.test(src)
+      /const assembled = assemble\(planHeader, sections\)/.test(src)
+      && /join\('.n'\) : PLAN_HEADER;/.test(src)
       && /kind: 'blocking-findings'/.test(src), 'sections, not a string');
     check('CX9: and records the manifest on the call that used it',
       /manifest: assembled\.manifest, delivered: assembled\.delivered/.test(src),

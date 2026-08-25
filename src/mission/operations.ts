@@ -26,6 +26,18 @@ import {
   Criterion, Oracle, OracleFinding, ProjectContext,
 } from './oracle';
 import { compileOracle, critiqueOracle, proposeAcceptance } from './compile';
+import { attach, evidenceLogPath, REPO_AWARE } from '../graph/access';
+import type { GraphState, GraphFault } from '../graph/graphify';
+import type { GraphAccess } from '../engine/providers';
+
+/**
+ * The script the MCP server is started from — Zeus's own entry point.
+ *
+ * Resolved from this module rather than from argv: a runner started through
+ * ts-node has argv[1] pointing at ts-node, and spawning THAT as an MCP server
+ * would start a second REPL instead of a tool.
+ */
+const ZEUS_CLI_PATH = require('path').resolve(__dirname, '..', 'cli.ts');
 import {
   critiquePlan, planAcceptance, planMission, requireAcceptedOracle, PlanCriticFinding,
 } from './planner';
@@ -181,10 +193,35 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
   model: string | null; reasoning: string | null; stage: string;
   traceLevel: TraceLevel;
   traceLevelSource: string;
+  /** The MCP server for this call's graph, or null when there is none. */
+  repoGraph: GraphAccess | null;
+  graphState: GraphState | null;
+  graphFault: GraphFault | null;
+  graphLogPath: string | null;
+  /** The REPOSITORY INTELLIGENCE section to put in the prompt. */
+  intel: string | null;
   keep: (content: string) => BlobRef | null;
   trace?: (type: string, payload: Record<string, unknown>) => void;
 } {
   const r = engine.routeFor(stage);
+  // Repository intelligence is prepared HERE because route() is the one door
+  // every stage goes through. Wiring it anywhere else would mean wiring it
+  // seven times and forgetting one — and the one forgotten would be a stage
+  // quietly reasoning about a repository it cannot see.
+  //
+  // The mission-level stages reason about the project root. Task stages get
+  // their worktree through the orchestrator, which knows which snapshot the
+  // task is actually on.
+  const attached = REPO_AWARE.has(stage)
+    ? attach({
+      projectId: engine.projectId,
+      sourceDir: engine.opts.projectRoot,
+      stateRoot: engine.stateRoot,
+      logPath: evidenceLogPath(engine.stateRoot, `${stage}-${Date.now()}-${process.pid}`),
+      execPath: process.execPath,
+      cliPath: ZEUS_CLI_PATH,
+    })
+    : null;
   // SNAPSHOTTED HERE, at call start. Someone raising the level from audit to
   // debug while a provider call is already running must not retroactively
   // change what that call kept — the policy travels with the call.
@@ -195,6 +232,11 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
   return {
     traceLevel: trace.level,
     traceLevelSource: trace.source,
+    repoGraph: attached?.access ?? null,
+    graphState: attached?.state ?? null,
+    graphFault: attached?.fault ?? null,
+    graphLogPath: attached?.logPath ?? null,
+    intel: attached?.section ?? null,
     keep: (content: string) => store.put(content, trace.level),
     // The PROVIDER the route names, not the one the role happens to hold. The
     // first cut passed the model and the effort and left the provider behind,

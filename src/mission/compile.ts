@@ -15,7 +15,8 @@
 
 import { Section, assemble, checklist } from './context';
 import { createHash } from 'crypto';
-import { Provider, AgentResponse } from '../engine/providers';
+import { Provider, AgentResponse, type GraphAccess } from '../engine/providers';
+import { readGraphOps } from '../graph/intel';
 import { ProcessSupervisor } from '../engine/exec';
 import { ExecutionPolicy } from '../engine/policy';
 import {
@@ -47,6 +48,12 @@ export interface CompileInput {
   model?: string | null;
   reasoning?: string | null;
   stage?: string;
+  /** The MCP server for this call's repository graph, or null. */
+  repoGraph?: GraphAccess | null;
+  /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
+  intel?: string | null;
+  /** Where the graph server appends what it answered, for the manifest. */
+  graphLogPath?: string | null;
   /**
    * Where this call's trace record goes.
    *
@@ -200,6 +207,14 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
       ].join('\n'),
     });
   }
+  // Before the goal, deliberately. A contract is written against a repository,
+  // and M-0016 wrote one against a repository it had never looked at — it
+  // attached an api/ typecheck to a landing-page change because that command
+  // was the only verification it had been handed. Orientation comes first.
+  if (input.intel) {
+    sections.push({ kind: 'repository-intelligence',
+      label: 'the repository you are compiling a contract for', content: input.intel });
+  }
   sections.push({ kind: 'mission-goal', label: 'mission goal', content: input.goal });
   sections.push({ kind: 'declared-commands', label: 'declared commands',
     content: JSON.stringify(input.context.commands, null, 1) });
@@ -228,6 +243,10 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
       checklist: checklist(assembled.manifest),
       traceLevel: input.traceLevel ?? 'normal',
       traceLevelSource: input.traceLevelSource ?? 'zeus-default',
+      // Whether this call HELD the tools, recorded before it runs. A trace
+      // that only shows the queries cannot tell "asked nothing" apart from
+      // "had nothing to ask with".
+      graphAttached: !!input.repoGraph,
       // At normal this is null and only the hash above survives. At audit and
       // debug the words are kept in a blob — redacted before they reach disk
       // for audit, raw for debug — and referenced by hash from here.
@@ -239,6 +258,9 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
       role: 'planner', taskId: input.missionId, projectId: input.projectId,
       model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt, policy: input.policy, readOnly: true,
+      // Read-only AND graph-holding. The MCP server has no write path, so this
+      // widens what the compiler can LEARN without widening what it can do.
+      graph: input.repoGraph ?? null,
     }, input.supervisor);
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
@@ -253,6 +275,13 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
         structuredKeys: res.structured ? Object.keys(res.structured) : [] },
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
+      // Derived from the server's log, never from the reply. A model that
+      // writes "I inspected landing.jsx" has made a claim; these lines were
+      // written by the process that answered the query.
+      ...(input.graphLogPath ? (() => {
+        const ops = readGraphOps(input.graphLogPath!);
+        return { graphOps: ops, graphQueryCount: ops.length };
+      })() : {}),
       ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
       // The provider-visible reply, BEFORE Zeus turned it into a structured
       // object. The parsed result is what Zeus made of it; this is what it was
@@ -353,6 +382,17 @@ const CRITIQUE_HEADER = [
  * is `buildReviewPayload` with a different policy, not a second mechanism.
  */
 export async function critiqueOracle(input: {
+  /**
+   * The critic's OWN graph access.
+   *
+   * Independent on purpose: a critic that could only see what the compiler
+   * chose to inspect is reviewing the compiler's reading rather than the
+   * repository. It has to be able to check a claim like "the frontend build
+   * command is X" against the repository itself.
+   */
+  repoGraph?: GraphAccess | null;
+  intel?: string | null;
+  graphLogPath?: string | null;
   missionId: string; projectId: string; goal: string; criteria: Criterion[];
   context: ProjectContext; provider: Provider; supervisor: ProcessSupervisor;
   policy: ExecutionPolicy; baseSha: string;
@@ -380,6 +420,11 @@ export async function critiqueOracle(input: {
         `failing checks: ${(input.context.failingChecks ?? []).join(', ') || '(none)'}`,
         `findings: ${(input.context.findings ?? []).join(', ') || '(none)'}`,
       ].join('\n') },
+      // Orientation for the critic too, and from the SAME deterministic index
+      // the compiler saw — so a disagreement between them is a disagreement
+      // about the repository, not about which description of it they got.
+      ...(input.intel ? [{ kind: 'repository-intelligence' as any,
+        label: 'the repository this contract is about', content: input.intel }] : []),
       ...(input.extraInputs ?? []),
     ],
   });
@@ -413,6 +458,10 @@ export async function critiqueOracle(input: {
       configuredContext: payload.configuredContext,
       traceLevel: input.traceLevel ?? 'normal',
       traceLevelSource: input.traceLevelSource ?? 'zeus-default',
+      // Whether this call HELD the tools, recorded before it runs. A trace
+      // that only shows the queries cannot tell "asked nothing" apart from
+      // "had nothing to ask with".
+      graphAttached: !!input.repoGraph,
       // At normal this is null and only the hash above survives. At audit and
       // debug the words are kept in a blob — redacted before they reach disk
       // for audit, raw for debug — and referenced by hash from here.
@@ -424,6 +473,10 @@ export async function critiqueOracle(input: {
       role: 'reviewer', taskId: input.missionId, projectId: input.projectId,
       model: input.model ?? null, reasoning: input.reasoning ?? null, stage: input.stage,
       prompt: payload.prompt, policy: input.policy, readOnly: true,
+      // The critic's OWN access. A critic that could only see what the
+      // compiler chose to inspect reviews the compiler's reading rather than
+      // the repository, and could never catch a claim the compiler invented.
+      graph: input.repoGraph ?? null,
     }, input.supervisor);
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
@@ -438,6 +491,13 @@ export async function critiqueOracle(input: {
         structuredKeys: res.structured ? Object.keys(res.structured) : [] },
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
+      // Derived from the server's log, never from the reply. A model that
+      // writes "I inspected landing.jsx" has made a claim; these lines were
+      // written by the process that answered the query.
+      ...(input.graphLogPath ? (() => {
+        const ops = readGraphOps(input.graphLogPath!);
+        return { graphOps: ops, graphQueryCount: ops.length };
+      })() : {}),
       ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
       // The provider-visible reply, BEFORE Zeus turned it into a structured
       // object. The parsed result is what Zeus made of it; this is what it was

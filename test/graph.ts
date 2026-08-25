@@ -317,6 +317,50 @@ export async function graphSuite(): Promise<void> {
       'the graph points; the file answers');
   }
 
+  section('the wiring: every repo-aware stage goes through one door');
+  {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    const comp = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'compile.ts'), 'utf8');
+    const acc = fs.readFileSync(path.join(__dirname, '..', 'src', 'graph', 'access.ts'), 'utf8');
+
+    // Wiring seven stages in seven places means forgetting one, and the one
+    // forgotten is a stage quietly reasoning about a repository it cannot see.
+    check('GW1: the graph is attached inside route(), the one door every stage uses',
+      /const r = engine\.routeFor\(stage\);[\s\S]{0,900}?attach\(\{/.test(src),
+      'attached at the chokepoint');
+    check('GW2: and only for stages that reason about the repository',
+      /REPO_AWARE\.has\(stage\)/.test(src), 'gated on REPO_AWARE');
+    check('GW3: all seven pipeline stages are repository-aware',
+      ['oracle', 'oracle-critic', 'planner', 'plan-critic', 'implementer',
+        'reviewer', 'repair'].every((st) => acc.includes(`'${st}'`)),
+      'every stage listed');
+
+    check('GW4: the Oracle is handed the tools, not just told about them',
+      /graph: input\.repoGraph \?\? null,/.test(comp), 'provider request carries it');
+    check('GW5: orientation is delivered BEFORE the goal',
+      comp.indexOf("kind: 'repository-intelligence'")
+        < comp.indexOf("kind: 'mission-goal'"), 'intel precedes the goal');
+    // A critic that could only see what the compiler chose to inspect reviews
+    // the compiler's reading rather than the repository.
+    check('GW6: the critic gets its OWN access, not the compiler’s leftovers',
+      (comp.match(/graph: input\.repoGraph \?\? null,/g) ?? []).length === 2,
+      'both compiler and critic');
+    check('GW7: and the same deterministic index, so a disagreement is about the repo',
+      /label: 'the repository this contract is about'/.test(comp), 'critic oriented too');
+    check('GW8: the trace records whether the call HELD tools at all',
+      (comp.match(/graphAttached: !!input\.repoGraph,/g) ?? []).length === 2,
+      'asked-nothing is distinguishable from had-nothing-to-ask-with');
+    check('GW9: and the ops come from the server log, never from the reply',
+      /readGraphOps\(input\.graphLogPath!\)/.test(comp)
+      && !/graphOps: res\./.test(comp), 'derived, not claimed');
+
+    // ts-node puts ts-node in argv[1]; spawning that as an MCP server starts a
+    // second REPL instead of a tool.
+    check('GW10: the MCP server is spawned from Zeus’s entry point, not from argv',
+      /ZEUS_CLI_PATH = require\('path'\)\.resolve\(__dirname/.test(src),
+      'resolved from the module');
+  }
+
   section('version compatibility is compared, not string-matched');
   {
     check('GV1: a newer patch satisfies a minimum', atLeast('0.9.49', '0.9.0'));

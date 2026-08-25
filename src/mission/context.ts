@@ -36,6 +36,9 @@ export type SectionKind =
   | 'validator-findings'
   | 'revision-instruction'
   | 'repo-evidence'
+  // Orientation, not evidence: what the repository IS, before the agent is
+  // asked to decide anything about it.
+  | 'repository-intelligence'
   | 'task-requirement'
   | 'other';
 

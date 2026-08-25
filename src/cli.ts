@@ -56,6 +56,7 @@ import {
 } from './routing';
 import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING, TraceStore } from './trace';
 import { serve as serveGraphMcp } from './graph/mcp';
+import { chatStreamId } from './mission/chat';
 import { health as graphHealth, readState as graphState } from './graph/graphify';
 import { revisionOf as graphRevisionOf } from './graph/access';
 import { ensureInstalled as ensureGraphify } from './graph/install';
@@ -445,6 +446,107 @@ function cmdSetup(argv: string[]): number {
     }, null, 1));
   }
   return report.ready ? 0 : 1;
+}
+
+/**
+ * The chat stream, as a thing you can read.
+ *
+ * `zeus chat trace` shows the whole observable interaction: what was typed,
+ * which model read it, which tools that model called and what each returned,
+ * what it decided, and how sure it was. `--call <id> --raw` prints the prompt
+ * and the reply when the level kept them.
+ */
+function cmdChat(args: string[]): number {
+  const sub = args.find((a) => !a.startsWith('--')) ?? 'trace';
+  if (sub !== 'trace') {
+    err('usage: zeus chat trace [--call <id>] [--raw] [--level normal|audit|debug] [--json]');
+    return 2;
+  }
+  const ctx = requireProject();
+  if (!ctx) return 2;
+  const engine = engineFor(ctx.root, ctx.cfg);
+  const missions = new MissionRegistry({
+    events: engine.events, projectId: engine.projectId, stateRoot: engine.stateRoot,
+  });
+  const stream = chatStreamId(engine.projectId);
+  const json = args.includes('--json');
+
+  const li = args.indexOf('--level');
+  if (li >= 0) {
+    const to = args[li + 1];
+    if (!isTraceLevel(to)) { err(`${C.r}✗${C.x} --level takes ${TRACE_LEVELS.join(', ')}`); return 2; }
+    const before = traceLevelFor(missions, stream, ctx.root);
+    if (to === 'debug' && !args.includes('--yes')) {
+      err(`${C.y}!${C.x} ${DEBUG_WARNING}`);
+      err(`  ${C.dim}re-run with --yes to turn it on for this chat stream${C.x}`);
+      return 1;
+    }
+    missions.events.append({ taskId: stream, type: 'MISSION_TRACE_LEVEL_REVISED',
+      payload: { from: before.level, to, decidedBy: 'user-confirmed', at: new Date().toISOString() } });
+    out(`${C.g}✓${C.x} chat trace ${before.level} → ${C.b}${to}${C.x}`);
+    out(`  ${C.dim}calls already made keep the level they were made under${C.x}`);
+    return 0;
+  }
+
+  const eff = traceLevelFor(missions, stream, ctx.root);
+  const calls = missionTrace(missions, stream);
+  const log = missions.events.read(stream);
+  const decisions = new Map<string, any>();
+  for (const e of log) {
+    if (e.type === 'FRONT_DOOR_DECISION') decisions.set((e.payload as any).traceCallId, e.payload);
+  }
+
+  if (json) {
+    out(JSON.stringify({ stream, trace: eff, calls,
+      decisions: [...decisions.values()] }, null, 1));
+    return 0;
+  }
+
+  const ci = args.indexOf('--call');
+  if (ci >= 0) {
+    const want = args[ci + 1] ?? '';
+    const call = calls.find((c) => c.traceCallId.includes(want));
+    if (!call) { err(`no call matching ${want} on ${stream}`); return 2; }
+    const store = new TraceStore(engine.stateRoot);
+    out(`${C.b}${call.traceCallId}${C.x} ${C.dim}${call.stage} · ${call.provider}${C.x}`);
+    const d = decisions.get(call.traceCallId);
+    if (d) out(`  decided ${C.b}${d.intent}${C.x} at confidence ${d.confidence}`);
+    if (args.includes('--raw')) {
+      const prompt = store.get((call as any).promptBlob);
+      const reply = store.get((call as any).responseBlob);
+      // Absence explained rather than left blank: at normal the words were
+      // never written, and that is a fact about the level, not about the call.
+      out(`\n${C.b}PROMPT${C.x}`);
+      out(prompt ?? `(not kept — this call ran at ${(call as any).traceLevel ?? 'normal'})`);
+      out(`\n${C.b}REPLY${C.x}`);
+      out(reply ?? `(not kept — this call ran at ${(call as any).traceLevel ?? 'normal'})`);
+    }
+    return 0;
+  }
+
+  out(`${C.dim}chat trace ${eff.level} · ${eff.source} · ${stream}${C.x}`);
+  if (!calls.length) { out(`  ${C.dim}no front-door calls recorded yet${C.x}`); return 0; }
+  for (const c of calls) {
+    const d = decisions.get(c.traceCallId);
+    const p: any = c;
+    out('');
+    out(`${C.b}${p.userMessage ? `"${String(p.userMessage).slice(0, 68)}"` : c.traceCallId}${C.x}`);
+    out(`  ${c.stage} · ${c.provider} · ${c.configuredModel ?? 'provider default'}`
+      + ` · ${c.outcome ?? 'running'} · ${c.wallMs ?? '?'}ms`);
+    if (d) {
+      out(`  → ${C.b}${d.intent}${C.x} (${d.confidence}) ${C.dim}${String(d.summary).slice(0, 90)}${C.x}`);
+      if (d.degraded) out(`  ${C.r}✗${C.x} ${d.degraded.reason}: ${d.degraded.detail}`);
+    }
+    for (const op of ((p.graphOps ?? []) as any[])) {
+      const a = op.args ?? {};
+      const q = a.term ?? a.id ?? a.missionId ?? `${a.from ?? ''}→${a.to ?? ''}`;
+      out(`    ${String(op.tool).padEnd(20)} ${JSON.stringify(q).slice(0, 46).padEnd(48)}`
+        + ` ${op.results} result(s) ${op.ms}ms`);
+    }
+  }
+  out('');
+  out(`  ${C.dim}zeus chat trace --call <id> --raw${C.x}`);
+  return 0;
 }
 
 function cmdDoctor(args: string[]): number {
@@ -2339,6 +2441,7 @@ export async function main(argv: string[]): Promise<number> {
     case 'init': return cmdInit(rest);
     case 'web': return cmdWeb(rest);
     case 'doctor': return cmdDoctor(rest);
+    case 'chat': return cmdChat(rest);
     // Not for people. The provider CLIs spawn this as their MCP server, so it
     // speaks JSON-RPC on stdout and must never print anything else there.
     case 'graph-mcp': {

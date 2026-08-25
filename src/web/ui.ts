@@ -142,6 +142,7 @@ export const UI_HTML = `<!doctype html>
   <span class="dim" id="proj">—</span>
   <span id="crumb" style="display:none">← all projects</span>
   <span id="routelink" class="ref" style="display:none">agent routing</span>
+  <span id="chattracelink" class="ref" style="display:none">chat trace</span>
   <span style="flex:1"></span>
   <input id="tok" type="password" placeholder="bearer token (printed once at startup)">
   <button id="go">connect</button>
@@ -150,6 +151,7 @@ export const UI_HTML = `<!doctype html>
 <main>
   <div id="home" style="display:none"></div>
   <div id="routing" style="display:none"></div>
+  <div id="chattrace" style="display:none"></div>
   <div id="list"><p class="dim">Enter the token to connect.</p></div>
   <div id="centre">
     <div id="detail"><p class="dim">Select a mission.</p></div>
@@ -1158,6 +1160,7 @@ async function loadChat() {
 $('send').onclick = send;
 $('say').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
 $('routelink').onclick = () => showRouting($('routing').style.display === 'none');
+$('chattracelink').onclick = () => showChatTrace($('chattrace').style.display === 'none');
 
 /**
  * Agent routing — which model answers for which stage, and how hard it thinks.
@@ -1170,6 +1173,144 @@ $('routelink').onclick = () => showRouting($('routing').style.display === 'none'
  * Precedence is shown per field, because it works per field: setting only the
  * reasoning level for a project keeps the global choice of model.
  */
+/**
+ * The whole observable interaction on the chat stream.
+ *
+ * What was typed, which model read it, which tools that model called and what
+ * each returned, what it decided and how sure it was — in one list, in order.
+ * The pieces were always on the log; reading them meant correlating four event
+ * types by hand.
+ */
+async function loadChatTrace() {
+  const el = $('chattrace');
+  if (!el) return;
+  let d;
+  try { d = await api(scope('/chat/trace')); } catch { return; }
+
+  let h = '<h2>Chat trace <span class="dim">' + (d.calls || []).length
+    + ' front-door call(s)</span></h2>';
+  h += '<div class="acts"><label for="ctlvl" class="dim">trace level</label> '
+    + '<select id="ctlvl">';
+  for (const l of (d.levels || ['normal', 'audit', 'debug'])) {
+    h += '<option value="' + esc(l) + '"' + (l === d.trace.level ? ' selected' : '') + '>'
+      + esc(l) + '</option>';
+  }
+  h += '</select> <button id="ctgo" class="ghost">apply</button>'
+    + '<span class="dim">now <b>' + esc(d.trace.level) + '</b> · '
+    + esc(d.trace.source) + '</span></div>';
+  h += '<p class="dim">normal keeps a hash and a size · audit keeps redacted prompts '
+    + 'and replies · debug keeps them raw. Chat prompts contain whatever was typed.</p>';
+
+  if (!(d.calls || []).length) {
+    h += '<p class="dim">No front-door calls recorded yet. Send a message and it will '
+      + 'appear here with the tools it used.</p>';
+    el.innerHTML = h;
+    wireChatTrace(d);
+    return;
+  }
+
+  const byCall = {};
+  for (const dec of (d.decisions || [])) byCall[dec.traceCallId] = dec;
+
+  for (const c of d.calls) {
+    const dec = byCall[c.traceCallId] || null;
+    const bad = dec && dec.degraded;
+    h += '<div class="call' + (bad ? ' bad' : '') + '">';
+    // The message first: this is a record of an interaction, and the
+    // interaction started with a person typing something.
+    h += '<div><span class="who">said</span> '
+      + esc(c.userMessage ? String(c.userMessage).slice(0, 220) : '(not recorded)')
+      + (c.userMessageBytes > 220 ? ' <span class="dim">… ' + c.userMessageBytes
+        + ' bytes</span>' : '') + '</div>';
+    h += '<div class="meta">' + esc(c.stage || 'front-door') + ' · '
+      + esc(c.provider || '?') + ' · '
+      + esc(c.configuredModel || (c.provider + ' default'))
+      + (c.actualModel && c.actualModel !== c.configuredModel
+        ? ' → answered by <b>' + esc(c.actualModel) + '</b>' : '')
+      + ' · ' + (c.wallMs == null ? '?' : c.wallMs) + 'ms'
+      + ' · prompt ' + (c.promptBytes == null ? '?' : c.promptBytes) + 'B'
+      + '</div>';
+    if (dec) {
+      h += '<div><span class="' + (bad ? 'bad' : 'ok') + '">' + esc(dec.intent) + '</span> '
+        + '<span class="dim">confidence ' + esc(String(dec.confidence)) + '</span> '
+        + esc(String(dec.summary || '').slice(0, 240)) + '</div>';
+      if (bad) {
+        h += '<div class="warn">' + esc(dec.degraded.reason) + ': '
+          + esc(String(dec.degraded.detail).slice(0, 200)) + '</div>';
+      }
+      if (dec.proposedGoalBytes) {
+        // Proves the goal was not quietly rewritten on the way to the card.
+        h += '<div class="meta">proposed work: ' + dec.proposedGoalBytes
+          + ' bytes, the same message that was typed'
+          + (dec.orientationBytes ? ' · orientation ' + dec.orientationBytes + ' bytes' : '')
+          + '</div>';
+      }
+      if (dec.readings && dec.readings.length) {
+        h += '<ul class="graphops">';
+        for (const r of dec.readings) {
+          h += '<li><span class="who">' + esc(r.intent) + '</span> ' + esc(r.reading) + '</li>';
+        }
+        h += '</ul>';
+      }
+    }
+    const ops = c.graphOps || [];
+    if (ops.length) {
+      h += '<ol class="graphops">';
+      for (const op of ops.slice(0, 40)) {
+        const a = op.args || {};
+        const q = a.term != null ? a.term
+          : (a.id != null ? a.id
+            : (a.missionId != null ? a.missionId
+              : ((a.from || '') + ' → ' + (a.to || ''))));
+        h += '<li><span class="who">' + esc(op.tool || '?') + '</span> '
+          + '<code>' + esc(String(q)) + '</code> '
+          + '<span class="dim">' + (op.results == null ? '?' : op.results) + ' result(s)'
+          + (op.ms == null ? '' : ' · ' + op.ms + 'ms')
+          + (op.ok === false ? ' · FAILED' : '') + '</span></li>';
+      }
+      h += '</ol>';
+    } else {
+      h += '<div class="meta dim">no tools called — it decided from the message alone</div>';
+    }
+    if (c.toolsOffered && c.toolsOffered.length) {
+      h += '<div class="meta dim">offered ' + c.toolsOffered.length + ' tool(s): '
+        + esc(c.toolsOffered.join(', ')) + '</div>';
+    }
+    h += '<div class="meta dim">' + esc(c.traceCallId)
+      + ' · read the prompt with <code>zeus chat trace --call '
+      + esc(String(c.traceCallId).slice(0, 10)) + ' --raw</code></div>';
+    h += '</div>';
+  }
+  el.innerHTML = h;
+  wireChatTrace(d);
+}
+
+function wireChatTrace(d) {
+  const go = $('ctgo');
+  if (!go) return;
+  go.onclick = async () => {
+    const to = $('ctlvl').value;
+    if (to === d.trace.level) { bubble('Chat trace is already ' + esc(to) + '.', false); return; }
+    let ack = false;
+    if (to === 'debug') {
+      if (!confirm((d.debugWarning || 'Debug keeps prompts and replies raw.')
+        + '  Chat prompts contain whatever was typed. Turn debug on for this chat stream?')) return;
+      ack = true;
+    }
+    go.disabled = true;
+    const r = await apiPost('/chat/trace', { level: to, acknowledged: ack });
+    go.disabled = false;
+    if (r.status >= 400) {
+      bubble('<span class="bad">'
+        + esc((r.json && (r.json.detail || r.json.error)) || r.status) + '</span>', false);
+      return;
+    }
+    bubble('Chat trace ' + esc(d.trace.level) + ' &rarr; <b>' + esc(to) + '</b>. '
+      + 'Calls already made keep the level they were made under.', false);
+    loadChatTrace();
+  };
+}
+
 async function loadRouting() {
   const d = await api(scope('/routing'));
   ROUTING = d;
@@ -1378,15 +1519,33 @@ function showHome(on) {
   for (const id of ['list', 'centre', 'chat']) $(id).style.display = on ? 'none' : '';
   $('crumb').style.display = on ? 'none' : '';
   $('routelink').style.display = on ? 'none' : '';
+  $('chattracelink').style.display = on ? 'none' : '';
 }
 
 /** The settings screen is a view of the project, so it lives beside it. */
 function showRouting(on) {
   $('routing').style.display = on ? 'block' : 'none';
+  $('chattrace').style.display = 'none';
   $('home').style.display = 'none';
   for (const id of ['list', 'centre', 'chat']) $(id).style.display = on ? 'none' : '';
   $('routelink').textContent = on ? '← back to missions' : 'agent routing';
+  $('chattracelink').textContent = 'chat trace';
   if (on) loadRouting();
+}
+
+/**
+ * The chat trace is a view of the conversation, so it opens from the header
+ * beside routing rather than being buried in a mission that never existed —
+ * a front-door call happens BEFORE any mission does.
+ */
+function showChatTrace(on) {
+  $('chattrace').style.display = on ? 'block' : 'none';
+  $('routing').style.display = 'none';
+  $('home').style.display = 'none';
+  for (const id of ['list', 'centre', 'chat']) $(id).style.display = on ? 'none' : '';
+  $('chattracelink').textContent = on ? '← back to missions' : 'chat trace';
+  $('routelink').textContent = 'agent routing';
+  if (on) loadChatTrace();
 }
 
 /**

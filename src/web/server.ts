@@ -49,6 +49,7 @@ import {
 import { EventTailer, cursorFromLastId, eventId, SSE_CHANNEL } from './tail';
 import { UI_HTML } from './ui';
 import { protocolCommand, type FrontDoorDecision } from '../mission/frontdoor';
+import { chatStreamId } from '../mission/chat';
 import { systemdUserEnv } from '../engine/isolation';
 import {
   listProjects, freeSlug, slugForUrl, slugify, isProject, scopeFor, ProjectScope,
@@ -144,6 +145,7 @@ export const READ_ROUTES = [
   'GET /api/chat',
   'GET /api/projects',
   'GET /api/events/stream',
+  'GET /api/chat/trace',
   'GET /api/graph',
   'GET /api/routing',
 ] as const;
@@ -158,6 +160,7 @@ export const WRITE_ROUTES = [
   'POST /api/missions/:id/budget',
   'POST /api/missions/:id/evaluate',
   'POST /api/chat',
+  'POST /api/chat/trace',
   'POST /api/chat/decide',
   'POST /api/projects/draft',
   'POST /api/projects/decide',
@@ -705,6 +708,34 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
       // Repository intelligence status. Never hidden: an operator deciding
       // whether to trust a contract needs to know whether the agent that wrote
       // it could see the repository, and a stale graph has to say so.
+      // The whole observable interaction on the chat stream: the messages, the
+      // model calls they caused, the tools those calls made, and the decisions
+      // that came out. Same machinery as a mission trace — the chat stream is
+      // just another task in the event store.
+      if (method === 'GET' && url.pathname === '/api/chat/trace') {
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const stream = chatStreamId(sc.projectId);
+        const trace = traceLevelFor(sc.missions, stream, sc.root);
+        const calls = missionTrace(sc.missions, stream);
+        const log = sc.missions.events.read(stream);
+        // The decision beside the call that produced it, so "what did Zeus
+        // conclude" and "what did that cost" are one row rather than two.
+        const decisions = log.filter((e) => e.type === 'FRONT_DOOR_DECISION')
+          .map((e) => ({ seq: e.seq, ts: e.ts, ...(e.payload as any) }));
+        const messages = log.filter((e) => e.type === 'CHAT_MESSAGE')
+          .map((e) => ({ seq: e.seq, ts: e.ts,
+            message: (e.payload as any)?.message ?? null,
+            led: (e.payload as any)?.led ?? null,
+            intent: (e.payload as any)?.classification?.intent ?? null }));
+        send(res, 200, {
+          projectId: sc.projectId, stream, trace,
+          levels: TRACE_LEVELS, debugWarning: DEBUG_WARNING,
+          calls, decisions, messages,
+        });
+        return;
+      }
+
       if (method === 'GET' && url.pathname === '/api/graph') {
         const sc = scoped(url);
         if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
@@ -1078,6 +1109,34 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         writeUserDefaults({ ...(readUserDefaults() ?? {}), routing: next } as any);
       }
       send(res, 200, { stage, tier, routes: proposed, problems: validateRouting(proposed) });
+      return;
+    }
+
+    if (url.pathname === '/api/chat/trace') {
+      const to = String(body?.level ?? '');
+      if (!isTraceLevel(to)) {
+        send(res, 400, { error: 'BAD_TRACE_LEVEL', detail: `takes ${TRACE_LEVELS.join(', ')}` });
+        return;
+      }
+      const stream = chatStreamId(wsc.projectId);
+      const before = traceLevelFor(wsc.missions, stream, wsc.root);
+      // Debug is never turned on by inheritance or by accident, on this stream
+      // as on any other — and chat prompts carry whatever a person typed.
+      if (to === 'debug' && body?.acknowledged !== true) {
+        send(res, 409, { error: 'DEBUG_NOT_ACKNOWLEDGED', warning: DEBUG_WARNING,
+          detail: 'send acknowledged:true to turn debug on for this chat stream' });
+        return;
+      }
+      if (to === before.level) {
+        send(res, 200, { stream, unchanged: true, trace: before });
+        return;
+      }
+      wsc.store.append({ taskId: stream, type: 'MISSION_TRACE_LEVEL_REVISED',
+        payload: { from: before.level, to, decidedBy: 'user-confirmed',
+          at: new Date().toISOString() } });
+      send(res, 200, { stream, from: before.level, to,
+        trace: traceLevelFor(wsc.missions, stream, wsc.root),
+        detail: 'calls already made keep the level they were made under' });
       return;
     }
 

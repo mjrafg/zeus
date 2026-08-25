@@ -28,6 +28,8 @@ import {
 import { compileOracle, critiqueOracle, proposeAcceptance } from './compile';
 import { attach, evidenceLogPath, REPO_AWARE } from '../graph/access';
 import { decide, type FrontDoorDecision } from './frontdoor';
+import { chatStreamId } from './chat';
+import { createHash } from 'crypto';
 import { frontDoorTools } from '../engine/providers';
 import { readGraphOps } from '../graph/intel';
 import type { GraphState, GraphFault } from '../graph/graphify';
@@ -704,6 +706,16 @@ Promise<FrontDoorDecision> {
     : null;
 
   const r = engine.routeFor('front-door');
+
+  // The chat stream is just another task in the event store, so the trace
+  // machinery applies to it unchanged: a level recorded on the stream
+  // overrides the project's, which overrides the global one.
+  const stream = chatStreamId(engine.projectId);
+  const trace = traceLevelFor(ctx.missions, stream, engine.opts.projectRoot);
+  const store = new TraceStore(engine.stateRoot);
+  const traceCallId = `TC-${createHash('sha256')
+    .update(`${stream}:front-door:${Date.now()}`).digest('hex').slice(0, 20)}`;
+
   const decision = await decide({
     message,
     context: att.section,
@@ -716,11 +728,31 @@ Promise<FrontDoorDecision> {
     graph: access,
     // Read, Grep, Glob, graph, Zeus state. No Bash.
     tools: frontDoorTools(),
+    traceCallId,
+    traceLevel: trace.level,
+    traceLevelSource: trace.source,
+    // SNAPSHOTTED at call start, like every other stage: raising the level
+    // mid-call must not retroactively change what that call kept.
+    keep: (content: string) => store.put(content, trace.level),
+    // Read AFTER the call, so the log holds what the tools actually answered
+    // rather than what the agent said it asked.
+    readOps: () => readGraphOps(logPath) as unknown as Array<Record<string, unknown>>,
+    // Written to the CHAT stream, beside the message that caused them.
+    trace: (type: string, payload: Record<string, unknown>) => {
+      try { ctx.missions.events.append({ taskId: stream, type, payload }); }
+      catch (e: any) {
+        try {
+          ctx.missions.events.append({ taskId: stream, type: 'TRACE_WRITE_FAILED',
+            payload: { forType: type, detail: String(e?.message ?? e) } });
+        } catch { /* observability must never take the answer down */ }
+      }
+    },
   });
 
   const ops = readGraphOps(logPath);
   return {
     ...decision,
+    traceCallId,
     evidenceUsed: ops.map((o) => ({
       kind: o.tool,
       id: String((o.args as any)?.term ?? (o.args as any)?.id

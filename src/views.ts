@@ -385,6 +385,18 @@ export interface TraceCall {
    */
   graphAttached: boolean | null;
   graphOps: Array<Record<string, unknown>> | null;
+  /**
+   * The front door's own inputs: what the person typed, and what tools the
+   * call was offered.
+   *
+   * Carried on the call rather than looked up separately because the whole
+   * point of the chat trace is that the message, the model call, the tool
+   * calls and the decision are ONE interaction to read, not four to correlate
+   * by hand.
+   */
+  userMessage: string | null;
+  userMessageBytes: number | null;
+  toolsOffered: string[] | null;
   outcome: string | null;
   wallMs: number | null;
   providerTiming: Record<string, unknown> | null;
@@ -412,7 +424,13 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
   const open = new Map<string, TraceCall>();
   const order: string[] = [];
   const logs: StoredEvent[][] = [missions.events.read(missionId)];
-  const rec = missions.mission(missionId);
+  // Not every traced stream is a mission. The chat stream carries front-door
+  // calls and has no spawned tasks, and `mission()` THROWS on an id that is not
+  // a mission rather than returning null — so asking it about the chat stream
+  // took the whole trace down. Pairing trace events is the job here; being a
+  // mission is not a precondition for having any.
+  let rec: ReturnType<MissionRegistry['mission']> | null = null;
+  try { rec = missions.mission(missionId); } catch { rec = null; }
   for (const t of (rec?.spawned ?? [])) {
     try { logs.push(missions.events.read(t.taskId)); } catch { /* unreadable task log */ }
   }
@@ -440,6 +458,9 @@ export function missionTrace(missions: MissionRegistry, missionId: string): Trac
           promptBlob: p.promptBlob ?? null,
           graphAttached: typeof p.graphAttached === 'boolean' ? p.graphAttached : null,
           graphOps: null,
+          userMessage: typeof p.userMessage === 'string' ? p.userMessage : null,
+          userMessageBytes: typeof p.userMessageBytes === 'number' ? p.userMessageBytes : null,
+          toolsOffered: Array.isArray(p.toolsOffered) ? p.toolsOffered as string[] : null,
           responseBlob: null,
           outcome: null, wallMs: null, providerTiming: null, usage: null,
           toolsUsed: null, parsed: null, infrastructureFailure: null,

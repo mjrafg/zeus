@@ -26,6 +26,7 @@
  * "read-only" would then mean only that it had no Edit tool.
  */
 
+import { createHash } from 'crypto';
 import type { Provider, AgentResponse, GraphAccess } from '../engine/providers';
 import type { ProcessSupervisor } from '../engine/exec';
 import type { ExecutionPolicy } from '../engine/policy';
@@ -56,6 +57,8 @@ export interface FrontDoorDecision {
   answer: string | null;
   /** Set when the decision could not be made by the agent. */
   degraded: { reason: string; detail: string } | null;
+  /** Links the message, the model call, the tool calls and this decision. */
+  traceCallId?: string;
 }
 
 /* -- deterministic protocol, which is not natural language ------------------ */
@@ -252,6 +255,14 @@ export function parseDecision(res: AgentResponse, message: string): FrontDoorDec
 export interface FrontDoorInput {
   message: string;
   context?: string | null;
+  /** Correlates the whole interaction: message, call, tools, decision. */
+  traceCallId?: string;
+  traceLevel?: string;
+  traceLevelSource?: string;
+  /** Keeps prompt/reply under the level's policy, or returns null. */
+  keep?: (content: string) => unknown | null;
+  /** Reads back what the tool server actually answered, for the record. */
+  readOps?: () => Array<Record<string, unknown>>;
   provider: Provider;
   supervisor: ProcessSupervisor;
   policy: ExecutionPolicy;
@@ -266,6 +277,34 @@ export interface FrontDoorInput {
 
 export async function decide(input: FrontDoorInput): Promise<FrontDoorDecision> {
   const prompt = buildPrompt(input.message, input.context ?? null);
+  const traceCallId = input.traceCallId
+    ?? `TC-${createHash('sha256').update(`${input.projectId}:front-door:${Date.now()}`)
+      .digest('hex').slice(0, 20)}`;
+  const started = Date.now();
+
+  // Opened BEFORE the provider is called, the same as every other stage. If the
+  // host dies mid-call the log still says exactly what was in flight — which
+  // model, at what effort, holding which tools, against which message.
+  input.trace?.('MODEL_CALL_STARTED', {
+    traceCallId, stage: 'front-door', role: 'reviewer',
+    provider: input.provider.id, readOnly: true,
+    configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
+    promptHash: `sha256:${createHash('sha256').update(prompt).digest('hex')}`,
+    promptBytes: Buffer.byteLength(prompt),
+    // What the front door was ACTUALLY given, so a decision can be argued with
+    // rather than guessed at.
+    userMessage: input.message,
+    userMessageBytes: Buffer.byteLength(input.message),
+    contextBytes: input.context ? Buffer.byteLength(input.context) : 0,
+    toolsOffered: input.tools,
+    graphAttached: !!input.graph,
+    traceLevel: input.traceLevel ?? 'normal',
+    traceLevelSource: input.traceLevelSource ?? 'zeus-default',
+    ...(input.keep ? { promptBlob: input.keep(prompt) } : {}),
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  });
+
   let res: AgentResponse;
   try {
     res = await input.provider.invoke({
@@ -277,10 +316,66 @@ export async function decide(input: FrontDoorInput): Promise<FrontDoorDecision> 
       tools: input.tools,
     }, input.supervisor);
   } catch (e: any) {
-    return parseDecision({
+    const failed = parseDecision({
       outcome: 'FAILED', structured: null, text: '', raw: '',
       infrastructureFailure: `front door threw: ${e?.message ?? e}`,
     } as any, input.message);
+    input.trace?.('MODEL_CALL_FINISHED', {
+      traceCallId, stage: 'front-door', provider: input.provider.id,
+      outcome: 'FAILED', wallMs: Date.now() - started,
+      infrastructureFailure: `front door threw: ${e?.message ?? e}`,
+      finishedAt: new Date().toISOString(),
+    });
+    input.trace?.('FRONT_DOOR_DECISION', {
+      traceCallId, intent: failed.intent, confidence: failed.confidence,
+      degraded: failed.degraded, summary: failed.summary,
+    });
+    return failed;
   }
-  return parseDecision(res, input.message);
+
+  const decision = parseDecision(res, input.message);
+  const ops = input.readOps ? input.readOps() : [];
+
+  input.trace?.('MODEL_CALL_FINISHED', {
+    traceCallId, stage: 'front-door', provider: input.provider.id,
+    outcome: res.outcome,
+    configuredModel: input.model ?? null, configuredReasoning: input.reasoning ?? null,
+    actualModel: (res as any).identity?.model ?? null,
+    ...((res as any).identity?.model && input.model
+      && (res as any).identity.model !== input.model
+      ? { modelDiscrepancy: { configured: input.model, actual: (res as any).identity.model } }
+      : {}),
+    parsed: { ok: res.structured !== null,
+      structuredKeys: res.structured ? Object.keys(res.structured) : [] },
+    infrastructureFailure: res.infrastructureFailure,
+    wallMs: Date.now() - started,
+    ...((res as any).providerUsage ? { usage: (res as any).providerUsage } : {}),
+    // Every tool the agent actually called, from the server's own log rather
+    // than from anything it said about itself.
+    graphOps: ops, graphQueryCount: ops.length,
+    ...(input.keep ? { responseBlob: input.keep(res.raw ?? res.text ?? '') } : {}),
+    finishedAt: new Date().toISOString(),
+  });
+
+  // The decision itself, as its own event: what Zeus concluded, how sure it
+  // was, and what it proposed to do next. The pair above says what the call
+  // cost; this says what it MEANT.
+  input.trace?.('FRONT_DOOR_DECISION', {
+    traceCallId,
+    intent: decision.intent,
+    confidence: decision.confidence,
+    summary: decision.summary,
+    degraded: decision.degraded,
+    answerBytes: decision.answer ? Buffer.byteLength(decision.answer) : 0,
+    orientationBytes: decision.proposedWork?.orientation
+      ? Buffer.byteLength(decision.proposedWork.orientation) : 0,
+    // The card would carry the user's own words; recording the length proves
+    // the goal was not quietly rewritten on the way through.
+    proposedGoalBytes: decision.proposedWork
+      ? Buffer.byteLength(decision.proposedWork.goal) : 0,
+    readings: decision.readings,
+    toolsUsed: ops.map((o) => o.tool),
+  });
+
+  return decision;
 }

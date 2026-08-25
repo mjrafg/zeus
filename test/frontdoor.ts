@@ -230,6 +230,107 @@ export async function frontDoorSuite(): Promise<void> {
       FRONT_DOOR_INTENTS.join(', '));
   }
 
+  section('the front door: the whole interaction is on the log');
+  {
+    // The pieces were always recordable; nothing recorded them. A front-door
+    // call left no MODEL_CALL events at all, so "which model read my message,
+    // what did it call, what did it decide" had no answer anywhere.
+    const events: Array<{ type: string; payload: any }> = [];
+    const ops = [{ tool: 'zeus_missions', args: {}, ok: true, results: 3, ms: 9 },
+      { tool: 'graph_dependents', args: { term: 'content.js' }, ok: true, results: 2, ms: 4 }];
+    const kept: string[] = [];
+
+    const d = await decide({
+      message: 'Why did M-0027 stop?',
+      context: 'REPOSITORY INTELLIGENCE …',
+      provider: scripted({ intent: 'QUESTION', confidence: 0.9,
+        summary: 'asks why it stopped', answer: 'N-0002 failed twice.' }),
+      supervisor: {} as any, policy: {} as any, projectId: 'p',
+      tools: frontDoorTools(),
+      traceCallId: 'TC-fixed', traceLevel: 'audit', traceLevelSource: 'project',
+      keep: (c: string) => { kept.push(c); return { hash: `sha256:${kept.length}` }; },
+      readOps: () => ops,
+      trace: (type, payload) => events.push({ type, payload }),
+    });
+
+    const started = events.find((e) => e.type === 'MODEL_CALL_STARTED')?.payload;
+    const finished = events.find((e) => e.type === 'MODEL_CALL_FINISHED')?.payload;
+    const decided = events.find((e) => e.type === 'FRONT_DOOR_DECISION')?.payload;
+
+    check('FT1: a front-door call opens a MODEL_CALL like every other stage',
+      !!started && started.stage === 'front-door', JSON.stringify(started?.stage));
+    // Opened BEFORE the provider answers: if the host dies mid-call the log
+    // still says what was in flight.
+    check('FT2: the STARTED record precedes the FINISHED one',
+      events.findIndex((e) => e.type === 'MODEL_CALL_STARTED')
+        < events.findIndex((e) => e.type === 'MODEL_CALL_FINISHED'), 'ordered');
+    check('FT3: it records what the person actually typed',
+      started.userMessage === 'Why did M-0027 stop?'
+      && started.userMessageBytes === Buffer.byteLength('Why did M-0027 stop?'),
+      `${started.userMessage} (${started.userMessageBytes} bytes)`);
+    check('FT4: and which tools the call was OFFERED, not just which it used',
+      Array.isArray(started.toolsOffered) && started.toolsOffered.includes('Read')
+      && !started.toolsOffered.includes('Bash'), 'offered list recorded');
+    check('FT5: with the level it ran under and where that came from',
+      started.traceLevel === 'audit' && started.traceLevelSource === 'project',
+      `${started.traceLevel}/${started.traceLevelSource}`);
+    check('FT6: the prompt is hashed and sized whatever the level',
+      /^sha256:[0-9a-f]{64}$/.test(started.promptHash) && started.promptBytes > 500,
+      String(started.promptHash).slice(0, 20));
+
+    check('FT7: every tool the agent called is on the FINISHED record',
+      finished.graphQueryCount === 2
+      && finished.graphOps.map((o: any) => o.tool).join(',')
+        === 'zeus_missions,graph_dependents', JSON.stringify(finished.graphOps));
+    // From the server's log, never from the reply.
+    check('FT8: read from the tool server, not from what the model said',
+      finished.graphOps[0].ms === 9 && finished.graphOps[1].results === 2,
+      'server-reported timings survive');
+
+    check('FT9: the DECISION is its own event — what it meant, not what it cost',
+      decided.intent === 'QUESTION' && decided.confidence === 0.9,
+      JSON.stringify({ i: decided.intent, c: decided.confidence }));
+    check('FT10: correlated to the call by one id',
+      started.traceCallId === 'TC-fixed' && finished.traceCallId === 'TC-fixed'
+      && decided.traceCallId === 'TC-fixed', 'one chain');
+    check('FT11: and the decision carries its own id back to the caller',
+      d.traceCallId === undefined || d.traceCallId === 'TC-fixed', String(d.traceCallId));
+    check('FT12: the tools it used are named on the decision too',
+      decided.toolsUsed.join(',') === 'zeus_missions,graph_dependents',
+      JSON.stringify(decided.toolsUsed));
+
+    // At audit and debug the words are kept; the level decides, not the caller.
+    check('FT13: prompt and reply are offered to the blob store',
+      kept.length === 2 && kept[0].includes('You are the front door'),
+      `${kept.length} blob(s)`);
+    check('FT14: and referenced from the record rather than inlined',
+      !!started.promptBlob && !!finished.responseBlob, 'refs, not text');
+  }
+
+  section('the front door: a failed call is traced too');
+  {
+    const events: Array<{ type: string; payload: any }> = [];
+    await decide({
+      message: 'anything',
+      provider: scripted(null, { infrastructureFailure: 'provider died', outcome: 'FAILED' }),
+      supervisor: {} as any, policy: {} as any, projectId: 'p',
+      tools: frontDoorTools(),
+      trace: (type, payload) => events.push({ type, payload }),
+    });
+    // A call that failed is the one you most need the record of.
+    check('FT15: a failed call still writes both records',
+      events.filter((e) => e.type.startsWith('MODEL_CALL')).length === 2,
+      events.map((e) => e.type).join(','));
+    const fin = events.find((e) => e.type === 'MODEL_CALL_FINISHED')?.payload;
+    check('FT16: naming the failure rather than an outcome',
+      fin.outcome === 'FAILED' && /provider died/.test(String(fin.infrastructureFailure)),
+      String(fin.infrastructureFailure));
+    const dec = events.find((e) => e.type === 'FRONT_DOOR_DECISION')?.payload;
+    check('FT17: and the degraded decision is recorded, not just dropped',
+      dec.intent === 'AMBIGUOUS' && dec.degraded.reason === 'FRONT_DOOR_UNAVAILABLE',
+      JSON.stringify(dec.degraded));
+  }
+
   section('the front door: Zeus state is readable and nothing else');
   {
     check('FD42: the state tools are all reads',

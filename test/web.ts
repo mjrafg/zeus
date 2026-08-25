@@ -250,6 +250,22 @@ export async function webSuite(): Promise<void> {
     } finally { await server?.close(); }
   }
 
+  section('the console is the application, so it is never cached');
+  {
+    // A tab left open across a deploy ran yesterday's JavaScript against
+    // today's API, with a dead event stream, and looked broken in ways nothing
+    // on the server could explain. The response carried no cache directive at
+    // all, which leaves browsers free to cache it heuristically.
+    const srv = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'web', 'server.ts'), 'utf8');
+    check('NC1: the console HTML is served no-store',
+      /'cache-control': 'no-store, must-revalidate'/.test(srv), 'no-store present');
+    const at = srv.indexOf("'cache-control'");
+    const ui = srv.indexOf('const body = UI_HTML;');
+    check('NC2: on the page itself, where the inline script lives',
+      at > ui && at < ui + 600, 'on the / response');
+  }
+
   section('control center: there is no write route for file content');
   {
     const table = routeTable();

@@ -507,7 +507,14 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     try {
       if (method === 'GET' && url.pathname === '/') {
         const body = UI_HTML;
+        // no-store, because the console IS the application. Its whole script
+        // is inline in this response, so it changes on every deploy — and the
+        // response carried no cache directive at all, which leaves browsers
+        // free to heuristically cache it. A tab left open across a deploy then
+        // runs yesterday's JavaScript against today's API, with a dead event
+        // stream, and looks broken in ways nothing on the server can explain.
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store, must-revalidate',
           'content-length': Buffer.byteLength(body) });
         res.end(body);
         return;

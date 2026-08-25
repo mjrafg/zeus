@@ -41,6 +41,13 @@ export interface AgentRequest {
   reasoning?: string | null;
   /** The stage this call serves, for the record. Roles collapse seven into three. */
   stage?: string;
+  /**
+   * The repository graph for THIS call's snapshot, or null when there is none.
+   *
+   * Null is a position, not a gap: it means the tools are not offered and
+   * nothing may claim the agent was repository-aware.
+   */
+  graph?: GraphAccess | null;
 }
 
 export interface AgentResponse {
@@ -274,6 +281,54 @@ export function providerDiagnostics(structured: Record<string, unknown> | null):
   return out;
 }
 
+/**
+ * What a call needs to reach the repository graph.
+ *
+ * Absent when the graph is unavailable or stale — and absent means the tools
+ * are not offered at all, rather than offered and answering emptily. An agent
+ * told it has repository intelligence, which then returns nothing, concludes
+ * the repository is empty; an agent given no such tool goes and reads files.
+ */
+export interface GraphAccess {
+  /** argv that starts the MCP server for THIS call's graph. */
+  command: string;
+  args: string[];
+  /** Where the server appends what it actually answered. */
+  logPath: string | null;
+}
+
+/** The graph tools, named so a --allowed-tools entry can name them. */
+export const GRAPH_TOOL_NAMES = [
+  'graph_search', 'graph_dependencies', 'graph_dependents',
+  'graph_neighbors', 'graph_references', 'graph_path',
+] as const;
+
+const MCP_SERVER = 'zeusgraph';
+
+/** Fully-qualified as the CLIs address MCP tools. */
+export function graphToolIds(): string[] {
+  return GRAPH_TOOL_NAMES.map((n) => `mcp__${MCP_SERVER}__${n}`);
+}
+
+/**
+ * The tools a call may use, derived from whether it may write.
+ *
+ * Graph tools are added to BOTH sides. That is safe by construction rather
+ * than by care: the MCP server opens graph.json and an append-only log and has
+ * no code path that touches the repository, so a critic holding these tools
+ * still cannot change anything.
+ */
+export function toolsFor(readOnly: boolean, graph: GraphAccess | null): string[] {
+  const base = readOnly
+    ? ['Read', 'Grep', 'Glob', 'Bash']
+    : ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
+  return graph ? [...base, ...graphToolIds()] : base;
+}
+
+function mcpConfigJson(g: GraphAccess): string {
+  return JSON.stringify({ mcpServers: { [MCP_SERVER]: { command: g.command, args: g.args } } });
+}
+
 function whichSync(bin: string): string | null {
   const { spawnSync } = require('child_process');
   const r = spawnSync('sh', ['-c', `command -v ${bin}`], { encoding: 'utf8', timeout: 5_000 });
@@ -297,7 +352,11 @@ export function claudeProvider(binOverride?: string): Provider {
       ...(r.reasoning ? ['--effort', r.reasoning] : []),
       '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
       '--permission-mode', r.readOnly ? 'manual' : 'acceptEdits',
-      '--allowed-tools', ...(r.readOnly ? ['Read', 'Grep', 'Glob', 'Bash'] : ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash']),
+      // --strict-mcp-config so the call gets THIS project's graph and nothing
+      // else: without it the user's own configured servers join the session,
+      // and a mission would silently gain tools nobody scoped to it.
+      ...(r.graph ? ['--mcp-config', mcpConfigJson(r.graph), '--strict-mcp-config'] : []),
+      '--allowed-tools', ...toolsFor(r.readOnly, r.graph ?? null),
     ], req, sup),
   };
 }
@@ -316,6 +375,14 @@ export function codexProvider(binOverride?: string): Provider {
       ...(r.model ? ['--model', r.model] : []),
       // Codex takes effort as a config override rather than a flag of its own.
       ...(r.reasoning ? ['-c', `model_reasoning_effort=\"${r.reasoning}\"`] : []),
+      // Same for MCP: `codex mcp add` writes ~/.codex/config.toml, which is
+      // GLOBAL and would leave one mission's graph attached to every later
+      // codex session on this host. The dotted override is per-invocation, so
+      // the server dies with the call that needed it.
+      ...(r.graph ? [
+        '-c', `mcp_servers.${MCP_SERVER}.command="${r.graph.command}"`,
+        '-c', `mcp_servers.${MCP_SERVER}.args=${JSON.stringify(r.graph.args)}`,
+      ] : []),
       r.prompt,
     ], req, sup),
   };

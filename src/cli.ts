@@ -54,6 +54,7 @@ import {
   STAGE_LABEL, STAGE_DESCRIPTION,
 } from './routing';
 import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING, TraceStore } from './trace';
+import { serve as serveGraphMcp } from './graph/mcp';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -2293,6 +2294,15 @@ export async function main(argv: string[]): Promise<number> {
     case 'init': return cmdInit(rest);
     case 'web': return cmdWeb(rest);
     case 'doctor': return cmdDoctor(rest);
+    // Not for people. The provider CLIs spawn this as their MCP server, so it
+    // speaks JSON-RPC on stdout and must never print anything else there.
+    case 'graph-mcp': {
+      const g = rest[rest.indexOf('--graph') + 1];
+      if (!g || !rest.includes('--graph')) { err('usage: zeus graph-mcp --graph <graph.json> [--log <file>]'); return 2; }
+      const li = rest.indexOf('--log');
+      serveGraphMcp({ graphPath: g, logPath: li >= 0 ? rest[li + 1] ?? null : null });
+      return new Promise<number>(() => { /* runs until the parent closes stdin */ });
+    }
     case 'version': case '--version': case '-v': out(VERSION); return 0;
     case 'help': case '--help': case '-h': case undefined: usage(); return 0;
     case 'run': return cmdRun(rest);

@@ -1,0 +1,328 @@
+/**
+ * Repository intelligence: the graph, the tools over it, and the rule that a
+ * stale or missing graph must never be dressed up as knowledge.
+ */
+
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { execFileSync } from 'child_process';
+import { check, section } from './harness';
+import * as q from '../src/graph/query';
+import type { Graph } from '../src/graph/query';
+import { atLeast, graphDirFor, readState, loadGraph } from '../src/graph/graphify';
+import { TOOLS, callTool, PROTOCOL } from '../src/graph/mcp';
+import { repoIndex, intelSection, readGraphOps, renderEvidence } from '../src/graph/intel';
+import { toolsFor, graphToolIds } from '../src/engine/providers';
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-graph-'));
+
+/** The fixture from the requirement: a frontend in app/, a backend in api/. */
+const FIXTURE: Graph = {
+  nodes: [
+    { id: 'app_src_landing', label: 'landing.jsx', source_file: 'app/src/landing.jsx', source_location: 'L1' },
+    { id: 'app_src_landing_landing', label: 'Landing()', source_file: 'app/src/landing.jsx', source_location: 'L3' },
+    { id: 'app_src_shell', label: 'shell.jsx', source_file: 'app/src/shell.jsx', source_location: 'L1' },
+    { id: 'app_src_content', label: 'content.js', source_file: 'app/src/content.js', source_location: 'L1' },
+    { id: 'app_pkg', label: 'app/package.json', source_file: 'app/package.json', source_location: 'L1' },
+    { id: 'app_pkg_build', label: 'build', source_file: 'app/package.json', source_location: 'L1' },
+    { id: 'api_src_server', label: 'server.js', source_file: 'api/src/server.js', source_location: 'L1' },
+    { id: 'api_pkg_test', label: 'test', source_file: 'api/package.json', source_location: 'L1' },
+  ],
+  edges: [
+    { source: 'app_src_landing', target: 'app_src_shell', relation: 'imports_from',
+      confidence: 'EXTRACTED', source_file: 'app/src/landing.jsx', source_location: 'L1' },
+    { source: 'app_src_landing', target: 'app_src_content', relation: 'imports_from',
+      confidence: 'EXTRACTED', source_file: 'app/src/landing.jsx', source_location: 'L2' },
+    { source: 'app_src_landing', target: 'app_src_landing_landing', relation: 'contains',
+      confidence: 'EXTRACTED', source_file: 'app/src/landing.jsx', source_location: 'L3' },
+    { source: 'app_pkg', target: 'app_pkg_build', relation: 'contains', confidence: 'EXTRACTED',
+      source_file: 'app/package.json', source_location: 'L1' },
+  ],
+};
+
+export async function graphSuite(): Promise<void> {
+  section('graph queries: the six questions, answered from the artifact');
+  {
+    check('GQ1: a concept finds the file, not just an exact id',
+      q.search(FIXTURE, 'landing page').some((h) => h.file === 'app/src/landing.jsx'),
+      JSON.stringify(q.search(FIXTURE, 'landing page').slice(0, 2)));
+    check('GQ2: dependencies walk FORWARD — the question graphify cannot answer',
+      q.dependencies(FIXTURE, 'landing.jsx').map((h) => h.label).sort().join(',')
+        === 'content.js,shell.jsx',
+      JSON.stringify(q.dependencies(FIXTURE, 'landing.jsx')));
+    check('GQ3: dependents walk BACK',
+      q.dependents(FIXTURE, 'shell.jsx').map((h) => h.label).join(',') === 'landing.jsx',
+      JSON.stringify(q.dependents(FIXTURE, 'shell.jsx')));
+    // `contains` is structure, not dependency. A file does not depend on its
+    // own functions, and letting it through makes every file look like it has
+    // as many dependencies as it has symbols.
+    check('GQ4: containment is NOT a dependency',
+      !q.dependencies(FIXTURE, 'landing.jsx').some((h) => h.label === 'Landing()'),
+      'contains is excluded from reach');
+    check('GQ5: but containment IS a neighbour',
+      q.neighbors(FIXTURE, 'landing.jsx').some((h) => h.label === 'Landing()'),
+      'neighbours include structure');
+    check('GQ6: references carry file AND line, so the agent knows what to Read',
+      q.references(FIXTURE, 'shell.jsx')[0]?.location === 'L1'
+      && q.references(FIXTURE, 'shell.jsx')[0]?.file === 'app/src/landing.jsx',
+      JSON.stringify(q.references(FIXTURE, 'shell.jsx')));
+    check('GQ7: a path is a chain of named relations, not a bare node list',
+      q.path(FIXTURE, 'landing.jsx', 'shell.jsx')?.[0]?.relation === 'imports_from',
+      JSON.stringify(q.path(FIXTURE, 'landing.jsx', 'shell.jsx')));
+    check('GQ8: an unconnected pair is null, not an empty path',
+      q.path(FIXTURE, 'landing.jsx', 'nothing-like-this-exists') === null, 'null for no route');
+    check('GQ9: confidence survives, so INFERRED can be weighed against EXTRACTED',
+      q.dependencies(FIXTURE, 'landing.jsx').every((h) => h.confidence === 'EXTRACTED'),
+      'confidence carried');
+  }
+
+  section('graph tools: an empty answer must not read as a finding');
+  {
+    check('GT1: every tool the prompt advertises actually exists',
+      ['graph_search', 'graph_dependencies', 'graph_dependents', 'graph_neighbors',
+        'graph_references', 'graph_path'].every((n) => TOOLS.some((t) => t.name === n)),
+      TOOLS.map((t) => t.name).join(','));
+    check('GT2: each declares a schema, or the CLI cannot offer it',
+      TOOLS.every((t) => !!(t.inputSchema as any).properties), 'schemas present');
+
+    // "[]" reads to a model as "nothing depends on this" — a finding. "No node
+    // matched" is an instruction to look differently. The difference decides
+    // whether the agent keeps investigating or reports a false conclusion.
+    const miss = callTool(FIXTURE, 'graph_search', { term: 'zzz-not-here' });
+    check('GT3: a miss SAYS it is a miss rather than returning an empty list',
+      miss.results === 0 && /not that\s+nothing exists/.test(miss.text)
+      && /Grep\/Glob/.test(miss.text), miss.text.slice(0, 120));
+    check('GT4: and it points at the source, which is the source of truth',
+      /source of truth/.test(miss.text), 'source named');
+    const hit = callTool(FIXTURE, 'graph_search', { term: 'landing' });
+    check('GT5: a hit returns JSON an agent can parse, not prose',
+      hit.results > 0 && Array.isArray(JSON.parse(hit.text)), 'parseable');
+    const nopath = callTool(FIXTURE, 'graph_path', { from: 'landing.jsx', to: 'server.js' });
+    check('GT6: an absent path explains itself too',
+      /No path found/.test(nopath.text) && /graph_search first/.test(nopath.text),
+      nopath.text.slice(0, 80));
+    check('GT7: an unknown tool is refused, not silently empty',
+      callTool(FIXTURE, 'graph_invented', {}).ok === false, 'refused');
+    check('GT8: the protocol version is pinned, not improvised',
+      /^\d{4}-\d{2}-\d{2}$/.test(PROTOCOL), PROTOCOL);
+  }
+
+  section('graph permissions: read-only stays read-only');
+  {
+    // Adding a tool must not widen what a critic can do. This is safe by
+    // construction — the MCP server opens graph.json and a log and has no
+    // path that writes — but the flag has to agree with the construction.
+    const ro = toolsFor(true, { command: 'node', args: [], logPath: null });
+    const rw = toolsFor(false, { command: 'node', args: [], logPath: null });
+    check('GP1: a read-only role gains graph tools',
+      graphToolIds().every((t) => ro.includes(t)), ro.join(' '));
+    check('GP2: and gains NO write tools with them',
+      !ro.includes('Edit') && !ro.includes('Write'), ro.join(' '));
+    check('GP3: a writing role keeps its write tools',
+      rw.includes('Edit') && rw.includes('Write'), rw.join(' '));
+    check('GP4: with no graph, no graph tools are offered at all',
+      toolsFor(true, null).every((t) => !t.startsWith('mcp__')),
+      toolsFor(true, null).join(' '));
+  }
+
+  section('graph isolation: one graph per project AND per revision');
+  {
+    const root = path.join(TMP, 'state');
+    const a1 = graphDirFor(root, 'alpha', 'aaaaaaaaaaaa');
+    const b1 = graphDirFor(root, 'beta', 'aaaaaaaaaaaa');
+    const a2 = graphDirFor(root, 'alpha', 'bbbbbbbbbbbb');
+    check('GI1: two projects at the same revision do not share a graph',
+      a1 !== b1, `${a1} vs ${b1}`);
+    check('GI2: one project at two revisions does not share a graph either',
+      a1 !== a2, `${a1} vs ${a2}`);
+    // A reviewer reads a task worktree while a planner reads the mission base.
+    // A single graph per project would hand one of them a map of the other's
+    // code with nothing in the answer revealing which.
+    check('GI3: the revision is IN the path, so the wrong graph is unreachable',
+      a1.includes('aaaaaaaaaaaa') && a2.includes('bbbbbbbbbbbb'), a1);
+    // The property is containment, not the absence of dots: "..~..~etc" is a
+    // single harmless directory NAME. What actually escapes is a segment that
+    // IS "..", and a character class permitting dots passes it through whole.
+    const under = (id: string, rev: string) => {
+      const resolved = path.resolve(graphDirFor(root, id, rev));
+      return resolved.startsWith(path.resolve(root) + path.sep);
+    };
+    check('GI4: a project id with separators cannot leave the state root',
+      under('../../etc', 'aaaaaaaaaaaa'), graphDirFor(root, '../../etc', 'aaaaaaaaaaaa'));
+    check('GI5: nor can one that is nothing but dots',
+      under('..', 'aaaaaaaaaaaa') && under('.', 'aaaaaaaaaaaa'),
+      graphDirFor(root, '..', 'aaaaaaaaaaaa'));
+    check('GI6: nor can a revision that is nothing but dots',
+      under('p', '..') && under('p', '.'), graphDirFor(root, 'p', '..'));
+  }
+
+  section('graph staleness: the caller names the revision it needs');
+  {
+    const root = path.join(TMP, 'stale');
+    const rev = 'cccccccccccc';
+    const dir = graphDirFor(root, 'p', rev);
+    fs.mkdirSync(path.join(dir, 'graphify-out'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'graphify-out', 'graph.json'), JSON.stringify(FIXTURE));
+
+    fs.writeFileSync(path.join(dir, 'zeus-index.json'),
+      JSON.stringify({ revision: rev, nodes: 8, edges: 4, at: '2026-01-01T00:00:00Z', ms: 12 }));
+    const fresh = readState(root, 'p', rev, rev);
+    check('GS1: a graph built for this revision is current',
+      fresh.present && !fresh.stale && fresh.fault === null, JSON.stringify(fresh));
+
+    fs.writeFileSync(path.join(dir, 'zeus-index.json'),
+      JSON.stringify({ revision: 'dddddddddddd', nodes: 8, edges: 4, at: '2026-01-01T00:00:00Z', ms: 12 }));
+    const stale = readState(root, 'p', rev, rev);
+    check('GS2: a graph built for another revision is STALE and says which',
+      stale.stale && stale.fault === 'GRAPHIFY_GRAPH_STALE'
+      && stale.detail.includes('dddddddddddd'), JSON.stringify(stale));
+    check('GS3: an absent graph is absent, not empty',
+      !readState(root, 'p', 'eeeeeeeeeeee', 'eeeeeeeeeeee').present, 'no graph yet');
+    check('GS4: a corrupt graph.json loads as null rather than as an empty graph',
+      loadGraph(path.join(TMP, 'nope.json')) === null, 'null not {nodes:[],edges:[]}');
+  }
+
+  section('repository index: orientation that costs no model call');
+  {
+    const repo = path.join(TMP, 'repo');
+    fs.mkdirSync(path.join(repo, 'app', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'api', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'node_modules', 'junk'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'app', 'package.json'),
+      JSON.stringify({ name: 'app', scripts: { build: 'vite build' } }));
+    fs.writeFileSync(path.join(repo, 'api', 'package.json'),
+      JSON.stringify({ name: 'api', scripts: { test: 'jest' } }));
+    fs.writeFileSync(path.join(repo, 'app', 'src', 'landing.jsx'), 'export const L = 1;\n');
+    fs.writeFileSync(path.join(repo, 'node_modules', 'junk', 'index.js'), 'module.exports=1;\n');
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    fs.writeFileSync(path.join(repo, '.gitignore'), 'node_modules\n');
+    execFileSync('git', ['-C', repo, 'add', '-A']);
+    execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit', '-qm', 'init']);
+
+    const ix = repoIndex(repo, 'abc123');
+    check('RIX1: both top-level packages are found',
+      ix.directories.includes('app') && ix.directories.includes('api'),
+      ix.directories.join(','));
+    // node_modules is not the repository. A tree that drowns app/src in
+    // dependency paths orients nobody.
+    check('RIX2: untracked dependency trees are not the repository',
+      !ix.directories.includes('node_modules'), ix.directories.join(','));
+    check('RIX3: the manifests carry their SCRIPTS — which is where build commands live',
+      ix.manifests.find((m) => m.file === 'app/package.json')?.scripts?.build === 'vite build',
+      JSON.stringify(ix.manifests));
+    check('RIX4: and the api scripts are told apart from the app ones',
+      ix.manifests.find((m) => m.file === 'api/package.json')?.scripts?.test === 'jest',
+      JSON.stringify(ix.manifests));
+  }
+
+  section('the prompt may not claim intelligence it does not have');
+  {
+    const ix = repoIndex(TMP, 'abc123');
+    const ready = intelSection({ projectId: 'p', index: ix, graphAvailable: true,
+      graphifyVersion: '0.9.49',
+      graph: { projectId: 'p', indexedRevision: 'abc123', currentRevision: 'abc123',
+        graphPath: '/g', present: true, stale: false, nodes: 9, edges: 4,
+        indexedAt: null, indexMs: 5, fault: null, detail: 'ok' } });
+    check('IS1: a ready graph is announced with its revision and size',
+      /Graphify: AVAILABLE/.test(ready) && /Graph status: READY/.test(ready)
+      && /Indexed revision: abc123/.test(ready), 'announced');
+    check('IS2: the source-of-truth rule is stated, not implied',
+      /SOURCE OF\s*\n?TRUTH/.test(ready) && /trust the source/.test(ready),
+      'rule present');
+    check('IS3: repeated exploration is explicitly permitted',
+      /repeatedly/.test(ready) && /no limit/i.test(ready), 'no arbitrary cap implied');
+    check('IS4: and bounded by budget rather than by a turn count',
+      /cost and time budget/.test(ready) && !/maximum \d+ (queries|calls)/i.test(ready),
+      'budget-bounded');
+
+    const blind = intelSection({ projectId: 'p', index: ix, graphAvailable: false,
+      graphifyVersion: null,
+      graph: { projectId: 'p', indexedRevision: null, currentRevision: 'abc123',
+        graphPath: '', present: false, stale: true, nodes: 0, edges: 0,
+        indexedAt: null, indexMs: null, fault: 'GRAPHIFY_INDEX_FAILED',
+        detail: 'extract exited 1' } });
+    // A prompt announcing repository intelligence over a graph that is not
+    // attached teaches the model to trust a tool that answers emptily.
+    check('IS5: with no graph the prompt says UNAVAILABLE',
+      /Graphify: UNAVAILABLE/.test(blind) && !/Graphify: AVAILABLE/.test(blind), 'honest');
+    check('IS6: it names the fault rather than going quiet',
+      /GRAPHIFY_INDEX_FAILED/.test(blind), 'fault named');
+    check('IS7: and it does NOT advertise tools the call does not hold',
+      !/graph_search /.test(blind), 'no phantom tools');
+    check('IS8: it tells the agent to say what it could not verify',
+      /could not verify/.test(blind), 'admission required');
+  }
+
+  section('evidence is derived from what ran, not from what was claimed');
+  {
+    const log = path.join(TMP, 'ev.jsonl');
+    fs.writeFileSync(log, [
+      JSON.stringify({ at: '2026-01-01T00:00:00Z', tool: 'graph_search',
+        args: { term: 'landing page' }, ok: true, results: 3, ms: 8 }),
+      JSON.stringify({ at: '2026-01-01T00:00:01Z', tool: 'graph_dependencies',
+        args: { term: 'landing.jsx' }, ok: true, results: 2, ms: 4 }),
+      '{ this line is torn',
+    ].join('\n') + '\n');
+    const ops = readGraphOps(log);
+    check('EV1: the manifest comes from the server’s log',
+      ops.length === 2 && ops[0].tool === 'graph_search', JSON.stringify(ops));
+    check('EV2: a torn line is skipped rather than believed',
+      ops.every((o) => !!o.tool), 'no partial record survives');
+    check('EV3: no log means no evidence — never assumed evidence',
+      readGraphOps(path.join(TMP, 'absent.jsonl')).length === 0
+      && readGraphOps(null).length === 0, 'absence is not evidence');
+    const rendered = renderEvidence({ graphQueries: ops, filesRead: ['app/src/landing.jsx'],
+      grepQueries: ['i18n'], revision: 'abc123', graphAttached: true }).join('\n');
+    check('EV4: the rendered manifest shows the query, its size and its cost',
+      /graph_search "landing page" — 3 result\(s\), 8ms/.test(rendered), rendered);
+    check('EV5: and the revision it all applies to',
+      /Repository revision: abc123/.test(rendered), rendered);
+  }
+
+  section('the behaviour that motivated all of this');
+  {
+    // talkbridge/M-0016 compiled a contract for "add multi language feature to
+    // landing page" and attached an api/ typecheck to a frontend change,
+    // because the api command was the only verification it had been handed.
+    // The graph makes the frontend discoverable BEFORE the contract is written.
+    const found = q.search(FIXTURE, 'landing page');
+    check('M16-1: the goal’s subject resolves to the frontend package',
+      found[0]?.file?.startsWith('app/'), JSON.stringify(found[0]));
+    check('M16-2: and NOT to the backend that happened to own the known command',
+      !found.some((h) => h.file?.startsWith('api/')), JSON.stringify(found));
+
+    const deps = q.dependencies(FIXTURE, 'landing.jsx');
+    check('M16-3: its real dependencies are reachable in one hop',
+      deps.some((d) => d.label === 'shell.jsx') && deps.some((d) => d.label === 'content.js'),
+      JSON.stringify(deps));
+
+    const repo = path.join(TMP, 'repo');
+    const ix = repoIndex(repo, 'abc123');
+    const appBuild = ix.manifests.find((m) => m.file === 'app/package.json')?.scripts?.build;
+    const apiTest = ix.manifests.find((m) => m.file === 'api/package.json')?.scripts?.test;
+    check('M16-4: the frontend’s OWN verification command is discoverable',
+      appBuild === 'vite build', String(appBuild));
+    check('M16-5: told apart from the backend’s, which is the mistake M-0016 made',
+      apiTest === 'jest' && appBuild !== apiTest, `${appBuild} vs ${apiTest}`);
+
+    // The package-script VALUE is not in the graph — graphify records the key
+    // as a node and stops there. So "which command verifies the frontend" is
+    // answerable only by reading the manifest, which is exactly why the graph
+    // is navigation and the source is truth.
+    check('M16-6: the graph names the script but not its command — source is truth',
+      FIXTURE.nodes.some((n) => n.label === 'build')
+      && !FIXTURE.nodes.some((n) => n.label === 'vite build'),
+      'the graph points; the file answers');
+  }
+
+  section('version compatibility is compared, not string-matched');
+  {
+    check('GV1: a newer patch satisfies a minimum', atLeast('0.9.49', '0.9.0'));
+    check('GV2: an older minor does not', !atLeast('0.8.99', '0.9.0'));
+    check('GV3: equal satisfies', atLeast('0.9.0', '0.9.0'));
+    check('GV4: a longer version is compared numerically, not lexically',
+      atLeast('0.10.0', '0.9.0'), '0.10.0 > 0.9.0');
+  }
+}

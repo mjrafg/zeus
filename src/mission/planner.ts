@@ -723,7 +723,11 @@ export async function critiquePlan(input: {
  * seen.
  */
 export interface PlanAcceptance {
-  decision: 'REJECT' | 'STOP' | 'FLOW';
+  /**
+   * UNCRITIQUED is not a verdict about the plan. It means Zeus could not obtain
+   * one, which is a different thing and must not be answered by planning again.
+   */
+  decision: 'REJECT' | 'STOP' | 'FLOW' | 'UNCRITIQUED';
   blocking: PlanCriticFinding[];
   advisory: PlanCriticFinding[];
   reasons: string[];
@@ -731,8 +735,18 @@ export interface PlanAcceptance {
 
 export function planAcceptance(critique: PlanCritique): PlanAcceptance {
   if (!critique.valid) {
-    return { decision: 'REJECT', blocking: [], advisory: [],
-      reasons: ['the critique payload was contaminated, so there is no second opinion'] };
+    // NOT a rejection, though it was one until M-0027 spent four planner calls
+    // proving otherwise. A contaminated payload is a fault in how ZEUS
+    // assembled the critique, not in the plan: the next plan's payload is
+    // assembled the same way and is contaminated identically. Returning REJECT
+    // fed that into the automatic-replan loop, which burned all three attempts
+    // and real money re-planning against a fault no plan could fix — and every
+    // round reported "the critic rejected plan vN", which was never true. The
+    // critic never saw a plan.
+    return { decision: 'UNCRITIQUED', blocking: [], advisory: [],
+      reasons: ['Zeus could not obtain a second opinion: the critique payload was '
+        + 'refused before it reached the critic. Planning again cannot fix this — '
+        + 'the fault is in Zeus, not in the plan.'] };
   }
   const blocking = critique.findings.filter((f) => f.severity === 'BLOCKING');
   const advisory = critique.findings.filter((f) => f.severity !== 'BLOCKING');

@@ -420,9 +420,17 @@ export async function executionSuite(): Promise<void> {
       criticProviderId: 'mock', infrastructureFailure: null,
     });
 
-    check('M3-4: a contaminated critique is not a second opinion, so the plan is rejected',
-      contaminated.decision === 'REJECT'
-      && contaminated.reasons[0].includes('contaminated'), JSON.stringify(contaminated));
+    // The property is that a contaminated critique is NOT a second opinion, so
+    // the plan cannot flow. It used to be pinned as REJECT, and that conflation
+    // was the bug: REJECT drives the automatic-replan loop, and M-0027 spent
+    // three replans and real money re-planning against a fault in Zeus's own
+    // payload that no plan could answer.
+    check('M3-4: a contaminated critique is not a second opinion, so the plan cannot flow',
+      contaminated.decision !== 'FLOW'
+      && contaminated.reasons[0].includes('second opinion'), JSON.stringify(contaminated));
+    check('M3-4a: and it is told apart from a plan the critic actually rejected',
+      contaminated.decision === 'UNCRITIQUED' && blocking.decision === 'REJECT',
+      `${contaminated.decision} vs ${blocking.decision}`);
     check('M3-4b: a BLOCKING finding rejects the plan outright',
       blocking.decision === 'REJECT' && blocking.blocking.length === 1);
     check('M3-4c: a non-blocking finding STOPS rather than flowing',

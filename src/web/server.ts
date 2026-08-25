@@ -378,6 +378,27 @@ export function blockedBy(missions: MissionRegistry, missionId: string): {
   const exhausted = usage.autoPlanRecompiles >= budgets.maxPlanRecompiles;
   const affordable = !checkMissionBudgets(budgets, usage);
 
+  // A critique that never happened is not a rejected plan, and telling someone
+  // "the critic rejected plan v4" when the critic never saw a plan sends them
+  // to fix the wrong thing. M-0027 said exactly that four times.
+  if (cp.acceptance === 'UNCRITIQUED' || (cp.contaminated && cp.acceptance !== 'FLOW')) {
+    return {
+      reason: 'PLAN_UNCRITIQUED',
+      detail: `Zeus could not obtain an independent critique of plan v${version}: `
+        + `${cp.contaminationDetail ?? 'the critique payload was refused'}. `
+        + 'The plan itself was never reviewed. This is a fault in Zeus, not in the '
+        + 'plan — planning again will produce the same result.',
+      findings: [],
+      // Planning again is not the fix here, so it is not offered as one.
+      canPlanAgain: false,
+      options: [
+        'report this — the critique payload is being assembled wrongly',
+        'accept the plan without a second opinion, if you have read it yourself',
+        'cancel the mission',
+      ],
+    };
+  }
+
   if (cp.acceptance === 'REJECT') {
     return {
       reason: exhausted ? 'REJECTED_AND_EXHAUSTED' : 'PLAN_REJECTED',

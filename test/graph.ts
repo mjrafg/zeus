@@ -17,7 +17,8 @@ import { bootstrapArgv, probe } from '../src/graph/access';
 import { toolsFor, graphToolIds, MCP_CAPABLE } from '../src/engine/providers';
 import { assemble } from '../src/mission/context';
 import { proposeAcceptance } from '../src/mission/compile';
-import { ORACLE_CRITIQUE_POLICY } from '../src/engine/reviewcontext';
+import { ORACLE_CRITIQUE_POLICY, PLAN_CRITIQUE_POLICY } from '../src/engine/reviewcontext';
+import { planAcceptance } from '../src/mission/planner';
 import type { Criterion } from '../src/mission/oracle';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-graph-'));
@@ -591,6 +592,58 @@ export async function graphSuite(): Promise<void> {
       ORACLE_CRITIQUE_POLICY.forbidden.includes('critic-verdict' as any), 'still blind to verdicts');
     check('OC4: and the reason it is allowed is written down',
       /Orientation, not argument/.test(rc), 'the distinction is explained');
+  }
+
+  section('replanning cannot fix a fault in Zeus’s own payload');
+  {
+    // M-0027 spent four planner calls and real money proving this. The plan
+    // critic's payload was contaminated by a section Zeus itself added, which
+    // returned REJECT, which fed the automatic-replan loop — and every new
+    // plan's payload was contaminated identically. Three replans, zero
+    // critiques, and each round reported "the critic rejected plan vN" when
+    // the critic had never seen a plan.
+    const contaminated = planAcceptance({ valid: false, findings: [] } as any);
+    check('PCR1: a contaminated payload is NOT reported as a rejected plan',
+      contaminated.decision === 'UNCRITIQUED', contaminated.decision);
+    check('PCR2: and it says the fault is in Zeus, not in the plan',
+      contaminated.reasons.join(' ').includes('the fault is in Zeus'),
+      contaminated.reasons.join(' '));
+    check('PCR3: it does not pretend there were findings',
+      contaminated.blocking.length === 0 && contaminated.advisory.length === 0,
+      'no invented findings');
+
+    // The replan loop fires on REJECT. UNCRITIQUED must fall outside it, or
+    // the loop runs again against a fault no plan can answer.
+    const ops = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    check('PCR4: the automatic-replan loop still fires only on REJECT',
+      /acceptance\.decision === 'REJECT'/.test(ops)
+      && !/acceptance\.decision === 'UNCRITIQUED'/.test(ops),
+      'UNCRITIQUED is outside the loop');
+
+    // Still not acceptable, either — an uncritiqued plan has had no second
+    // opinion, and that is the thing acceptance rests on.
+    const clean = planAcceptance({ valid: true, findings: [] } as any);
+    check('PCR5: a real clean critique still flows',
+      clean.decision === 'FLOW', clean.decision);
+    check('PCR6: a blocking finding still rejects, and CAN be replanned',
+      planAcceptance({ valid: true,
+        findings: [{ severity: 'BLOCKING', code: 'X', detail: 'd' }] } as any)
+        .decision === 'REJECT', 'real rejections are unchanged');
+
+    const srv = fs.readFileSync(path.join(__dirname, '..', 'src', 'web', 'server.ts'), 'utf8');
+    check('PCR7: the console does not offer replanning as the fix',
+      /PLAN_UNCRITIQUED/.test(srv) && /canPlanAgain: false/.test(srv),
+      'not offered as a remedy');
+    check('PCR8: and it says the plan was never reviewed',
+      /The plan itself was never reviewed/.test(srv), 'stated plainly');
+
+    check('PCR9: the plan critic may see the repository index',
+      PLAN_CRITIQUE_POLICY.allowed.includes('repository-intelligence' as any),
+      PLAN_CRITIQUE_POLICY.allowed.join(', '));
+    check('PCR10: but still not the planner’s reasoning',
+      PLAN_CRITIQUE_POLICY.forbidden.includes('planner-reasoning' as any)
+      && PLAN_CRITIQUE_POLICY.forbidden.includes('planner-transcript' as any),
+      'the real contamination is still forbidden');
   }
 
   section('version compatibility is compared, not string-matched');

@@ -94,7 +94,11 @@ export const ORACLE_JUDGE_POLICY: ReviewContextPolicy = {
  */
 export const PLAN_CRITIQUE_POLICY: ReviewContextPolicy = {
   allowed: ['mission-goal', 'accepted-criteria', 'task-plan', 'project-commands',
-    'evidence-summary', 'validator-findings'],
+    'evidence-summary', 'validator-findings',
+    // Same reasoning as the oracle critic: orientation, not argument. A plan
+    // critic that cannot see the repository can only check a plan against the
+    // plan's own description of it.
+    'repository-intelligence'],
   forbidden: [
     'planner-transcript', 'planner-reasoning', 'planner-plan', 'critic-verdict',
     'compiler-transcript', 'compiler-reasoning', 'judge-verdict',

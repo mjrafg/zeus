@@ -259,7 +259,20 @@ export function providerReportedError(structured: Record<string, unknown> | null
   if (typeof s.terminal_reason === 'string' && !/completed|end_turn|success/i.test(s.terminal_reason)) {
     parts.push(`terminal_reason=${s.terminal_reason}`);
   }
-  if (Array.isArray(s.permission_denials) && s.permission_denials.length) {
+  // A DENIAL IS A BOUNDARY THAT HELD, not a call that failed.
+  //
+  // It used to be fatal on its own. The chat front door — which deliberately
+  // has no Bash — reached for a shell, was refused, carried on with the tools
+  // it does have, made seven successful state and graph calls and produced a
+  // decision. That whole answer was thrown away and reported as
+  // PROVIDER_ERROR: permission_denials=2, which described the sandbox working
+  // as though it were the sandbox breaking.
+  //
+  // So a denial only DECORATES a call that failed for some other reason. It is
+  // recorded in the diagnostics either way, and a call that produced nothing
+  // usable still fails on its own account: an empty structured reply cannot be
+  // parsed into a decision whatever the denial count says.
+  if (Array.isArray(s.permission_denials) && s.permission_denials.length && parts.length) {
     parts.push(`permission_denials=${s.permission_denials.length}`);
   }
   return parts.length ? parts.join(' ') : null;

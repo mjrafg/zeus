@@ -209,8 +209,23 @@ export async function auditRegressionSuite(): Promise<void> {
       providerReportedError(success as any) === null);
     check('R-P3: an absent opinion is not read as failure',
       providerReportedError({} as any) === null && providerReportedError(null) === null);
-    check('R-P4: permission denials are surfaced',
-      providerReportedError({ permission_denials: [{ tool: 'Bash' }] } as any) !== null);
+    // A DENIAL IS A BOUNDARY THAT HELD. It used to be fatal on its own, and the
+    // chat front door — which deliberately has no Bash — reached for a shell,
+    // was refused, carried on with the tools it does have, made seven
+    // successful calls and produced a decision. All of it was discarded and
+    // reported as PROVIDER_ERROR: permission_denials=2, describing the sandbox
+    // working as though it were the sandbox breaking.
+    const deniedOnly = { permission_denials: [{ tool: 'Bash' }] };
+    const deniedAndFailed = { ...apiError, permission_denials: [{ tool: 'Bash' }] };
+    check('R-P4: a denial on an otherwise clean call is NOT an infrastructure failure',
+      providerReportedError(deniedOnly as any) === null,
+      String(providerReportedError(deniedOnly as any)));
+    check('R-P4b: but it decorates a call that failed for another reason',
+      /permission_denials=1/.test(String(providerReportedError(deniedAndFailed as any))),
+      String(providerReportedError(deniedAndFailed as any)));
+    check('R-P4c: and it is recorded in the diagnostics either way',
+      Array.isArray((providerDiagnostics(deniedOnly as any) as any).permission_denials),
+      JSON.stringify(providerDiagnostics(deniedOnly as any)));
     check('R-P5: the reason names the field, so an operator can act on it',
       /api_error_status=529/.test(String(providerReportedError(apiError as any))));
 

@@ -218,6 +218,9 @@ export async function frontDoorSuite(): Promise<void> {
       /DO NOT FABRICATE/.test(FRONT_DOOR_HEADER), 'stated');
     check('FD38: the graph is navigation and source is truth',
       /THE GRAPH IS NAVIGATION\. THE SOURCE IS TRUTH/.test(FRONT_DOOR_HEADER), 'stated');
+    check('FD38b: and it is told it has no shell, so it stops reaching for one',
+      /YOU HAVE NO SHELL/.test(FRONT_DOOR_HEADER)
+      && /Reaching for a shell wastes a turn/.test(FRONT_DOOR_HEADER), 'stated');
     check('FD39: tools only when they change the answer',
       /USE TOOLS ONLY WHEN THEY CAN CHANGE YOUR ANSWER/.test(FRONT_DOOR_HEADER), 'stated');
     check('FD40: the message is delivered under its own heading',

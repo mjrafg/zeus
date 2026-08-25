@@ -989,6 +989,9 @@ function connectStream() {
   ES.addEventListener('${SSE_CHANNEL}', (ev) => {
     LAST = ev.lastEventId || LAST;
     let e; try { e = JSON.parse(ev.data); } catch { return; }
+    // The chat stream carries the front door's own calls. While one is open,
+    // its progress belongs in the chat rather than only in the event feed.
+    if (String(e.taskId).split('/').pop() === 'CHAT') notePending(e);
     const feed = $('feed');
     if (feed) {
       const mine = SEL && (e.taskId === SEL || String(e.taskId).startsWith(SEL));
@@ -1131,15 +1134,113 @@ function renderCard(card) {
   $('log').scrollTop = $('log').scrollHeight;
 }
 
+/**
+ * The pending front-door call, so the wait is visible while it happens.
+ *
+ * Reading a message used to be a keyword match: instant, and a silent UI was
+ * fine because there was nothing to wait for. A model reads it now, with
+ * tools, and that takes tens of seconds to minutes. The chat showed NOTHING
+ * for the whole of it — no bubble, no spinner, no event — so a working system
+ * was indistinguishable from a broken one, and the honest reaction was to
+ * press send again and pay twice.
+ */
+let PENDING = null;
+
+function startPending() {
+  const d = bubble('', false);
+  d.className = 'msg pending';
+  const began = Date.now();
+  PENDING = { el: d, began, tools: [], stage: 'sending' };
+  const paint = () => {
+    if (!PENDING || PENDING.el !== d) return;
+    const secs = Math.round((Date.now() - began) / 1000);
+    let h = '<span class="dim">' + esc(PENDING.stage) + ' · ' + secs + 's</span>';
+    if (PENDING.tools.length) {
+      h += '<ol class="graphops">';
+      for (const t of PENDING.tools.slice(-8)) {
+        h += '<li><span class="who">' + esc(t) + '</span></li>';
+      }
+      h += '</ol>';
+    }
+    // Said once, after long enough that a person starts to wonder.
+    if (secs > 20) {
+      h += '<div class="meta dim">the front door reads your message with the '
+        + 'repository tools before deciding; this can take a minute or two</div>';
+    }
+    d.innerHTML = h;
+    $('log').scrollTop = $('log').scrollHeight;
+  };
+  paint();
+  PENDING.timer = setInterval(paint, 1000);
+  return PENDING;
+}
+
+function endPending() {
+  if (!PENDING) return;
+  clearInterval(PENDING.timer);
+  PENDING.el.remove();
+  PENDING = null;
+}
+
+/** Front-door progress arriving on the chat stream, while the call is open. */
+function notePending(e) {
+  if (!PENDING) return;
+  const p = e.payload || {};
+  if (e.type === 'MODEL_CALL_STARTED' && p.stage === 'front-door') {
+    PENDING.stage = 'reading with ' + (p.configuredModel || p.provider || 'the front door');
+  } else if (e.type === 'MODEL_CALL_FINISHED' && p.stage === 'front-door') {
+    PENDING.stage = 'deciding';
+    for (const op of (p.graphOps || [])) PENDING.tools.push(op.tool);
+  } else if (e.type === 'FRONT_DOOR_DECISION') {
+    PENDING.stage = 'decided ' + (p.intent || '');
+  }
+}
+
 async function send() {
   const text = $('say').value.trim();
   if (!text) return;
   $('say').value = '';
   bubble(esc(text), true);
-  const r = await apiPost('/chat', { message: text });
-  if (!r.json) { bubble('<span class="bad">no answer</span>', false); return; }
-  if (r.json.answer) renderAnswer(r.json.answer);
-  if (r.json.card) renderCard(r.json.card);
+  // Disabled while a call is open: a second send is a second model call and a
+  // second bill, for a question already being answered.
+  $('send').disabled = true;
+  $('say').disabled = true;
+  startPending();
+  let r;
+  try {
+    r = await apiPost('/chat', { message: text });
+  } finally {
+    endPending();
+    $('send').disabled = false;
+    $('say').disabled = false;
+    $('say').focus();
+  }
+  if (!r || !r.json) { bubble('<span class="bad">no answer</span>', false); return; }
+  const j = r.json;
+
+  // What it decided and why, before whatever it produced. A decision the person
+  // can disagree with is better than one that only shows its consequences.
+  const fd = j.frontDoor;
+  if (fd && fd.summary) {
+    bubble('<span class="dim">' + esc(String(j.intent || fd.intent))
+      + (typeof fd.confidence === 'number' ? ' · confidence ' + fd.confidence : '')
+      + '</span><br>' + esc(fd.summary), false);
+  }
+  if (j.degraded) {
+    bubble('<span class="bad">Zeus could not decide what this asks for: '
+      + esc(j.degraded.reason) + '</span><br>'
+      + esc(String(j.degraded.detail).slice(0, 300)), false);
+  }
+  if (fd && fd.readings && fd.readings.length) {
+    let h = '<b>Which did you mean?</b><ul class="graphops">';
+    for (const x of fd.readings) {
+      h += '<li><span class="who">' + esc(x.intent) + '</span> ' + esc(x.reading) + '</li>';
+    }
+    h += '</ul><span class="dim">Say which one and I will take it from there.</span>';
+    bubble(h, false);
+  }
+  if (j.answer) renderAnswer(j.answer);
+  if (j.card) renderCard(j.card);
 }
 
 async function loadChat() {

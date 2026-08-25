@@ -331,6 +331,49 @@ export async function frontDoorSuite(): Promise<void> {
       JSON.stringify(dec.degraded));
   }
 
+  section('the front door: the wait is visible while it happens');
+  {
+    const ui = fs.readFileSync(path.join(__dirname, '..', 'src', 'web', 'ui.ts'), 'utf8');
+    // Reading a message used to be a keyword match: instant, and a silent UI
+    // was fine because there was nothing to wait for. A model reads it now,
+    // with tools, and that takes tens of seconds to minutes — during which the
+    // chat showed NOTHING. A working system was indistinguishable from a
+    // broken one, and the honest reaction was to press send again and pay
+    // twice.
+    check('FB1: send shows a pending bubble before it waits',
+      /startPending\(\);\s*\n\s*let r;/.test(ui), 'pending opened before the await');
+    check('FB2: with an elapsed second count that ticks',
+      /setInterval\(paint, 1000\)/.test(ui) && /Math\.round\(\(Date\.now\(\) - began\)/.test(ui),
+      'time visible');
+    check('FB3: and it is cleared in a finally, so a failure does not strand it',
+      /\} finally \{[\s\S]{0,120}endPending\(\);/.test(ui), 'cleared on both paths');
+    // A second send is a second model call and a second bill, for a question
+    // already being answered.
+    check('FB4: send is disabled while a call is open',
+      /\$\('send'\)\.disabled = true;/.test(ui) && /\$\('say'\)\.disabled = true;/.test(ui),
+      'no double-billing by accident');
+    check('FB5: and re-enabled in the same finally',
+      /endPending\(\);[\s\S]{0,160}\$\('send'\)\.disabled = false;/.test(ui), 're-enabled');
+    check('FB6: front-door events on the chat stream drive the pending bubble',
+      /if \(String\(e\.taskId\)\.split\('\/'\)\.pop\(\) === 'CHAT'\) notePending\(e\);/.test(ui),
+      'live progress');
+    check('FB7: the stage names the model actually reading',
+      /reading with ' \+ \(p\.configuredModel \|\| p\.provider/.test(ui), 'names the model');
+    check('FB8: after long enough it explains why it is slow',
+      /this can take a minute or two/.test(ui) && /secs > 20/.test(ui),
+      'explained, not just endured');
+
+    // The decision, before its consequences: a person can disagree with a
+    // reading only if they are shown it.
+    check('FB9: the intent and the reason are rendered, not just the card',
+      /confidence ' \+ fd\.confidence/.test(ui) && /esc\(fd\.summary\)/.test(ui),
+      'decision shown');
+    check('FB10: a degraded decision says so in the chat',
+      /Zeus could not decide what this asks for/.test(ui), 'failure is visible');
+    check('FB11: and an ambiguous one puts both readings to the person',
+      /Which did you mean\?/.test(ui), 'readings rendered');
+  }
+
   section('the front door: Zeus state is readable and nothing else');
   {
     check('FD42: the state tools are all reads',

@@ -27,6 +27,7 @@
 import * as fs from 'fs';
 import { loadGraph } from './graphify';
 import * as q from './query';
+import { STATE_TOOLS, callStateTool, type StateSource } from './state-tools';
 import type { Graph } from './query';
 
 export const PROTOCOL = '2024-11-05';
@@ -147,6 +148,14 @@ interface Req { id?: unknown; method?: string; params?: any }
  */
 export function serve(opts: {
   graphPath: string; logPath?: string | null;
+  /**
+   * When present, Zeus's own state is served alongside the graph.
+   *
+   * Same process on purpose: one read-only surface with one evidence log, so
+   * "what did this agent actually look at" has a single answer rather than two
+   * that have to be reconciled.
+   */
+  state?: StateSource | null;
   stdin?: NodeJS.ReadableStream; stdout?: NodeJS.WritableStream;
   now?: () => string;
 }): void {
@@ -191,13 +200,16 @@ export function serve(opts: {
     }
     if (req.method === 'notifications/initialized' || req.method === 'notifications/cancelled') return;
     if (req.method === 'ping') { reply({}); return; }
-    if (req.method === 'tools/list') { reply({ tools: TOOLS }); return; }
+    if (req.method === 'tools/list') {
+      reply({ tools: opts.state ? [...TOOLS, ...STATE_TOOLS] : TOOLS });
+      return;
+    }
     if (req.method === 'tools/call') {
       const name = String(req.params?.name ?? '');
       const args = (req.params?.arguments ?? {}) as Record<string, any>;
       const at = opts.now ? opts.now() : new Date().toISOString();
       const started = Date.now();
-      if (!graph) {
+      if (!graph && !(opts.state && STATE_TOOLS.some((t) => t.name === name))) {
         // Fail closed and say so IN the answer. Returning an empty list would
         // let an agent conclude the repository has no such code, and then
         // report that conclusion as evidence.
@@ -207,6 +219,24 @@ export function serve(opts: {
           text: 'The repository graph could not be read. Repository intelligence is '
             + 'UNAVAILABLE for this call. Do not assume anything about repository '
             + 'structure; use Read/Grep/Glob and say what you could not verify.' }] });
+        return;
+      }
+      // State tools first: they do not need a graph, and a mission question
+      // must still be answerable on a project whose graph failed to build.
+      if (opts.state && STATE_TOOLS.some((t) => t.name === name)) {
+        const sa = callStateTool(opts.state, name, args);
+        record({ at, tool: name, args, ok: sa.ok, results: sa.results, ms: Date.now() - started });
+        if (!sa.ok) { fail(-32601, sa.text); return; }
+        reply({ content: [{ type: 'text', text: sa.text }] });
+        return;
+      }
+      if (!graph) {
+        record({ at, tool: name, args, ok: false, results: 0, ms: 0,
+          fault: 'GRAPHIFY_QUERY_FAILED' });
+        reply({ isError: true, content: [{ type: 'text',
+          text: 'The repository graph could not be read, so this graph tool is '
+            + 'UNAVAILABLE. Zeus state tools still work. Do not assume anything '
+            + 'about repository structure; use Read/Grep/Glob.' }] });
         return;
       }
       const a = callTool(graph, name, args);

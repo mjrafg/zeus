@@ -27,6 +27,9 @@ import {
 } from './oracle';
 import { compileOracle, critiqueOracle, proposeAcceptance } from './compile';
 import { attach, evidenceLogPath, REPO_AWARE } from '../graph/access';
+import { decide, type FrontDoorDecision } from './frontdoor';
+import { frontDoorTools } from '../engine/providers';
+import { readGraphOps } from '../graph/intel';
 import type { GraphState, GraphFault } from '../graph/graphify';
 import type { GraphAccess } from '../engine/providers';
 
@@ -662,4 +665,67 @@ async function planOnce(ctx: OperationContext, missionId: string,
 
   return { ok: true, version, graph, findings: critique.findings, scopeGaps,
     acceptance, negotiation, accepted };
+}
+
+
+/* ------------------------------------------------------------------------ *
+ * The chat front door
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Reads one chat message with read-only tools and decides what it asks for.
+ *
+ * Lives here, beside compile and plan, because it is the same kind of thing:
+ * an operation that calls a provider and is invoked by both the CLI and the
+ * console. The console does not construct engines.
+ */
+export async function frontDoorDecision(ctx: OperationContext, message: string):
+Promise<FrontDoorDecision> {
+  const engine = ctx.engine;
+  const callId = `FD-${Date.now().toString(36)}-${process.pid}`;
+  const logPath = evidenceLogPath(engine.stateRoot, callId);
+
+  const att = attach({
+    projectId: engine.projectId,
+    sourceDir: engine.opts.projectRoot,
+    stateRoot: engine.stateRoot,
+    providerId: engine.providerFor('front-door').id,
+    logPath,
+    execPath: process.execPath,
+    cliPath: ZEUS_CLI_PATH,
+  });
+
+  // One server, two kinds of evidence: the repository graph and Zeus's own
+  // records. Two servers would mean two evidence logs to reconcile when asking
+  // what this agent actually looked at.
+  const access = att.access
+    ? { ...att.access,
+      args: [...att.access.args, '--state', engine.stateRoot, '--project', engine.projectId] }
+    : null;
+
+  const r = engine.routeFor('front-door');
+  const decision = await decide({
+    message,
+    context: att.section,
+    provider: engine.providerFor('front-door'),
+    supervisor: engine.opts.supervisor,
+    policy: ctx.policy,
+    projectId: engine.projectId,
+    model: r.model,
+    reasoning: r.reasoning,
+    graph: access,
+    // Read, Grep, Glob, graph, Zeus state. No Bash.
+    tools: frontDoorTools(),
+  });
+
+  const ops = readGraphOps(logPath);
+  return {
+    ...decision,
+    evidenceUsed: ops.map((o) => ({
+      kind: o.tool,
+      id: String((o.args as any)?.term ?? (o.args as any)?.id
+        ?? (o.args as any)?.missionId ?? ''),
+      detail: `${o.results} result(s), ${o.ms}ms`,
+    })),
+  };
 }

@@ -43,11 +43,12 @@ import {
 } from '../mission/operations';
 import { missionUsage, MissionBudgets, checkMissionBudgets } from '../mission/progress';
 import {
-  answerFromLog, chatHistory, classifyMessage, draftCard, recordCardDecision,
+  answerFromLog, chatHistory, draftCard, recordCardDecision,
   recordChatMessage, wantsTightening, MissionCard, sanitiseCeiling,
 } from '../mission/chat';
 import { EventTailer, cursorFromLastId, eventId, SSE_CHANNEL } from './tail';
 import { UI_HTML } from './ui';
+import { protocolCommand, type FrontDoorDecision } from '../mission/frontdoor';
 import { systemdUserEnv } from '../engine/isolation';
 import {
   listProjects, freeSlug, slugForUrl, slugify, isProject, scopeFor, ProjectScope,
@@ -106,6 +107,13 @@ export interface WebServerOptions {
     plan(missionId: string, target: ProjectTarget): Promise<PlanOperationResult>;
     evaluate(missionId: string, opts: { full: boolean }, target: ProjectTarget):
     Promise<unknown>;
+    /**
+     * Reads one chat message and decides what it asks for.
+     *
+     * Here rather than in the server because it calls a provider, and the web
+     * process does not.
+     */
+    frontDoor?(message: string, target: ProjectTarget): Promise<FrontDoorDecision>;
   };
   onLog?: (line: string) => void;
 }
@@ -466,6 +474,37 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
    * filesystem — a server that cached this would keep serving a project that
    * had been removed.
    */
+  /**
+   * Runs the chat front door for one message.
+   *
+   * Delegated to the injected operation rather than built here, for the reason
+   * the comment on `operations` already gives: the server must not grow its own
+   * copy of anything that spends money. The web process has never constructed
+   * an Engine and does not start now.
+   */
+  const runFrontDoor = async (sc: { projectId: string; root: string; stateRoot: string },
+    message: string): Promise<FrontDoorDecision> => {
+    const degraded = (detail: string): FrontDoorDecision => ({
+      intent: 'AMBIGUOUS', confidence: 0,
+      summary: 'Zeus could not decide what this message asks for.',
+      evidenceUsed: [], proposedWork: null, answer: null,
+      readings: [
+        { intent: 'QUESTION', reading: 'answer this from the mission log and the repository' },
+        { intent: 'WORK_REQUEST', reading: 'propose a mission to do this as work' },
+      ],
+      degraded: { reason: 'FRONT_DOOR_UNAVAILABLE', detail },
+    });
+    if (!opts.operations?.frontDoor) {
+      return degraded('this server was started without a front door');
+    }
+    try {
+      return await opts.operations.frontDoor(message,
+        { projectId: sc.projectId, root: sc.root, stateRoot: sc.stateRoot } as ProjectTarget);
+    } catch (e: any) {
+      return degraded(String(e?.message ?? e));
+    }
+  };
+
   const scoped = (url: URL): { store: EventStore; missions: MissionRegistry;
     projectId: string; root: string; stateRoot: string } | null => {
     const slug = url.searchParams.get('project');
@@ -1045,32 +1084,73 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     if (url.pathname === '/api/chat') {
       const message = typeof body?.message === 'string' ? body.message.trim() : '';
       if (!message) { send(res, 400, { error: 'MESSAGE_REQUIRED' }); return; }
-      const classification = classifyMessage(message);
 
-      if (classification.intent === 'QUESTION') {
-        // eslint-disable-next-line no-unused-vars
-        // ZERO provider calls on this path, by construction: the resolver only
-        // reads the log. A chat that quietly bills for answering "what is the
-        // status" is a chat nobody trusts to be asked twice.
-        const answer = answerFromLog(wsc.missions, message);
+      // Protocol first, and only protocol. `/cancel` has exactly one meaning;
+      // sending it to a model to be interpreted would add cost and latency and
+      // a chance of being wrong about something unambiguous.
+      const proto = protocolCommand(message);
+      if (proto) {
         recordChatMessage(wsc.store, wsc.projectId, {
-          message, classification, led: answer.answered ? 'ANSWERED' : 'UNANSWERABLE',
+          message, classification: { intent: 'CONTROL', matched: [`protocol:${proto.id}`],
+            reason: 'it is a machine-level control, not natural language' } as any,
+          led: 'CONTROL',
         });
-        send(res, 200, { intent: classification.intent, classification, answer, card: null });
+        send(res, 200, { intent: 'CONTROL_ACTION', control: proto, card: null, answer: null });
         return;
       }
 
-      const card = draftCard({ intent: classification.intent, message,
-        costCeilingUsd: body?.costCeilingUsd ?? null });
+      // THE FRONT DOOR. A model reads the message with read-only tools and
+      // decides what it is. The keyword table it replaced could not tell a
+      // 3,561-byte refactor specification from a status question, because
+      // "report" and "findings" were in it.
+      const fd = await runFrontDoor(
+        { projectId: wsc.projectId, root: wsc.root, stateRoot: wsc.stateRoot }, message);
       recordChatMessage(wsc.store, wsc.projectId, {
-        message, classification, led: 'CARD_DRAFTED', cardDigest: card.digest,
+        message,
+        classification: {
+          intent: fd.intent, matched: fd.evidenceUsed.map((e) => `${e.kind}:${e.id}`),
+          reason: fd.summary,
+        } as any,
+        led: fd.intent === 'QUESTION' ? 'ANSWERED'
+          : fd.intent === 'WORK_REQUEST' ? 'CARD_DRAFTED' : 'AMBIGUOUS',
       });
-      // A card is a PROPOSAL. Nothing is created here, in any branch.
-      send(res, 200, {
-        intent: classification.intent, classification, card, answer: null,
-        tighteningOffered: wantsTightening(message),
-      });
-      return;
+
+      if (fd.degraded) {
+        // Fail VISIBLE. The old path would have quietly answered; this says the
+        // decision could not be made and offers both readings.
+        send(res, 200, {
+          intent: 'AMBIGUOUS', frontDoor: fd, card: null, answer: null,
+          degraded: fd.degraded,
+        });
+        return;
+      }
+      if (fd.intent === 'QUESTION') {
+        send(res, 200, { intent: 'QUESTION', frontDoor: fd, card: null,
+          answer: { answered: true, text: fd.answer, refs: fd.evidenceUsed } });
+        return;
+      }
+      if (fd.intent === 'AMBIGUOUS') {
+        send(res, 200, { intent: 'AMBIGUOUS', frontDoor: fd, card: null, answer: null });
+        return;
+      }
+      if (fd.intent === 'CONTROL_ACTION') {
+        send(res, 200, { intent: 'CONTROL_ACTION', frontDoor: fd, card: null, answer: null });
+        return;
+      }
+      {
+        // WORK_REQUEST. The card carries the person's OWN words; anything the
+        // front door learned rides alongside as orientation and never replaces
+        // the goal.
+        const card = draftCard({ intent: 'WORK',
+          message: fd.proposedWork?.goal ?? message,
+          costCeilingUsd: body?.costCeilingUsd ?? null });
+        send(res, 200, {
+          intent: 'WORK_REQUEST', frontDoor: fd, answer: null,
+          card: { ...card, orientation: fd.proposedWork?.orientation ?? null },
+          tighteningOffered: wantsTightening(message),
+        });
+        return;
+      }
     }
 
     if (url.pathname === '/api/chat/decide') {

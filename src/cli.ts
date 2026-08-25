@@ -48,6 +48,7 @@ import { defaultProjectsRoot } from './projects';
 import {
   compileMissionOracle, planMissionGraph, recompileMissionOracle,
   MAX_ORACLE_RECOMPILES, budgetsFor, liveRun, traceLevelFor,
+  frontDoorDecision,
 } from './mission/operations';
 import {
   resolveRouting, validateRouting, renderRouting, providerCapabilities,
@@ -2150,6 +2151,7 @@ async function cmdWeb(argv: string[]): Promise<number> {
     },
     operations: {
       compile: (missionId, target) => compileMissionOracle(opCtx(target), missionId),
+      frontDoor: (message, target) => frontDoorDecision(opCtx(target), message),
       plan: (missionId, target) => planMissionGraph(opCtx(target), missionId),
       evaluate: async (missionId) => ({
         error: 'NOT_WIRED',
@@ -2341,9 +2343,19 @@ export async function main(argv: string[]): Promise<number> {
     // speaks JSON-RPC on stdout and must never print anything else there.
     case 'graph-mcp': {
       const g = rest[rest.indexOf('--graph') + 1];
-      if (!g || !rest.includes('--graph')) { err('usage: zeus graph-mcp --graph <graph.json> [--log <file>]'); return 2; }
+      if (!g || !rest.includes('--graph')) { err('usage: zeus graph-mcp --graph <graph.json> [--log <file>] [--state <stateRoot> --project <id>]'); return 2; }
       const li = rest.indexOf('--log');
-      serveGraphMcp({ graphPath: g, logPath: li >= 0 ? rest[li + 1] ?? null : null });
+      // --state serves Zeus's own read-only records alongside the graph, so the
+      // front door has one surface and one evidence log rather than two.
+      const si = rest.indexOf('--state');
+      const pi = rest.indexOf('--project');
+      serveGraphMcp({
+        graphPath: g,
+        logPath: li >= 0 ? rest[li + 1] ?? null : null,
+        state: si >= 0 && rest[si + 1]
+          ? { stateRoot: rest[si + 1], projectId: pi >= 0 ? rest[pi + 1] ?? '' : '' }
+          : null,
+      });
       return new Promise<number>(() => { /* runs until the parent closes stdin */ });
     }
     case 'version': case '--version': case '-v': out(VERSION); return 0;

@@ -34,6 +34,11 @@ import { spawnSync } from 'child_process';
  * plan critic are both reviewers, and they are reviewing very different things.
  */
 export const PIPELINE_STAGES = [
+  // The chat front door runs before any mission exists, so it is first. It is
+  // in this table rather than hard-wired because "which model reads my
+  // messages" is exactly the kind of thing an operator should be able to see
+  // and change in the same place as every other stage.
+  'front-door',
   'oracle', 'oracle-critic', 'planner', 'plan-critic',
   'implementer', 'reviewer', 'repair',
 ] as const;
@@ -42,6 +47,7 @@ export type PipelineStage = typeof PIPELINE_STAGES[number];
 
 /** What a stage is allowed to do, which is a separate question from who does it. */
 export const STAGE_ROLE: Record<PipelineStage, 'planner' | 'implementer' | 'reviewer'> = {
+  'front-door': 'reviewer',
   oracle: 'planner',
   'oracle-critic': 'reviewer',
   planner: 'planner',
@@ -53,6 +59,7 @@ export const STAGE_ROLE: Record<PipelineStage, 'planner' | 'implementer' | 'revi
 
 /** Human wording for a settings screen, so the UI does not invent its own. */
 export const STAGE_LABEL: Record<PipelineStage, string> = {
+  'front-door': 'Front Door',
   oracle: 'Oracle',
   'oracle-critic': 'Oracle Critic',
   planner: 'Planner',
@@ -63,6 +70,7 @@ export const STAGE_LABEL: Record<PipelineStage, string> = {
 };
 
 export const STAGE_DESCRIPTION: Record<PipelineStage, string> = {
+  'front-door': 'reads your chat messages and decides what you are asking for',
   oracle: 'turns the goal into a contract of checkable criteria',
   'oracle-critic': 'reviews that contract as an independent second opinion',
   planner: 'proposes the task graph',
@@ -235,6 +243,10 @@ export type RouteSource = 'project' | 'global' | 'zeus-default' | 'provider-defa
  * CLI decides, and the resolved table says so in as many words.
  */
 export const ZEUS_DEFAULT_ROUTING: Record<PipelineStage, RouteChoice> = {
+  // claude, because the front door needs MCP tools and codex cancels MCP tool
+  // calls in non-interactive runs. A front door without its tools is the
+  // keyword table again, wearing a model's clothes.
+  'front-door': { provider: 'claude' },
   oracle: { provider: 'claude' },
   'oracle-critic': { provider: 'codex' },
   planner: { provider: 'claude' },

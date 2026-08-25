@@ -67,93 +67,30 @@ export function canonicalDigest(value: unknown): string {
  * Intent routing
  * ------------------------------------------------------------------------ */
 
-export type Intent = 'QUESTION' | 'WORK' | 'AMBIGUOUS';
+/**
+ * What a chat message was taken to mean.
+ *
+ * The keyword classifier that used to live here is GONE, not deprecated. It
+ * read a table of question openers, status vocabulary and imperative verbs,
+ * and broke ties toward QUESTION because answering is cheaper than building.
+ * That table could not tell a 3,561-byte refactor specification from a status
+ * question, because the specification contained the words "report" and
+ * "findings" — and the tie-break fired in silence, so a work order was
+ * answered as though someone had asked how things were going.
+ *
+ * The replacement is src/mission/frontdoor.ts: a read-only agent that decides
+ * from meaning. The only lexical rules left are protocol commands like
+ * `/cancel`, which are not language and have exactly one reading each.
+ *
+ * The type stays because the card and the log still record an intent.
+ */
+export type Intent = 'QUESTION' | 'WORK' | 'AMBIGUOUS' | 'CONTROL';
 
 export interface Classification {
-  intent: Intent;
-  /** Which patterns fired, so a routing decision can be argued with. */
+  intent: Intent | string;
+  /** What was consulted, so a routing decision can be argued with. */
   matched: string[];
   reason: string;
-}
-
-/** Interrogative openers. English and Persian. */
-const QUESTION_STARTERS = [
-  'what', 'why', 'how', 'when', 'which', 'who', 'where', 'whose',
-  'is', 'are', 'was', 'were', 'do', 'does', 'did', 'can', 'could',
-  'should', 'will', 'would', 'has', 'have', 'am',
-  'چی', 'چه', 'چرا', 'چطور', 'چگونه', 'کی', 'کدام', 'کجا', 'آیا', 'چند', 'چقدر',
-];
-
-/** Words that name things the log already knows. */
-const STATUS_VOCAB = [
-  'status', 'cost', 'report', 'progress', 'criteria', 'criterion', 'outcome',
-  'ratchet', 'budget', 'events', 'findings', 'missions', 'mission', 'tasks',
-  'readiness', 'doctor', 'spent', 'terminated', 'achievement',
-  'وضعیت', 'هزینه', 'گزارش', 'پیشرفت', 'معیار', 'نتیجه', 'بودجه', 'رویداد',
-  'ماموریت', 'مأموریت', 'خرج',
-];
-
-/** Imperative openers that plainly ask for work. */
-const WORK_PATTERNS: Array<{ id: string; re: RegExp }> = [
-  // "improve the readme" was routed AMBIGUOUS by real use — plainly a work
-  // request, and the list simply did not have the word. Verbs get added when
-  // a real message finds the gap, not by imagining what someone might type.
-  { id: 'en-imperative', re: /^\s*(please\s+)?(fix|add|make|create|implement|refactor|write|update|remove|delete|rename|migrate|upgrade|build|introduce|extract|split|merge|optimi[sz]e|clean\s*up|port|convert|replace|document|improve|enhance|clarify|simplify|tidy|polish|translate|harden|speed\s*up|reduce|bump|drop|enable|disable|support|handle|validate|sanitis|sanitiz)\b/i },
-  { id: 'en-request', re: /\b(i\s+(want|need)\s+you\s+to|can\s+you\s+(please\s+)?(fix|add|make|write|implement|refactor|update|remove))\b/i },
-  { id: 'fa-imperative', re: /(درست\s*کن|اضافه\s*کن|بساز|بنویس|حذف\s*کن|تغییر\s*بده|رفع\s*کن|اصلاح\s*کن|پیاده\s*سازی\s*کن|بازنویسی\s*کن|به\s*روز\s*کن|بهتر\s*کن|ساده\s*کن|بهبود\s*بده)/ },
-];
-
-const startsWith = (text: string, words: string[]): string | null => {
-  const first = text.trim().toLowerCase().split(/[\s،,؟?!.]+/).filter(Boolean)[0] ?? '';
-  return words.includes(first) ? first : null;
-};
-
-/**
- * Classifies a message. MECHANICAL, and deliberately so in V1.
- *
- * A model could route more subtly, and it would also cost money on every
- * message and be unable to explain itself in a table. The rules below are
- * arguable, testable and free; model routing waits until real chat use says
- * where they actually fall down.
- */
-export function classifyMessage(raw: string): Classification {
-  const text = (raw ?? '').trim();
-  if (!text) {
-    return { intent: 'AMBIGUOUS', matched: [],
-      reason: 'the message is empty, so there is nothing to route on' };
-  }
-  const matched: string[] = [];
-
-  const opener = startsWith(text, QUESTION_STARTERS);
-  if (opener) matched.push(`question-opener:${opener}`);
-  if (/[?؟]\s*$/.test(text)) matched.push('question-mark');
-  const vocab = STATUS_VOCAB.filter((w) => text.toLowerCase().includes(w));
-  if (vocab.length) matched.push(...vocab.map((w) => `status-vocab:${w}`));
-
-  const work = WORK_PATTERNS.filter((p) => p.re.test(text));
-  if (work.length) matched.push(...work.map((p) => `work:${p.id}`));
-
-  const questionish = !!opener || /[?؟]\s*$/.test(text) || vocab.length > 0;
-
-  // A question wins a tie. "How do I fix the failing tests?" asks for an
-  // explanation, not for the tests to be fixed — and answering costs nothing
-  // while building costs money, so the tie breaks toward the cheap, reversible
-  // reading.
-  if (questionish) {
-    return {
-      intent: 'QUESTION', matched,
-      reason: work.length
-        ? 'it reads as a question even though it also names work — a question is the cheaper reading, so it wins the tie'
-        : 'it opens as a question, ends in a question mark, or names something the log already knows',
-    };
-  }
-  if (work.length) {
-    return { intent: 'WORK', matched, reason: `it matches an explicit work pattern (${work.map((p) => p.id).join(', ')})` };
-  }
-  return {
-    intent: 'AMBIGUOUS', matched,
-    reason: 'it matches neither a question shape nor an explicit work pattern, so the doubt is rendered rather than resolved',
-  };
 }
 
 /* ------------------------------------------------------------------------ *
@@ -250,10 +187,15 @@ export function draftCard(input: {
     { id: 'edit', label: 'Edit goal' },
     { id: 'cancel', label: 'Cancel' },
   ];
-  // The doubt is an option on the card, not a decision taken quietly.
-  if (input.intent === 'AMBIGUOUS') {
-    actions.push({ id: 'answer', label: 'Just answer my question' });
-  }
+  // Offered on EVERY card, not only an ambiguous one.
+  //
+  // It used to appear only when the old keyword classifier said AMBIGUOUS, and
+  // ambiguity no longer produces a card at all — the front door renders the
+  // readings instead. That left the decide endpoint's `answer` branch alive
+  // and unreachable. It is a real option in its own right: a person looking at
+  // a mission proposal may simply have wanted to be told, and saying so should
+  // not cost a mission.
+  actions.push({ id: 'answer', label: 'Just answer my question' });
   const card: Omit<MissionCard, 'digest'> = {
     intent: input.intent,
     originalGoal,

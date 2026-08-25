@@ -48,6 +48,11 @@ export interface AgentRequest {
    * nothing may claim the agent was repository-aware.
    */
   graph?: GraphAccess | null;
+  /**
+   * An exact tool list, when the caller needs a NARROWER set than the
+   * read-only profile grants. Never used to widen one.
+   */
+  tools?: string[] | null;
 }
 
 export interface AgentResponse {
@@ -338,11 +343,35 @@ export function graphToolIds(): string[] {
  * no code path that touches the repository, so a critic holding these tools
  * still cannot change anything.
  */
-export function toolsFor(readOnly: boolean, graph: GraphAccess | null): string[] {
+export function toolsFor(readOnly: boolean, graph: GraphAccess | null,
+  explicit?: string[] | null): string[] {
+  // An explicit list wins, and is how a caller says LESS than the profile.
+  // The read-only profile includes Bash — which is fine for a critic reasoning
+  // about a worktree and wrong for the chat front door, where a shell would be
+  // an execution path reachable from a text box.
+  if (explicit && explicit.length) return [...explicit];
   const base = readOnly
     ? ['Read', 'Grep', 'Glob', 'Bash']
     : ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'];
   return graph ? [...base, ...graphToolIds()] : base;
+}
+
+/** The Zeus-state tools, fully qualified as the CLIs address them. */
+export const STATE_TOOL_NAMES = [
+  'zeus_missions', 'zeus_mission', 'zeus_events', 'zeus_findings', 'zeus_trace',
+] as const;
+
+export function stateToolIds(): string[] {
+  return STATE_TOOL_NAMES.map((n) => `mcp__${MCP_SERVER}__${n}`);
+}
+
+/**
+ * What the chat front door may hold: everything needed to understand, nothing
+ * that can act. No Bash, no Edit, no Write — read-only as a property of the
+ * tool list, not as a hope about how the model behaves.
+ */
+export function frontDoorTools(): string[] {
+  return ['Read', 'Grep', 'Glob', ...graphToolIds(), ...stateToolIds()];
 }
 
 function mcpConfigJson(g: GraphAccess): string {
@@ -376,7 +405,7 @@ export function claudeProvider(binOverride?: string): Provider {
       // else: without it the user's own configured servers join the session,
       // and a mission would silently gain tools nobody scoped to it.
       ...(r.graph ? ['--mcp-config', mcpConfigJson(r.graph), '--strict-mcp-config'] : []),
-      '--allowed-tools', ...toolsFor(r.readOnly, r.graph ?? null),
+      '--allowed-tools', ...toolsFor(r.readOnly, r.graph ?? null, r.tools ?? null),
     ], req, sup),
   };
 }

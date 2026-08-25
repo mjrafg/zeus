@@ -36,6 +36,7 @@ import { executionSuite } from './execution';
 import { readinessSuite } from './readiness';
 import { webSuite } from './web';
 import { graphSuite } from './graph';
+import { frontDoorSuite } from './frontdoor';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-test-'));
 const mk = (name: string, files: Record<string, string>): string => {
@@ -355,6 +356,7 @@ function identitySuite(): void {
   await readinessSuite();
   await webSuite();
   await graphSuite();
+  await frontDoorSuite();
   unwrapSuite();
   identitySuite();
   const t = totals();

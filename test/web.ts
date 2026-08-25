@@ -33,8 +33,8 @@ import {
 import {
   compileMissionOracle, recompileMissionOracle, MAX_ORACLE_RECOMPILES,
 } from '../src/mission/operations';
-import {
-  classifyMessage, draftCard, wantsTightening, chatHistory,
+import { answerFromLog,
+  draftCard, wantsTightening, chatHistory,
   sanitiseCeiling, MAX_CARD_CEILING_USD,
 } from '../src/mission/chat';
 import { scopeOf, TaskNode } from '../src/mission/types';
@@ -555,51 +555,6 @@ export async function webSuite(): Promise<void> {
         opless.status === 503, String(opless.status));
     } finally { await server?.close(); }
   }
-  section('chat: routing is mechanical, and doubt never routes to work');
-  {
-    const TABLE: Array<{ text: string; want: string; why: string }> = [
-      // English questions
-      { text: 'what is the status of M-0001?', want: 'QUESTION', why: 'opener + mark' },
-      { text: 'why did the mission fail', want: 'QUESTION', why: 'opener, no mark' },
-      { text: 'how much did it cost?', want: 'QUESTION', why: 'opener' },
-      { text: 'show me the report', want: 'QUESTION', why: 'status vocabulary' },
-      { text: 'is the ratchet advanced?', want: 'QUESTION', why: 'auxiliary opener' },
-      // Persian questions
-      { text: 'وضعیت ماموریت چیست؟', want: 'QUESTION', why: 'FA status vocabulary + mark' },
-      { text: 'چرا این ماموریت شکست خورد', want: 'QUESTION', why: 'FA opener' },
-      { text: 'هزینه چقدر بود؟', want: 'QUESTION', why: 'FA cost vocabulary' },
-      // English work
-      { text: 'fix the failing unit tests', want: 'WORK', why: 'imperative' },
-      { text: 'add a retry to the uploader', want: 'WORK', why: 'imperative' },
-      { text: 'please refactor the invoice module', want: 'WORK', why: 'polite imperative' },
-      { text: 'I want you to remove the dead config option', want: 'WORK', why: 'request form' },
-      // Persian work
-      { text: 'این باگ را درست کن', want: 'WORK', why: 'FA imperative' },
-      { text: 'یک تست جدید بنویس', want: 'WORK', why: 'FA imperative' },
-      // Neither
-      { text: 'the invoice module is a mess', want: 'AMBIGUOUS', why: 'an observation, not a request' },
-      { text: 'hmm', want: 'AMBIGUOUS', why: 'nothing to go on' },
-      { text: '', want: 'AMBIGUOUS', why: 'empty' },
-      { text: 'maybe we should think about the parser', want: 'AMBIGUOUS', why: 'musing' },
-    ];
-    const wrong = TABLE.filter((t) => classifyMessage(t.text).intent !== t.want);
-    check('CH1: the classifier table holds for every English and Persian case',
-      wrong.length === 0,
-      wrong.map((t) => `"${t.text}" → ${classifyMessage(t.text).intent}, wanted ${t.want}`).join(' | '));
-
-    // THE DOUBT-DIRECTION PROPERTY: nothing reaches WORK without an explicit
-    // work pattern. Building costs money; asking does not.
-    const workish = TABLE.filter((t) => classifyMessage(t.text).intent === 'WORK');
-    check('CH2: every WORK classification names the explicit pattern that caused it',
-      workish.every((t) => classifyMessage(t.text).matched.some((m) => m.startsWith('work:'))),
-      workish.map((t) => classifyMessage(t.text).matched.join(',')).join(' | '));
-    check('CH3: a question that also names work is read as a question — the cheap reading wins',
-      classifyMessage('how do I fix the failing tests?').intent === 'QUESTION',
-      classifyMessage('how do I fix the failing tests?').reason);
-    check('CH4: every classification carries a reason a human can argue with',
-      TABLE.every((t) => classifyMessage(t.text).reason.length > 20));
-  }
-
   section('chat: a card is a proposal, and only an accepted card creates');
   {
     const fx = fixture();
@@ -607,12 +562,27 @@ export async function webSuite(): Promise<void> {
     try {
       server = await startWebServer({
         projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        // The endpoint calls a provider now, so the server is given the same
+        // injected operation the CLI supplies. Scripted here so what is under
+        // test is Zeus's handling of a decision, not a model's ability to make
+        // one.
+        operations: {
+          compile: async () => ({}) as any,
+          plan: async () => ({}) as any,
+          evaluate: async () => ({}),
+          frontDoor: async (message: string) => ({
+            intent: 'WORK_REQUEST' as const, confidence: 0.9,
+            summary: 'asks for the failing tests to be fixed',
+            evidenceUsed: [], answer: null, readings: null, degraded: null,
+            proposedWork: { goal: message, orientation: null },
+          }),
+        },
       });
       const auth = { authorization: `Bearer ${server.token}` };
       const work = await post(server, '/api/chat', { message: 'fix the failing unit tests' });
 
       check('CC1: a work message produces a card',
-        work.status === 200 && work.json.intent === 'WORK' && !!work.json.card,
+        work.status === 200 && work.json.intent === 'WORK_REQUEST' && !!work.json.card,
         JSON.stringify(work.json?.intent));
       check('CC2: and creates NOTHING',
         fx.missions.list().length === 0, String(fx.missions.list().length));
@@ -689,48 +659,86 @@ export async function webSuite(): Promise<void> {
     } finally { await server?.close(); }
   }
 
-  section('chat: questions are answered from the log, for free');
+  section('chat: the log answerer still answers, and still calls nothing');
   {
+    // answerFromLog is no longer what /api/chat uses — the front door is — but
+    // it is still what the "answer instead" branch of a card runs, so its
+    // contract is tested where it lives rather than through a route that has
+    // moved on.
     const fx = fixture();
     const rec = fx.missions.create('a goal', 'base0');
     fx.missions.escalate(rec.missionId, { kind: 'NOTE' });
 
+    const status = answerFromLog(fx.missions, 'what is the status?');
+    const cost = answerFromLog(fx.missions, 'how much did it cost?');
+    const events = answerFromLog(fx.missions, 'show me the last events');
+    const unknown = answerFromLog(fx.missions,
+      'what is the airspeed velocity of an unladen swallow?');
+
+    check('CQ2: the answer cites the mission it is about',
+      status.refs.some((r: any) => r.kind === 'mission' && r.id === rec.missionId),
+      JSON.stringify(status.refs));
+    check('CQ3: cost answers keep unmetered calls distinct from spend',
+      /no provider-reported spend|lower bound|\$/.test(cost.text), cost.text.slice(0, 80));
+    check('CQ4: event answers carry seq refs that resolve',
+      events.refs.some((r: any) => r.kind === 'event' && typeof r.seq === 'number'),
+      JSON.stringify(events.refs.slice(0, 2)));
+    check('CQ5: a question the log cannot answer says so, and says what CAN be asked',
+      unknown.answered === false
+      && /cannot answer that from the event log/.test(unknown.text)
+      && /I can answer questions about/.test(unknown.text), unknown.text.slice(0, 60));
+    check('CQ6: and it does not reach for a model to improvise one',
+      /does not call one to improvise/.test(unknown.text), 'no model on this path');
+  }
+
+  section('chat: a question answered by the front door creates nothing');
+  {
+    const fx = fixture();
+    fx.missions.create('a goal', 'base0');
     let server: RunningServer | null = null;
     try {
       server = await startWebServer({
         projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        operations: {
+          compile: async () => ({}) as any,
+          plan: async () => ({}) as any,
+          evaluate: async () => ({}),
+          frontDoor: async () => ({
+            intent: 'QUESTION' as const, confidence: 0.95,
+            summary: 'asks for the status', answer: 'One mission, not terminated.',
+            evidenceUsed: [{ kind: 'zeus_missions', id: '', detail: '1 result(s), 2ms' }],
+            proposedWork: null, readings: null, degraded: null,
+          }),
+        },
       });
-      const status = await post(server, '/api/chat', { message: 'what is the status?' });
-      const cost = await post(server, '/api/chat', { message: 'how much did it cost?' });
-      const events = await post(server, '/api/chat', { message: 'show me the last events' });
-      const unknown = await post(server, '/api/chat',
-        { message: 'what is the airspeed velocity of an unladen swallow?' });
-
+      const q = await post(server, '/api/chat', { message: 'what is the status?' });
       check('CQ1: a question is answered, with no card offered',
-        status.json.intent === 'QUESTION' && status.json.card === null
-        && status.json.answer.answered === true, JSON.stringify(status.json?.intent));
-      check('CQ2: the answer cites the mission it is about',
-        status.json.answer.refs.some((r: any) => r.kind === 'mission' && r.id === rec.missionId),
-        JSON.stringify(status.json.answer.refs));
-      check('CQ3: cost answers keep unmetered calls distinct from spend',
-        /no provider-reported spend|lower bound|\$/.test(cost.json.answer.text),
-        cost.json.answer.text.slice(0, 80));
-      check('CQ4: event answers carry seq refs that resolve',
-        events.json.answer.refs.some((r: any) => r.kind === 'event' && typeof r.seq === 'number'),
-        JSON.stringify(events.json.answer.refs.slice(0, 2)));
-      check('CQ5: a question the log cannot answer says so, and says what CAN be asked',
-        unknown.json.answer.answered === false
-        && /cannot answer that from the event log/.test(unknown.json.answer.text)
-        && /I can answer questions about/.test(unknown.json.answer.text),
-        unknown.json.answer.text.slice(0, 60));
-      check('CQ6: and it does not reach for a model to improvise one',
-        /V1 does not call one to improvise/.test(unknown.json.answer.text));
-      check('CQ7: no mission was created by any question',
+        q.status === 200 && q.json.intent === 'QUESTION' && q.json.card === null
+        && q.json.answer.answered === true, JSON.stringify(q.json?.intent));
+      check('CQ1b: the answer is the front door’s, grounded in what it inspected',
+        q.json.answer.text === 'One mission, not terminated.'
+        && q.json.answer.refs[0].kind === 'zeus_missions', JSON.stringify(q.json.answer.refs));
+      check('CQ7: no mission was created by the question',
         fx.missions.list().length === 1, String(fx.missions.list().length));
+
+      // Fail VISIBLE: a server with no front door must not quietly answer.
+      let bare: RunningServer | null = null;
+      try {
+        bare = await startWebServer({
+          projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        });
+        const d = await post(bare, '/api/chat', { message: 'what is the status?' });
+        check('CQ8: with no front door the reply is DEGRADED, not a quiet answer',
+          d.json.intent === 'AMBIGUOUS' && d.json.degraded?.reason === 'FRONT_DOOR_UNAVAILABLE'
+          && d.json.answer === null, JSON.stringify(d.json?.degraded));
+        check('CQ9: and it offers both readings rather than choosing the cheap one',
+          (d.json.frontDoor?.readings ?? []).length === 2,
+          JSON.stringify(d.json.frontDoor?.readings));
+      } finally { await bare?.close(); }
     } finally { await server?.close(); }
   }
 
-  section('chat: ambiguity is rendered, not resolved');
+  section('chat: ambiguity is rendered as readings, not resolved cheaply');
   {
     const fx = fixture();
     fx.missions.create('an existing goal', 'base0');
@@ -740,17 +748,49 @@ export async function webSuite(): Promise<void> {
         projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
       });
       const amb = await post(server, '/api/chat', { message: 'the invoice module is a mess' });
-      check('CA1: an ambiguous message produces a card, not a mission',
-        amb.json.intent === 'AMBIGUOUS' && !!amb.json.card
+      check('CA1: an ambiguous message creates nothing and offers no card',
+        amb.json.intent === 'AMBIGUOUS' && amb.json.card === null
         && fx.missions.list().length === 1, JSON.stringify(amb.json?.intent));
-      check('CA2: the card carries the "this was just a question" option',
-        amb.json.card.actions.some((a: any) => a.id === 'answer'),
-        JSON.stringify(amb.json.card.actions.map((a: any) => a.id)));
+      // The old shape answered it, or offered a card with an "actually it was a
+      // question" button. Both quietly picked a reading. This shows both.
+      check('CA2: both readings are put to the person',
+        (amb.json.frontDoor?.readings ?? []).length === 2
+        && amb.json.frontDoor.readings.some((r: any) => r.intent === 'QUESTION')
+        && amb.json.frontDoor.readings.some((r: any) => r.intent === 'WORK_REQUEST'),
+        JSON.stringify(amb.json.frontDoor?.readings));
+      check('CA2b: and no answer is smuggled in alongside them',
+        amb.json.answer === null, JSON.stringify(amb.json.answer));
+    } finally { await server?.close(); }
+  }
 
-      const answered = await post(server, '/api/chat/decide', {
-        card: amb.json.card, cardDigest: amb.json.card.digest, decision: 'answer',
+  section('chat: the "answer instead" branch of a card still answers for free');
+  {
+    const fx = fixture();
+    fx.missions.create('an existing goal', 'base0');
+    let server: RunningServer | null = null;
+    try {
+      server = await startWebServer({
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        operations: {
+          compile: async () => ({}) as any,
+          plan: async () => ({}) as any,
+          evaluate: async () => ({}),
+          frontDoor: async (message: string) => ({
+            intent: 'WORK_REQUEST' as const, confidence: 0.8,
+            summary: 'reads as work', evidenceUsed: [], answer: null,
+            readings: null, degraded: null,
+            proposedWork: { goal: message, orientation: null },
+          }),
+        },
       });
-      check('CA3: choosing it answers from the log and creates nothing',
+      const card = await post(server, '/api/chat', { message: 'tidy the invoice module' });
+      check('CA3: a card still carries the "this was just a question" option',
+        card.json.card.actions.some((a: any) => a.id === 'answer'),
+        JSON.stringify(card.json.card.actions.map((a: any) => a.id)));
+      const answered = await post(server, '/api/chat/decide', {
+        card: card.json.card, cardDigest: card.json.card.digest, decision: 'answer',
+      });
+      check('CA4: choosing it answers from the log and creates nothing',
         answered.status === 200 && answered.json.missionId === null
         && !!answered.json.answer && fx.missions.list().length === 1,
         JSON.stringify(answered.json?.missionId));
@@ -1529,53 +1569,47 @@ export async function webSuite(): Promise<void> {
     } finally { await server?.close(); }
   }
 
-  section('chat: the most obvious question is answerable now');
+  section('chat: the log answerer knows what it can be asked');
   {
+    // These once went through /api/chat. That route now asks the front door,
+    // so the capability is tested where it actually lives — and it still
+    // matters, because the "answer instead" branch of every card runs it.
     const fx = fixture();
     fx.missions.create('make the tests deterministic', 'base0');
     fx.missions.create('fix the README typo', 'base0');
-    let server: RunningServer | null = null;
-    try {
-      server = await startWebServer({ projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
-      const asked = await post(server, '/api/chat', { message: 'what missions exist in this project?' });
-      check('RQ1: the exact question from the screenshot is answered',
-        asked.json.intent === 'QUESTION' && asked.json.answer.answered === true,
-        JSON.stringify(asked.json?.answer?.answered));
-      check('RQ1b: with both missions named',
-        /M-0001/.test(asked.json.answer.text) && /M-0002/.test(asked.json.answer.text),
-        asked.json.answer.text.slice(0, 90));
-      check('RQ1c: and refs that resolve to the missions',
-        asked.json.answer.refs.length === 2
-        && asked.json.answer.refs.every((r: any) => r.kind === 'mission'),
-        JSON.stringify(asked.json.answer.refs));
 
-      const variants: Array<[string, string]> = [
-        ['RQ2a', 'list missions'],
-        ['RQ2b', 'چه ماموریت‌هایی هست؟'],
-        ['RQ2c', 'how many missions are there?'],
-      ];
-      for (const [id, q] of variants) {
-        const r = await post(server, '/api/chat', { message: q });
-        check(`${id}: the same question phrased differently is also answered`,
-          r.json.answer?.answered === true, `"${q}" -> ${r.json?.answer?.answered}`);
-      }
+    const asked = answerFromLog(fx.missions, 'what missions exist in this project?');
+    check('RQ1: the exact question from the screenshot is answered',
+      asked.answered === true, String(asked.answered));
+    check('RQ1b: with both missions named',
+      /M-0001/.test(asked.text) && /M-0002/.test(asked.text), asked.text.slice(0, 90));
+    check('RQ1c: and refs that resolve to the missions',
+      asked.refs.length === 2 && asked.refs.every((r: any) => r.kind === 'mission'),
+      JSON.stringify(asked.refs));
 
-      const waiting = await post(server, '/api/chat', { message: 'is anything waiting on me?' });
-      check('RQ3: "waiting on me" is answerable too',
-        waiting.json.answer.answered === true
-        && /Nothing is waiting on you/.test(waiting.json.answer.text),
-        waiting.json.answer.text.slice(0, 60));
+    for (const [id, q] of [
+      ['RQ2a', 'list missions'],
+      ['RQ2b', 'چه ماموریت‌هایی هست؟'],
+      ['RQ2c', 'how many missions are there?'],
+    ] as Array<[string, string]>) {
+      check(`${id}: the same question phrased differently is also answered`,
+        answerFromLog(fx.missions, q).answered === true, `"${q}"`);
+    }
 
-      const nope = await post(server, '/api/chat',
-        { message: 'what is the airspeed velocity of an unladen swallow?' });
-      check('RQ4: the honest refusal still fires for what the log cannot answer',
-        nope.json.answer.answered === false, JSON.stringify(nope.json?.answer?.answered));
-      check('RQ5: and the help text is TRUE — every capability it lists is answerable',
-        /which missions exist/.test(nope.json.answer.text)
-        && /whether anything is waiting on you/.test(nope.json.answer.text),
-        nope.json.answer.text.slice(0, 120));
-    } finally { await server?.close(); }
+    const waiting = answerFromLog(fx.missions, 'is anything waiting on me?');
+    check('RQ3: "waiting on me" is answerable too',
+      waiting.answered === true && /Nothing is waiting on you/.test(waiting.text),
+      waiting.text.slice(0, 60));
+
+    const nope = answerFromLog(fx.missions,
+      'what is the airspeed velocity of an unladen swallow?');
+    check('RQ4: the honest refusal still fires for what the log cannot answer',
+      nope.answered === false, String(nope.answered));
+    check('RQ5: and the help text is TRUE — every capability it lists is answerable',
+      /which missions exist/.test(nope.text)
+      && /whether anything is waiting on you/.test(nope.text), nope.text.slice(0, 120));
   }
+
   section('projects: a symlinked project is a project');
   {
     const root = path.join(TMP, `symroot-${seq += 1}`);
@@ -1839,6 +1873,16 @@ export async function webSuite(): Promise<void> {
     try {
       server = await startWebServer({
         projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0, projectsRoot: root,
+        operations: {
+          compile: async () => ({}) as any,
+          plan: async () => ({}) as any,
+          evaluate: async () => ({}),
+          frontDoor: async (message: string) => ({
+            intent: 'WORK_REQUEST' as const, confidence: 0.9, summary: 'work',
+            evidenceUsed: [], answer: null, readings: null, degraded: null,
+            proposedWork: { goal: message, orientation: null },
+          }),
+        },
       });
 
       // The exact shape of the bug: viewing one project, creating from its chat.
@@ -1924,37 +1968,6 @@ export async function webSuite(): Promise<void> {
         fs.readdirSync(proot).join(',') === 'talkbridge', fs.readdirSync(proot).join(','));
     } finally { await server?.close(); }
   }
-  section('chat: the verbs real messages actually use');
-  {
-    // Every one of these was typed at the deployed console, or is the same
-    // shape as one that was. "improve the readme" routed AMBIGUOUS and that is
-    // how the gap was found — the list grows from real use, not imagination.
-    const WORKISH = [
-      'improve the readme', 'improve the readme wording', 'enhance the error messages',
-      'clarify the setup instructions', 'simplify the parser', 'tidy up the imports',
-      'polish the CLI output', 'harden the upload path', 'reduce the bundle size',
-      'bump the node version', 'enable strict mode', 'validate the input',
-      'بهبود بده مستندات را', 'ساده کن این تابع را',
-    ];
-    const missed = WORKISH.filter((m) => classifyMessage(m).intent !== 'WORK');
-    check('VB-W1: the verbs people actually use route to WORK',
-      missed.length === 0,
-      missed.map((m) => `"${m}" -> ${classifyMessage(m).intent}`).join(' | '));
-    check('VB-W2: and each names the pattern that caught it',
-      WORKISH.every((m) => classifyMessage(m).matched.some((x) => x.startsWith('work:'))));
-
-    // The doubt direction is unchanged: adding verbs must not make the
-    // classifier greedy about things that are plainly not requests.
-    const NOT_WORK = [
-      'the readme could be better', 'improvements are needed somewhere',
-      'how do I improve the readme?', 'what would improve this?',
-    ];
-    const wrong = NOT_WORK.filter((m) => classifyMessage(m).intent === 'WORK');
-    check('VB-W3: an observation or a question about improving is still not a work order',
-      wrong.length === 0,
-      wrong.map((m) => `"${m}" -> WORK`).join(' | '));
-  }
-
   section('the console renders spend and events legibly');
   {
     check('UX1: an empty cost breakdown says so rather than printing "{}"',
@@ -2486,7 +2499,18 @@ export async function webSuite(): Promise<void> {
     let server: RunningServer | null = null;
     try {
       server = await startWebServer({
-        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0 });
+        projectRoot: fx.root, stateRoot: fx.state, projectId: 'p', port: 0,
+        operations: {
+          compile: async () => ({}) as any,
+          plan: async () => ({}) as any,
+          evaluate: async () => ({}),
+          frontDoor: async (message: string) => ({
+            intent: 'WORK_REQUEST' as const, confidence: 0.9, summary: 'work',
+            evidenceUsed: [], answer: null, readings: null, degraded: null,
+            proposedWork: { goal: message, orientation: null },
+          }),
+        },
+      });
       const auth = { authorization: `Bearer ${server.token}` };
 
       const drafted = await post(server, '/api/chat',
@@ -3223,8 +3247,8 @@ export async function webSuite(): Promise<void> {
     // took providers.planner; the oracle critic and the plan critic both took
     // providers.reviewer. Wanting a cheaper model for one and not the other
     // was not expressible, and no log said which model wrote a plan.
-    check('RT1: the pipeline has seven stages, each nameable on its own',
-      PIPELINE_STAGES.length === 7
+    check('RT1: the pipeline has eight stages, each nameable on its own',
+      PIPELINE_STAGES.length === 8
       && PIPELINE_STAGES.includes('oracle') && PIPELINE_STAGES.includes('planner')
       && PIPELINE_STAGES.includes('oracle-critic') && PIPELINE_STAGES.includes('plan-critic')
       && PIPELINE_STAGES.includes('repair'),
@@ -3284,7 +3308,7 @@ export async function webSuite(): Promise<void> {
 
       const r = await get(`${server.url}/api/routing`, auth);
       check('AR1: the screen is given every stage, with what each one is for',
-        r.status === 200 && r.json.stages.length === 7
+        r.status === 200 && r.json.stages.length === 8
         && r.json.stages.every((s2: any) => s2.label && s2.description),
         JSON.stringify(r.json?.stages?.map((s2: any) => s2.label)));
       check('AR2: and the providers\u2019 own catalogue, so nothing is hardcoded in the page',
@@ -3292,7 +3316,7 @@ export async function webSuite(): Promise<void> {
         && r.json.capabilities.every((c: any) => typeof c.closed === 'boolean'),
         JSON.stringify(r.json?.capabilities?.map((c: any) => c.provider)));
       check('AR3: with the resolved table and the tier each field came from',
-        r.json.routes.length === 7 && r.json.routes[0].source.provider,
+        r.json.routes.length === 8 && r.json.routes[0].source.provider,
         JSON.stringify(r.json?.routes?.[0]?.source));
 
       const bad = await post(server, '/api/routing',

@@ -13,6 +13,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { TraceStore } from './trace';
 import { MissionRegistry } from './mission/registry';
 import { MissionRecord } from './mission/types';
 import { Oracle } from './mission/oracle';
@@ -182,7 +183,7 @@ export function costBreakdown(missions: MissionRegistry, missionId: string): Cos
  * here in full, because that is what the log keeps.
  */
 export function missionBundle(missions: MissionRegistry, missionId: string,
-  opts: { projectRoot?: string; now?: string } = {}): string | null {
+  opts: { projectRoot?: string; stateRoot?: string; now?: string } = {}): string | null {
   const rec = missions.mission(missionId);
   if (!rec) return null;
 
@@ -219,6 +220,43 @@ export function missionBundle(missions: MissionRegistry, missionId: string,
     chat = missions.events.read(chatId).filter((e) => !startedAt || e.ts >= startedAt);
   } catch { chat = []; }
 
+  /**
+   * The conversations themselves, when the level kept them.
+   *
+   * The bundle used to state flatly that prompts and raw replies "are not
+   * stored" — the same claim the trace footer made while audit was busy
+   * storing them. What is on disk belongs in the document that says it is the
+   * whole record, and what is NOT on disk has to be said as a fact about this
+   * mission rather than as a fact about Zeus.
+   *
+   * Level is not consulted here. The refs on the log say what was kept and
+   * whether it was redacted; reading the CURRENT level would describe a
+   * setting rather than these bytes, and the two differ the moment it changes.
+   */
+  const convo: Array<{ taskId: string; callId: string; stage: string; kind: string;
+    ref: any; text: string | null }> = [];
+  const store = opts.stateRoot ? new TraceStore(opts.stateRoot) : null;
+  for (const t of [{ taskId: missionId, events: missionLog }, ...taskLogs]) {
+    for (const e of t.events) {
+      const pl = (e.payload ?? {}) as any;
+      for (const kind of ['promptBlob', 'responseBlob']) {
+        const ref = pl[kind];
+        if (!ref || typeof ref.hash !== 'string') continue;
+        convo.push({
+          taskId: t.taskId,
+          callId: String(pl.traceCallId ?? '?'),
+          stage: String(pl.stage ?? pl.role ?? '?'),
+          kind: kind === 'promptBlob' ? 'prompt' : 'reply',
+          ref,
+          text: store ? store.get(ref) : null,
+        });
+      }
+    }
+  }
+  const rawKept = convo.filter((c) => c.text !== null && !c.ref.redacted).length;
+  const redactedKept = convo.filter((c) => c.text !== null && c.ref.redacted).length;
+  const gone = convo.filter((c) => c.text === null).length;
+
   let runLog = '';
   let runLogPath: string | null = null;
   if (opts.projectRoot) {
@@ -241,11 +279,34 @@ export function missionBundle(missions: MissionRegistry, missionId: string,
     + `${taskLogs.reduce((a, t) => a + t.events.length, 0)} event(s)`);
   lines.push(`  project chat       ${chat.length} event(s) since this mission began`);
   lines.push(`  runner output      ${runLog ? `${runLog.split('\n').length} line(s)` : 'none on disk'}`);
+  lines.push(`  model conversation ${convo.length
+    ? `${convo.length} of them \u2014 ${rawKept} raw, ${redactedKept} redacted`
+      + `${gone ? `, ${gone} expired or swept` : ''}`
+    : 'none kept for this mission'}`);
   lines.push('');
+  if (rawKept) {
+    // Said at the top, in the document itself, because the person who pastes
+    // this somewhere is not the person who set the level three days ago.
+    lines.push('\u26a0 THIS TRANSCRIPT CONTAINS UNREDACTED MODEL CONVERSATIONS');
+    lines.push(`  ${rawKept} prompt(s)/reply(s) were captured at trace level debug and are`);
+    lines.push('  included below exactly as sent and received. They may contain source');
+    lines.push('  code, secrets, credentials and personal data. Read before sending this');
+    lines.push('  anywhere.');
+    lines.push('');
+  }
   lines.push('NOT CONTAINED');
-  lines.push('  The prompts sent to models and their raw replies are not stored. Events');
-  lines.push('  carry promptHash and promptBytes — a fingerprint and a size, never the');
-  lines.push('  words. What the agents PRODUCED is here in full: designs, findings,');
+  if (!convo.length) {
+    lines.push('  No prompts or raw replies were kept for this mission — its calls ran at');
+    lines.push('  trace level normal, which records promptHash and promptBytes: a');
+    lines.push('  fingerprint and a size, never the words. Raising the level now cannot');
+    lines.push('  reach back and fill them in.');
+  } else if (gone) {
+    lines.push(`  ${gone} kept conversation(s) have expired and been swept from disk. The`);
+    lines.push('  event log still records that they existed, with their hash and size.');
+  } else {
+    lines.push('  Everything the log kept for this mission is included.');
+  }
+  lines.push('  What the agents PRODUCED is here in full either way: designs, findings,');
   lines.push('  reviews, constraints, checks and their outcomes.');
   lines.push('');
   lines.push('  Event payloads passed the redacting sink when they were written. The');
@@ -267,6 +328,23 @@ export function missionBundle(missions: MissionRegistry, missionId: string,
   rule(`project chat since ${startedAt || 'the beginning'}`);
   if (!chat.length) lines.push('(nothing)');
   else dump(chat);
+
+  if (convo.length) {
+    rule('model conversations');
+    for (const c of convo) {
+      const state = c.text === null
+        ? 'EXPIRED — swept from disk'
+        : (c.ref.redacted ? 'redacted before it was written' : 'RAW, unredacted');
+      lines.push(`\u2500\u2500 ${c.taskId} \u00b7 ${c.stage} \u00b7 ${c.kind}`
+        + ` \u00b7 ${c.callId}`);
+      lines.push(`   ${state} \u00b7 ${c.ref.bytes ?? '?'} bytes`
+        + `${c.ref.truncated ? ' \u00b7 TRUNCATED by Zeus' : ''}`
+        + `${c.ref.expiresAt ? ` \u00b7 expires ${c.ref.expiresAt}` : ''}`);
+      lines.push('');
+      lines.push(c.text ?? '(content is gone; the log keeps only the hash and the size)');
+      lines.push('');
+    }
+  }
 
   rule(`runner output${runLogPath ? ` \u2014 ${runLogPath}` : ''}`);
   lines.push(runLog || '(no runner output on disk; the mission may never have been run,'

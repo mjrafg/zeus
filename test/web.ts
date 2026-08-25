@@ -3744,6 +3744,77 @@ export async function webSuite(): Promise<void> {
       /mission log        \d+ event\(s\)/.test(text), 'inventory present');
     check('TR8: an unknown mission yields nothing rather than an empty document',
       missionBundle(fx.missions, `p/M-9999`) === null, 'null for unknown');
+  }
+
+  section('the transcript carries the conversations, and says what kind they are');
+  {
+    // The bundle stated flatly that prompts and raw replies "are not stored" —
+    // the same claim the trace footer made while audit was busy storing them.
+    const fx = fixture();
+    const store = new TraceStore(fx.state);
+    const rec = fx.missions.create('a goal', 'base0');
+    const id = rec.missionId;
+    fx.missions.taskSpawned(id, 'p/T-0001', `${id}/N-0001`, 1);
+
+    // Assembled, not written as one literal: GitHub push protection reads a
+    // diff the same way the redactor reads a prompt.
+    const leaked = 'sk' + '_live_' + 'A1b2C3d4E5f6G7h8J9k0';
+    const red = store.put('a prompt holding ' + leaked + ' as a secret', 'audit');
+    const raw = store.put('the raw reply, exactly as it came back', 'debug');
+    fx.store.append({ taskId: 'p/T-0001', type: 'MODEL_CALL_STARTED',
+      payload: { traceCallId: 'TC-1', stage: 'implementer', promptBlob: red } });
+    fx.store.append({ taskId: 'p/T-0001', type: 'MODEL_CALL_FINISHED',
+      payload: { traceCallId: 'TC-1', stage: 'implementer', responseBlob: raw } });
+
+    const text = missionBundle(fx.missions, id,
+      { stateRoot: fx.state, now: '2026-01-01T00:00:00.000Z' })!;
+
+    check('TRB1: the kept conversations are IN the transcript, not just referenced',
+      text.includes('the raw reply, exactly as it came back'), 'raw content present');
+    check('TRB2: redaction that happened on write survives into the export',
+      text.includes('[redacted:api-key]') && !text.includes(leaked),
+      'the secret does not reappear in the export');
+    check('TRB3: each one says whether it is raw or redacted',
+      text.includes('RAW, unredacted') && text.includes('redacted before it was written'),
+      'the kind is stated per conversation');
+    check('TRB4: and the header warns ONCE, at the top, that raw text is inside',
+      text.indexOf('THIS TRANSCRIPT CONTAINS UNREDACTED MODEL CONVERSATIONS')
+        < text.indexOf('the raw reply, exactly as it came back'),
+      'the warning precedes the thing it warns about');
+    check('TRB5: the count is accurate rather than decorative',
+      /model conversation 2 of them — 1 raw, 1 redacted/.test(text), 'counts match');
+    check('TRB6: it no longer claims prompts are never stored',
+      !text.includes('raw replies are not stored'), 'the old blanket claim is gone');
+
+    // A ref whose bytes are gone is not the same as a call that kept nothing.
+    // Silently omitting it would make an expired conversation indistinguishable
+    // from one that never existed.
+    const orphan = { hash: 'sha256:' + 'a'.repeat(64), bytes: 99, redacted: false,
+      expiresAt: '2020-01-01T00:00:00.000Z' };
+    fx.store.append({ taskId: 'p/T-0001', type: 'MODEL_CALL_STARTED',
+      payload: { traceCallId: 'TC-2', stage: 'reviewer', promptBlob: orphan } });
+    const swept = missionBundle(fx.missions, id, { stateRoot: fx.state })!;
+    check('TRB7: an expired conversation is listed as expired, not omitted',
+      swept.includes('EXPIRED — swept from disk')
+      && swept.includes('1 expired or swept'), 'absence is reported');
+    check('TRB8: and the log still shows it existed',
+      swept.includes('TC-2'), 'the audit trail outlives the content');
+
+    // Without a store to read, the bundle must not imply the content is here.
+    const noStore = missionBundle(fx.missions, id, {})!;
+    check('TRB9: with no store to read, nothing is claimed to be included',
+      !noStore.includes('the raw reply, exactly as it came back')
+      && noStore.includes('3 expired or swept'), 'no content, and it says so');
+
+    // A mission that kept nothing states it as a fact about ITSELF.
+    const fx2 = fixture();
+    const bare = fx2.missions.create('another goal', 'base0');
+    const plain = missionBundle(fx2.missions, bare.missionId, { stateRoot: fx2.state })!;
+    check('TRB10: a mission that kept nothing says so about itself, not about Zeus',
+      plain.includes('none kept for this mission')
+      && plain.includes('its calls ran at'), 'scoped to this mission');
+    check('TRB11: and says raising the level now cannot recover them',
+      plain.includes('cannot') && plain.includes('reach back'), 'the limit is stated');
 
     let server: RunningServer | null = null;
     try {

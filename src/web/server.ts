@@ -538,7 +538,8 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
         const id = resolveId(decodeURIComponent(bundleMatch[1]), sc.projectId);
         if (!isMissionId(id)) { send(res, 400, { error: 'NOT_A_MISSION_ID', id }); return; }
-        const text = missionBundle(sc.missions, id, { projectRoot: sc.root });
+        const text = missionBundle(sc.missions, id,
+          { projectRoot: sc.root, stateRoot: sc.stateRoot });
         if (text === null) { send(res, 404, { error: 'NO_SUCH_MISSION', id }); return; }
         const body = Buffer.from(text, 'utf8');
         res.writeHead(200, {

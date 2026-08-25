@@ -29,6 +29,16 @@
 /** Secret-shaped substrings, removed before anything is written to the log. */
 const SECRET_SHAPES: Array<[RegExp, string]> = [
   [/\b(sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '[redacted:api-key]'],
+  // The hyphen form above misses Stripe, which separates with UNDERSCORES:
+  // sk_live_51H8xQ… went through audit-level redaction untouched and would
+  // have landed in an exported transcript verbatim.
+  //
+  // Kept as its own pattern rather than widening the one above to [-_]. A
+  // generic \b(sk|pk|rk)_… would eat pk_customer_orders_id and every other
+  // primary-key name in a SQL fragment, and redaction that mangles ordinary
+  // code teaches people to turn it off. The live/test segment is what makes
+  // this a key rather than an identifier.
+  [/\b(sk|pk|rk)_(live|test)_[A-Za-z0-9]{16,}/g, '[redacted:api-key]'],
   [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[redacted:github-token]'],
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '[redacted:slack-token]'],
   [/\bAKIA[0-9A-Z]{16}\b/g, '[redacted:aws-key-id]'],

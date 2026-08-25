@@ -158,4 +158,44 @@ export function redactionSuite(): void {
   }
 
   fs.rmSync(TMP, { recursive: true, force: true });
+
+  section('redaction: the separator a vendor actually uses');
+  {
+    // The api-key pattern required a HYPHEN after sk/pk/rk. Stripe separates
+    // with underscores, so sk_live_… went through audit-level redaction
+    // untouched — and audit exists so a transcript can be exported.
+    const r = (t: string) =>
+      (redactPayload({ t }) as { payload: { t: string } }).payload.t;
+
+    // Assembled at runtime, never written as one literal. GitHub's push
+    // protection scans for exactly this shape and refused the commit that
+    // first added these tests — correctly, and with the same pattern the
+    // redactor was missing. A fixture for a secret detector should not read
+    // as a leaked secret in the diff.
+    const key = (kind: string, mode: string) => kind + '_' + mode + '_' + 'A1b2C3d4E5f6G7h8J9k0';
+
+    check('RSK1: a Stripe live secret key is redacted',
+      r('stripe ' + key('sk', 'live') + ' here') === 'stripe [redacted:api-key] here',
+      r('stripe ' + key('sk', 'live') + ' here'));
+    check('RSK2: test keys too — a test key in a log is still a credential',
+      r(key('sk', 'test')).includes('[redacted:api-key]'), r(key('sk', 'test')));
+    check('RSK3: publishable and restricted keys use the same shape',
+      r(key('pk', 'live')).includes('[redacted:api-key]')
+      && r(key('rk', 'live')).includes('[redacted:api-key]'),
+      'pk_ and rk_ covered');
+    check('RSK4: the hyphen form still works — this ADDS a case, it does not move one',
+      r('sk-ant-api03-AAAABBBBCCCCDDDD').includes('[redacted:api-key]'),
+      r('sk-ant-api03-AAAABBBBCCCCDDDD'));
+
+    // Redaction that mangles ordinary code teaches people to turn it off.
+    // pk_ is how half the SQL in the world names a primary key.
+    check('RSK5: a primary-key column name is NOT a credential',
+      r('select pk_customer_orders_id from t') === 'select pk_customer_orders_id from t',
+      r('select pk_customer_orders_id from t'));
+    check('RSK6: nor is an ordinary underscore identifier that starts with sk_',
+      r('const sk_handler_registration_map = {}')
+        === 'const sk_handler_registration_map = {}',
+      r('const sk_handler_registration_map = {}'));
+  }
+
 }

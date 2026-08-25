@@ -55,6 +55,9 @@ import {
 } from './routing';
 import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING, TraceStore } from './trace';
 import { serve as serveGraphMcp } from './graph/mcp';
+import { health as graphHealth, readState as graphState } from './graph/graphify';
+import { revisionOf as graphRevisionOf } from './graph/access';
+import { ensureInstalled as ensureGraphify } from './graph/install';
 import { selftestLive, SelftestReport } from './mission/selftest';
 import {
   Criterion, Oracle, ProjectContext, validateOracle, makeCriterionId,
@@ -351,9 +354,23 @@ function cmdConfig(argv: string[]): number {
 }
 
 function cmdSetup(argv: string[]): number {
+  // Repository intelligence is Zeus infrastructure, so Zeus installs it. A
+  // required dependency the user has to go and find is not a required
+  // dependency, it is a footnote.
+  if (argv.includes('--graphify') || argv.find((a) => !a.startsWith('--')) === 'graphify') {
+    const json = argv.includes('--json');
+    const r = ensureGraphify({ allowInstall: !argv.includes('--dry-run') });
+    if (json) { out(JSON.stringify(r, null, 1)); return r.ok ? 0 : 1; }
+    out(`${r.ok ? `${C.g}✓${C.x}` : `${C.r}✗${C.x}`} ${r.detail}`);
+    if (r.ok && r.action !== 'already-present') {
+      out(`  ${C.dim}graphify belongs to Zeus, not to this project's dependencies`
+        + ` — nothing was added to any package.json${C.x}`);
+    }
+    return r.ok ? 0 : 1;
+  }
   const scopeArg = argv.find((a) => !a.startsWith('--'));
-  if (scopeArg && !['dependencies', 'providers', 'all'].includes(scopeArg)) {
-    err(`unknown setup scope "${scopeArg}" (expected: dependencies, providers)`);
+  if (scopeArg && !['dependencies', 'providers', 'all', 'graphify'].includes(scopeArg)) {
+    err(`unknown setup scope "${scopeArg}" (expected: dependencies, providers, graphify)`);
     return 2;
   }
   const json = argv.includes('--json');
@@ -441,7 +458,8 @@ function cmdDoctor(args: string[]): number {
   const readiness = root && cfg ? projectReadiness({ root, cfg }) : null;
   if (json) {
     out(JSON.stringify({ version: VERSION, runtime: userDataDir(), project: root, capabilities: caps,
-      configProblems: cfg ? validateConfig(cfg) : null, readiness }, null, 1));
+      configProblems: cfg ? validateConfig(cfg) : null, readiness,
+      graphify: graphHealth() }, null, 1));
     return summarize(caps).ok && (readiness?.ok ?? true) ? 0 : 1;
   }
   out(`${C.b}zeus doctor${C.x} ${C.dim}(${VERSION})${C.x}\n`);
@@ -460,6 +478,31 @@ function cmdDoctor(args: string[]): number {
   } else {
     out(`\n${C.dim}Not inside a project; run from a repository for project checks.${C.x}`);
   }
+  // Repository intelligence is infrastructure Zeus owns, so its health belongs
+  // in the same report as the providers rather than in a place only someone
+  // who already knew about it would look.
+  const gh = graphHealth();
+  out(`\n${C.b}Repository intelligence${C.x}`);
+  out(`  ${mark(gh.ok ? 'ok' : 'missing')} graphify${' '.repeat(20)}`
+    + `${gh.ok ? `${gh.version} at ${gh.bin}` : gh.detail}`);
+  if (!gh.ok) {
+    out(`      ${C.dim}→ run zeus setup --graphify to install it${C.x}`);
+    out(`      ${C.dim}without it, stages that reason about the repository are told`
+      + ` so and fall back to Read/Grep/Glob${C.x}`);
+  }
+  if (root && gh.ok) {
+    const rev = graphRevisionOf(root);
+    if (rev) {
+      const st = graphState(path.join(root, PROJECT_DIR, 'state'),
+        path.basename(root), rev, rev);
+      out(`  ${mark(st.present && !st.stale ? 'ok' : 'warn')} project graph`
+        + `${' '.repeat(14)}${st.present
+          ? `${st.nodes} node(s), ${st.edges} edge(s), indexed ${st.indexedRevision?.slice(0, 12)}`
+            + `${st.stale ? ` ${C.y}(STALE — repository is at ${rev.slice(0, 12)})${C.x}` : ''}`
+          : 'not built yet — it is built on demand before the first repository-aware call'}`);
+    }
+  }
+
   // Isolation is reported as what is actually enforced, never as a claim.
   const iso = isolationReport();
   const budgets = deriveBudgets();

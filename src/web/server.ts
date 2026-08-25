@@ -24,6 +24,9 @@ import {
   resolveRouting, validateRouting, providerCapabilities,
 } from '../routing';
 import { TRACE_LEVELS, isTraceLevel, DEBUG_WARNING } from '../trace';
+import { health as graphHealth, readState as graphState } from '../graph/graphify';
+import { revisionOf as graphRevisionOf } from '../graph/access';
+import { MCP_CAPABLE } from '../engine/providers';
 import { MissionRegistry } from '../mission/registry';
 import { isMissionId, isTaskId, scopeOf } from '../mission/types';
 import {
@@ -133,6 +136,7 @@ export const READ_ROUTES = [
   'GET /api/chat',
   'GET /api/projects',
   'GET /api/events/stream',
+  'GET /api/graph',
   'GET /api/routing',
 ] as const;
 
@@ -627,6 +631,30 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           // "Debug, because this mission was switched to it" are different
           // things to someone deciding whether to switch it back.
           trace: traceLevelFor(sc.missions, id, sc.root),
+        });
+        return;
+      }
+
+      // Repository intelligence status. Never hidden: an operator deciding
+      // whether to trust a contract needs to know whether the agent that wrote
+      // it could see the repository, and a stale graph has to say so.
+      if (method === 'GET' && url.pathname === '/api/graph') {
+        const sc = scoped(url);
+        if (!sc) { send(res, 404, { error: 'NO_SUCH_PROJECT' }); return; }
+        const h = graphHealth();
+        const rev = graphRevisionOf(sc.root);
+        const st = (h.ok && rev)
+          ? graphState(sc.stateRoot, sc.projectId, rev, rev) : null;
+        send(res, 200, {
+          projectId: sc.projectId,
+          installation: h.ok ? 'READY' : (h.fault ?? 'GRAPHIFY_UNAVAILABLE'),
+          version: h.version, bin: h.bin, detail: h.detail,
+          repositoryRoot: sc.root,
+          currentRevision: rev,
+          graph: st,
+          // Stated rather than implied: a reader should not have to infer from
+          // a provider name which stages can actually query the graph.
+          mcpCapableProviders: [...MCP_CAPABLE],
         });
         return;
       }

@@ -10,7 +10,7 @@ import { execFileSync } from 'child_process';
 import { check, section } from './harness';
 import * as q from '../src/graph/query';
 import type { Graph } from '../src/graph/query';
-import { atLeast, graphDirFor, readState, loadGraph } from '../src/graph/graphify';
+import { atLeast, graphDirFor, readState, loadGraph, GRAPHIFY_DIST } from '../src/graph/graphify';
 import { TOOLS, callTool, PROTOCOL } from '../src/graph/mcp';
 import { repoIndex, intelSection, readGraphOps, renderEvidence } from '../src/graph/intel';
 import { bootstrapArgv, probe } from '../src/graph/access';
@@ -453,6 +453,48 @@ export async function graphSuite(): Promise<void> {
     // Without tools the directive would be a lie.
     check('OH5: with no tools attached, the header is unchanged',
       /: COMPILE_HEADER;/.test(comp), 'conditional on repoGraph');
+  }
+
+  section('installation: Zeus owns graphify, and proves it works');
+  {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'graph', 'install.ts'), 'utf8');
+    const cli = fs.readFileSync(path.join(__dirname, '..', 'src', 'cli.ts'), 'utf8');
+
+    // The distribution is graphifyy; the command is graphify. That asymmetry is
+    // the likeliest way an install silently does nothing.
+    check('GIN1: the distribution name is used for install, not the command name',
+      /install'.*GRAPHIFY_DIST|GRAPHIFY_DIST\)/.test(src) && GRAPHIFY_DIST === 'graphifyy',
+      GRAPHIFY_DIST);
+    check('GIN2: a compatible existing install is REUSED, not reinstalled over',
+      /action: 'already-present'/.test(src)
+      && src.indexOf("action: 'already-present'") < src.indexOf('venv'),
+      'reuse comes first');
+    // Debian's python3 refuses pip install into the system environment, and
+    // --break-system-packages is exactly what its name says.
+    // The flag is NAMED in a comment explaining why it is not used, so the
+    // check has to look at the command being run rather than at the file.
+    const pipArgs = (src.match(/run\(pip, \[[^\]]*\]/) ?? [''])[0];
+    check('GIN3: it installs into a venv Zeus owns, not the system python',
+      /'-m', 'venv'/.test(src) && !/break-system-packages/.test(pipArgs),
+      pipArgs);
+    check('GIN4: and not into the project — graphify is Zeus infrastructure',
+      !/package\.json/.test(src), 'nothing added to the project');
+    // A file existing where a file was expected is not health.
+    check('GIN5: health is proven by RUNNING it after installing',
+      /const after = health\(installed\)/.test(src)
+      && /installed, but it does not work/.test(src), 'ran, not assumed');
+    check('GIN6: a too-old version installed is still a failure',
+      /older than \$\{GRAPHIFY_MIN\}/.test(src), 'version verified after install');
+    check('GIN7: failure is never reported as Ready',
+      /action: 'failed'/.test(src) && !/ok: true[\s\S]{0,60}action: 'failed'/.test(src),
+      'no false Ready');
+
+    check('GIN8: setup can install it',
+      /--graphify/.test(cli) && /ensureGraphify\(/.test(cli), 'zeus setup --graphify');
+    check('GIN9: doctor reports it beside the providers, not in a footnote',
+      /Repository intelligence/.test(cli) && /graphHealth\(\)/.test(cli), 'in doctor');
+    check('GIN10: and reports the project graph’s revision and staleness',
+      /STALE — repository is at/.test(cli), 'staleness surfaced');
   }
 
   section('version compatibility is compared, not string-matched');

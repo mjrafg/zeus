@@ -262,7 +262,7 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 14 && WRITE_ROUTES.length === 14,
+      READ_ROUTES.length === 15 && WRITE_ROUTES.length === 14,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 

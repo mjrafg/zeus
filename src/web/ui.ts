@@ -1160,9 +1160,65 @@ async function loadRouting() {
     + '<option value="global">global default</option></select>'
     + '<span class="dim" id="tierwhy"></span></div>';
   h += '<div id="stages"></div>';
+  h += '<div id="graphstatus"></div>';
   el.innerHTML = h;
   $('tier').onchange = () => renderStages();
   renderStages();
+  loadGraphStatus();
+}
+
+/**
+ * Whether the agents can see the repository, and which snapshot they see.
+ *
+ * Never hidden and never softened. Someone deciding whether to trust a contract
+ * needs to know whether the agent that wrote it could look at the code, and a
+ * stale graph has to say so rather than reporting a comfortable Ready.
+ */
+async function loadGraphStatus() {
+  const el = $('graphstatus');
+  if (!el) return;
+  let d;
+  try { d = await api(scope('/graph')); } catch { return; }
+  const g = d.graph;
+  const ready = d.installation === 'READY';
+  const stale = !!(g && g.stale);
+  const state = !ready ? 'Unavailable' : !g || !g.present ? 'Not built yet'
+    : stale ? 'Stale' : 'Current';
+  const cls = !ready ? 'bad' : (!g || !g.present) ? 'warn' : stale ? 'warn' : 'ok';
+  let h = '<h2>Repository intelligence</h2>';
+  h += '<table>';
+  h += '<tr><td>Installation</td><td class="' + (ready ? 'ok' : 'bad') + '">'
+    + esc(ready ? 'Ready' : d.installation) + '</td></tr>';
+  if (d.version) h += '<tr><td>Version</td><td>' + esc(d.version) + '</td></tr>';
+  h += '<tr><td>Repository</td><td>' + esc(d.projectId) + '</td></tr>';
+  h += '<tr><td>Project graph</td><td class="' + cls + '">' + esc(state) + '</td></tr>';
+  if (g && g.present) {
+    h += '<tr><td>Indexed revision</td><td>'
+      + esc(String(g.indexedRevision || '').slice(0, 12)) + '</td></tr>';
+    h += '<tr><td>Current revision</td><td>'
+      + esc(String(d.currentRevision || '').slice(0, 12)) + '</td></tr>';
+    h += '<tr><td>Size</td><td>' + g.nodes + ' node(s), ' + g.edges + ' edge(s)</td></tr>';
+    if (g.indexedAt) h += '<tr><td>Last indexed</td><td>' + esc(g.indexedAt) + '</td></tr>';
+  }
+  h += '</table>';
+  if (!ready) {
+    h += '<p class="dim">' + esc(d.detail || '')
+      + ' Stages that reason about the repository are told so, and fall back to '
+      + 'Read/Grep/Glob rather than assuming.</p>';
+  } else if (stale) {
+    h += '<p class="warn">The graph describes an older revision. It is rebuilt '
+      + 'automatically before the next repository-aware call.</p>';
+  } else if (!g || !g.present) {
+    h += '<p class="dim">Built on demand, before the first repository-aware call.</p>';
+  }
+  // Which stages can actually query it is a routing fact, so it belongs beside
+  // the routing table rather than in a footnote nobody reads.
+  const caps = (d.mcpCapableProviders || []).join(', ');
+  h += '<p class="dim">Graph tools are attached only for providers that can use '
+    + 'them non-interactively: <b>' + esc(caps || 'none') + '</b>. Stages routed '
+    + 'elsewhere still receive the deterministic repository index \u2014 directories, '
+    + 'manifests and their scripts \u2014 and are told the tools are unavailable.</p>';
+  el.innerHTML = h;
 }
 
 function renderStages() {

@@ -30,6 +30,7 @@ import { createHash } from 'crypto';
 import type { Provider, AgentResponse, GraphAccess } from '../engine/providers';
 import type { ProcessSupervisor } from '../engine/exec';
 import type { ExecutionPolicy } from '../engine/policy';
+import { readScopeSummary, type ReadScopeVerdict } from '../engine/readscope';
 
 export const FRONT_DOOR_INTENTS = [
   'QUESTION', 'WORK_REQUEST', 'CONTROL_ACTION', 'AMBIGUOUS',
@@ -263,6 +264,14 @@ export interface FrontDoorInput {
   keep?: (content: string) => unknown | null;
   /** Reads back what the tool server actually answered, for the record. */
   readOps?: () => Array<Record<string, unknown>>;
+  /**
+   * Records WHERE this call looked, from its own transcript.
+   *
+   * The front door holds no Bash, so its reach is already narrowed by which
+   * tools it was given — but Read and Glob take absolute paths, and a tool
+   * list is not a filesystem boundary.
+   */
+  inspectReads?: ((traceCallId: string, raw: string) => ReadScopeVerdict) | null;
   provider: Provider;
   supervisor: ProcessSupervisor;
   policy: ExecutionPolicy;
@@ -335,6 +344,11 @@ export async function decide(input: FrontDoorInput): Promise<FrontDoorDecision> 
 
   const decision = parseDecision(res, input.message);
   const ops = input.readOps ? input.readOps() : [];
+  // The graph log says what the TOOL SERVER answered. It says nothing about
+  // Read, Grep or Glob, which do not go through it — so without this the front
+  // door's file access is the one part of the call with no record at all.
+  const readScope = input.inspectReads
+    ? input.inspectReads(traceCallId, res.raw ?? res.text ?? '') : null;
 
   input.trace?.('MODEL_CALL_FINISHED', {
     traceCallId, stage: 'front-door', provider: input.provider.id,
@@ -353,6 +367,7 @@ export async function decide(input: FrontDoorInput): Promise<FrontDoorDecision> 
     // Every tool the agent actually called, from the server's own log rather
     // than from anything it said about itself.
     graphOps: ops, graphQueryCount: ops.length,
+    ...(readScope ? { readScope: readScopeSummary(readScope) } : {}),
     ...(input.keep ? { responseBlob: input.keep(res.raw ?? res.text ?? '') } : {}),
     finishedAt: new Date().toISOString(),
   });

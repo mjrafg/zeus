@@ -107,12 +107,16 @@ export async function oracleSuite(): Promise<void> {
     // Pinned, not assumed: the probe went stale once, and the registry fix is
     // what stops it happening again.
     // 59 -> 62 with the agent trace: MODEL_CALL_STARTED, MODEL_CALL_FINISHED
-    // and TRACE_WRITE_FAILED. The pin exists so a new type is acknowledged
+    // and TRACE_WRITE_FAILED. 65 -> 67 with the read-scope check:
+    // ROLE_READ_ESCAPE and READ_SCOPE_UNKNOWN, which is exactly the
+    // acknowledgement this pin exists to force - ROLE_READ_ESCAPE carries
+    // verbatim command lines, so it had better be one of the types RS2
+    // exercises against the secret fixtures. The pin exists so a new type is acknowledged
     // rather than slipped in, and it matters here because RS2 exercises every
     // DISCOVERED type against secret fixtures — a type that arrived unnoticed
     // would be a type nobody had checked for leaks.
-    check('OR12: the event-type total is pinned at 65',
-      discovered.length === 65, `${discovered.length} types`);
+    check('OR12: the event-type total is pinned at 67',
+      discovered.length === 67, `${discovered.length} types`);
     check('OR12e: the chat events are discovered automatically, like every other family',
       ['CHAT_MESSAGE', 'CHAT_CARD_DECISION'].every((n) => discovered.includes(n)));
     check('OR12d: the budget revision and the stop decision are discovered automatically',

@@ -13,6 +13,7 @@
 
 import { readGraphOps, verifyGraphEvidence } from '../graph/intel';
 import { blocks, verdictDetail, type WriteVerdict } from '../engine/writecheck';
+import { readScopeSummary, type ReadScopeVerdict } from '../engine/readscope';
 import type { GraphAccess } from '../engine/providers';
 import { Section, assemble, checklist } from './context';
 import { createHash } from 'crypto';
@@ -171,6 +172,16 @@ export interface PlanInput {
    * fail-open got built in the first place.
    */
   verifyWrites?: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
+  /**
+   * Reads the provider's transcript afterwards and records WHERE this stage
+   * looked.
+   *
+   * Observational in V1 and typed as such: nothing downstream branches on it.
+   * The write check guards the tree; this is the only thing that notices an
+   * agent leaving the repository at all, which is how M-0032's critic came to
+   * read Zeus's own source and every mission's event log unremarked.
+   */
+  inspectReads?: ((traceCallId: string, raw: string) => ReadScopeVerdict) | null;
   /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
   intel?: string | null;
   /** Where the graph server appends what it answered, for the manifest. */
@@ -424,6 +435,12 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
     // meant the result was observed and then discarded.
     writeVerdict = input.verifyWrites
       ? input.verifyWrites(traceCallId, input.baseSha ?? null) : null;
+    // NOT hoisted out of the try the way `writeVerdict` is, and the difference
+    // is the point: a write verdict stops the stage, so its guard lives after
+    // the catch. A read verdict is evidence. If the provider threw, there is
+    // no transcript to read and nothing to record.
+    const readScope: ReadScopeVerdict | null = input.inspectReads
+      ? input.inspectReads(traceCallId, res.raw ?? res.text ?? '') : null;
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       outcome: res.outcome,
@@ -458,6 +475,11 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
         ...(writeVerdict.state === 'ROLE_WRITE_VIOLATION'
           ? { violation: writeVerdict.payload } : {}),
       } } : {}),
+      // WHERE it looked, beside whether it wrote. Two records rather than one
+      // because they answer different questions from different evidence: the
+      // write check reads the tree, this reads the transcript, and folding
+      // them together would let one of them borrow the other's confidence.
+      ...(readScope ? { readScope: readScopeSummary(readScope) } : {}),
       ...(input.graphLogPath ? (() => {
         const ops = readGraphOps(input.graphLogPath!);
         return { graphOps: ops, graphQueryCount: ops.length };
@@ -613,6 +635,14 @@ export const PLAN_CRITIQUE_HEADER = [
   'Mark a finding BLOCKING only if the plan cannot succeed as written. Everything',
   'else is ADVISORY.',
   '',
+  'WHAT YOUR ANSWER DOES, so you can weigh it. One BLOCKING finding REJECTS the',
+  'plan outright and sends the planner back to plan again, which costs a full',
+  'planning round of real money. Any ADVISORY finding stops the mission and puts',
+  'it in front of a person. Only a critique that raises nothing at all lets the',
+  'plan proceed. Nothing here is free, and none of it is advice the planner reads',
+  'and weighs — so report what you believe, at the severity you believe it, and',
+  'do not pad the list to look thorough.',
+  '',
   'Reply with ONLY: {"findings":[{"code":"...","severity":"BLOCKING|ADVISORY",',
   ' "nodeId":"...","detail":"..."}],"usedContext":[...]}',
 ].join('\n');
@@ -645,6 +675,16 @@ export async function critiquePlan(input: {
    * fail-open got built in the first place.
    */
   verifyWrites?: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
+  /**
+   * Reads the provider's transcript afterwards and records WHERE this stage
+   * looked.
+   *
+   * Observational in V1 and typed as such: nothing downstream branches on it.
+   * The write check guards the tree; this is the only thing that notices an
+   * agent leaving the repository at all, which is how M-0032's critic came to
+   * read Zeus's own source and every mission's event log unremarked.
+   */
+  inspectReads?: ((traceCallId: string, raw: string) => ReadScopeVerdict) | null;
   /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
   intel?: string | null;
   /** Where the graph server appends what it answered, for the manifest. */
@@ -735,6 +775,12 @@ export async function critiquePlan(input: {
     // meant the result was observed and then discarded.
     writeVerdict = input.verifyWrites
       ? input.verifyWrites(traceCallId, input.baseSha ?? null) : null;
+    // NOT hoisted out of the try the way `writeVerdict` is, and the difference
+    // is the point: a write verdict stops the stage, so its guard lives after
+    // the catch. A read verdict is evidence. If the provider threw, there is
+    // no transcript to read and nothing to record.
+    const readScope: ReadScopeVerdict | null = input.inspectReads
+      ? input.inspectReads(traceCallId, res.raw ?? res.text ?? '') : null;
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       outcome: res.outcome,
@@ -769,6 +815,11 @@ export async function critiquePlan(input: {
         ...(writeVerdict.state === 'ROLE_WRITE_VIOLATION'
           ? { violation: writeVerdict.payload } : {}),
       } } : {}),
+      // WHERE it looked, beside whether it wrote. Two records rather than one
+      // because they answer different questions from different evidence: the
+      // write check reads the tree, this reads the transcript, and folding
+      // them together would let one of them borrow the other's confidence.
+      ...(readScope ? { readScope: readScopeSummary(readScope) } : {}),
       ...(input.graphLogPath ? (() => {
         const ops = readGraphOps(input.graphLogPath!);
         return { graphOps: ops, graphQueryCount: ops.length };

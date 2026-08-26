@@ -18,6 +18,7 @@ import { createHash } from 'crypto';
 import { Provider, AgentResponse, type GraphAccess } from '../engine/providers';
 import { readGraphOps, verifyGraphEvidence } from '../graph/intel';
 import { blocks, verdictDetail, type WriteVerdict } from '../engine/writecheck';
+import { readScopeSummary, type ReadScopeVerdict } from '../engine/readscope';
 import { ProcessSupervisor } from '../engine/exec';
 import { ExecutionPolicy } from '../engine/policy';
 import {
@@ -60,6 +61,16 @@ export interface CompileInput {
    * fail-open got built in the first place.
    */
   verifyWrites?: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
+  /**
+   * Reads the provider's transcript afterwards and records WHERE this stage
+   * looked.
+   *
+   * Observational in V1 and typed as such: nothing downstream branches on it.
+   * The write check guards the tree; this is the only thing that notices an
+   * agent leaving the repository at all, which is how M-0032's critic came to
+   * read Zeus's own source and every mission's event log unremarked.
+   */
+  inspectReads?: ((traceCallId: string, raw: string) => ReadScopeVerdict) | null;
   /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
   intel?: string | null;
   /** Where the graph server appends what it answered, for the manifest. */
@@ -303,6 +314,12 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
     // meant the result was observed and then discarded.
     writeVerdict = input.verifyWrites
       ? input.verifyWrites(traceCallId, input.baseSha ?? null) : null;
+    // NOT hoisted out of the try the way `writeVerdict` is, and the difference
+    // is the point: a write verdict stops the stage, so its guard lives after
+    // the catch. A read verdict is evidence. If the provider threw, there is
+    // no transcript to read and nothing to record.
+    const readScope: ReadScopeVerdict | null = input.inspectReads
+      ? input.inspectReads(traceCallId, res.raw ?? res.text ?? '') : null;
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       outcome: res.outcome,
@@ -337,6 +354,11 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
         ...(writeVerdict.state === 'ROLE_WRITE_VIOLATION'
           ? { violation: writeVerdict.payload } : {}),
       } } : {}),
+      // WHERE it looked, beside whether it wrote. Two records rather than one
+      // because they answer different questions from different evidence: the
+      // write check reads the tree, this reads the transcript, and folding
+      // them together would let one of them borrow the other's confidence.
+      ...(readScope ? { readScope: readScopeSummary(readScope) } : {}),
       // Derived from the server's log, never from the reply. A model that
       // writes "I inspected landing.jsx" has made a claim; these lines were
       // written by the process that answered the query.
@@ -437,7 +459,52 @@ export interface CritiqueResult {
   providerUsage?: unknown;
 }
 
-const CRITIQUE_HEADER = [
+/**
+ * The vocabulary this prompt asks the critic to answer in.
+ *
+ * IT WENT LOOKING FOR THIS. talkbridge/M-0032's critic was asked for a
+ * `modeOpinion` of `AUTO|OPTIONAL_CONFIRMATION|REQUIRED_CONSENT` and was never
+ * told what those words mean, what a probe is allowed to be, or what a finding
+ * costs. So it left the repository and read Zeus's own source until it found
+ * out — and then applied what it half-learned, faulting an EXTERNAL_FACT probe
+ * for not resolving to a declared command, which is the one rule probes exist
+ * to be exempt from. The prompt asked a model to referee a game and handed it
+ * no rulebook.
+ *
+ * Every line below is checked against the code that implements it:
+ * `evaluatorResolves` and `validateOracle` for the evaluator rules,
+ * `findingsFloor` and `applyCriticMode` for what an answer does.
+ */
+export const CRITIQUE_GLOSSARY = [
+  'WHAT THESE WORDS MEAN. This vocabulary is Zeus\'s. It is defined here so you',
+  'do not have to infer it, and so you have no reason to go looking for it.',
+  '',
+  '  EXECUTABLE     proven by running a DECLARED project command. Its evaluator',
+  '                 must BE one of the commands under PROJECT COMMANDS, or one',
+  '                 of them with extra arguments. Anything else cannot run.',
+  '  EXTERNAL_FACT  proven by a PROBE: an ad-hoc command that is deliberately',
+  '                 NOT required to be a declared command. A probe naming a',
+  '                 command the project does not declare is CORRECT USE of the',
+  '                 type, not a defect. This is how a compiler verifies a part',
+  '                 of the repository the declared commands do not cover.',
+  '  AI_JUDGED      proven by a judge reading named artifacts against a rubric.',
+  '',
+  '  AUTO                   accepted with nobody asked.',
+  '  OPTIONAL_CONFIRMATION  put in front of a person, who may accept it.',
+  '  REQUIRED_CONSENT       a person must accept it explicitly.',
+  '',
+  'WHAT YOUR ANSWER DOES. Your modeOpinion can only RAISE the mode Zeus computed',
+  'on its own; it can never lower it. Your FINDINGS act separately and regardless',
+  'of your opinion: ANY finding removes the automatic path, and a finding whose',
+  'code names an EVALUATOR, a RUBRIC or MECHANICALLY_PROVABLE forces',
+  'REQUIRED_CONSENT by itself.',
+  '',
+  'So a finding is not free. It stops the mission and costs a person their',
+  'attention. Report what you actually believe is wrong, and do not pad the list',
+  'to look thorough.',
+].join('\n');
+
+export const CRITIQUE_HEADER = [
   'You are reviewing a compiled mission contract INDEPENDENTLY.',
   'You have the goal, the criteria, what this project can run, and the evidence',
   'that exists. You do NOT have the compiler\'s reasoning: form your own.',
@@ -446,6 +513,8 @@ const CRITIQUE_HEADER = [
   'criteria typed AI_JUDGED that could be proven mechanically; rubrics too weak',
   'to decide anything; evaluators that would not prove their statement; and',
   'authority the compiler failed to declare.',
+  '',
+  CRITIQUE_GLOSSARY,
   '',
   'Reply with ONLY: {"findings":[{"code":"...","criterionId":"...","detail":"..."}],',
   ' "modeOpinion":"AUTO|OPTIONAL_CONFIRMATION|REQUIRED_CONSENT","usedContext":[...]}',
@@ -478,6 +547,16 @@ export async function critiqueOracle(input: {
    * fail-open got built in the first place.
    */
   verifyWrites?: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
+  /**
+   * Reads the provider's transcript afterwards and records WHERE this stage
+   * looked.
+   *
+   * Observational in V1 and typed as such: nothing downstream branches on it.
+   * The write check guards the tree; this is the only thing that notices an
+   * agent leaving the repository at all, which is how M-0032's critic came to
+   * read Zeus's own source and every mission's event log unremarked.
+   */
+  inspectReads?: ((traceCallId: string, raw: string) => ReadScopeVerdict) | null;
   intel?: string | null;
   graphLogPath?: string | null;
   missionId: string; projectId: string; goal: string; criteria: Criterion[];
@@ -574,6 +653,12 @@ export async function critiqueOracle(input: {
     // meant the result was observed and then discarded.
     writeVerdict = input.verifyWrites
       ? input.verifyWrites(traceCallId, input.baseSha ?? null) : null;
+    // NOT hoisted out of the try the way `writeVerdict` is, and the difference
+    // is the point: a write verdict stops the stage, so its guard lives after
+    // the catch. A read verdict is evidence. If the provider threw, there is
+    // no transcript to read and nothing to record.
+    const readScope: ReadScopeVerdict | null = input.inspectReads
+      ? input.inspectReads(traceCallId, res.raw ?? res.text ?? '') : null;
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       outcome: res.outcome,
@@ -608,6 +693,11 @@ export async function critiqueOracle(input: {
         ...(writeVerdict.state === 'ROLE_WRITE_VIOLATION'
           ? { violation: writeVerdict.payload } : {}),
       } } : {}),
+      // WHERE it looked, beside whether it wrote. Two records rather than one
+      // because they answer different questions from different evidence: the
+      // write check reads the tree, this reads the transcript, and folding
+      // them together would let one of them borrow the other's confidence.
+      ...(readScope ? { readScope: readScopeSummary(readScope) } : {}),
       // Derived from the server's log, never from the reply. A model that
       // writes "I inspected landing.jsx" has made a claim; these lines were
       // written by the process that answered the query.

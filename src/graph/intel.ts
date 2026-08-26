@@ -193,6 +193,38 @@ export function intelSection(opts: {
   L.push('Continue investigating until further inspection is unlikely to materially');
   L.push('change your decision. If something you find contradicts an earlier assumption,');
   L.push('revise your understanding before you answer.');
+
+  // THE BOUNDARY, SAID OUT LOUD.
+  //
+  // M-0032's oracle critic read the repository correctly and then read Zeus's
+  // own source, and enumerated every mission's event log under .zeus/state on
+  // the way past. It was not misbehaving: nothing had ever told it where the
+  // edge was, and the prompt it was answering used a vocabulary defined
+  // nowhere but in that source.
+  //
+  // In V1 this instruction IS the boundary, exactly as the write instruction
+  // is. Zeus records where each stage looked afterwards; it does not prevent
+  // the read. Anyone who needs prevention runs Zeus in a container.
+  L.push('');
+  L.push('WHAT IS IN SCOPE');
+  L.push(`The repository root above is the boundary of this task: ${opts.index.root}`);
+  L.push('Everything you legitimately need is inside it.');
+  L.push('');
+  L.push('Two things outside it are specifically NOT yours to read:');
+  L.push('  .zeus/ inside this repository   Zeus\'s own state — the event log for');
+  L.push('    this mission and every other one, previous critiques, previous');
+  L.push('    verdicts, trace blobs. Reading a previous verdict destroys the');
+  L.push('    independence that makes your answer worth anything, and reading the');
+  L.push('    log tells you nothing about the code you were asked about.');
+  L.push('  Zeus\'s own installation directory, elsewhere on this host. It is the');
+  L.push('    machinery running you, not the project you are reasoning about.');
+  L.push('');
+  L.push('If a term in your instructions is undefined, say so in your answer. Do');
+  L.push('not go looking for its implementation: what you would find is how this');
+  L.push('version happens to work, not what you were asked to judge.');
+  L.push('');
+  L.push('Zeus reads your transcript afterwards and records every path you named');
+  L.push('outside this root.');
   return L.join('\n');
 }
 

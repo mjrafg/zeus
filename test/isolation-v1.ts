@@ -21,6 +21,12 @@ import {
 } from '../src/engine/providers';
 import { verifyGraphEvidence, goalRequiresGraphEvidence, intelSection, repoIndex }
   from '../src/graph/intel';
+import {
+  checkReadScope, readScopeSummary, toolCallsIn, pathsIn, classifyPath, blocksInV1,
+} from '../src/engine/readscope';
+import { CRITIQUE_HEADER, CRITIQUE_GLOSSARY } from '../src/mission/compile';
+import { validateOracle } from '../src/mission/oracle';
+import { buildReviewPayload, ORACLE_CRITIQUE_POLICY } from '../src/engine/reviewcontext';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-v1iso-'));
 let seq = 0;
@@ -383,4 +389,289 @@ export async function isolationV1Suite(): Promise<void> {
     check('V1-K7: a query that returned nothing still counts as having asked',
       empty.established, empty.reason);
   }
+
+  /* ---------------------------------------------------------------------- *
+   * Read scope: where a stage LOOKED, not just whether it wrote.
+   *
+   * Replayed from talkbridge/M-0032, whose oracle critic read the project
+   * correctly and then read Zeus's own source and every mission's event log,
+   * because the prompt asked it to answer in a vocabulary it was never given.
+   * ---------------------------------------------------------------------- */
+
+  section('V1 read scope: an unreadable transcript is not a clean one');
+  {
+    const meta = { stage: 'oracle-critic', traceCallId: 'TC-test', provider: 'codex' };
+    const roots = { projectRoot: '/work/talkbridge',
+      zeusRoot: '/opt/zeus-engine', stateRoot: null };
+
+    const unreadable = checkReadScope('this is prose, not a transcript', roots, meta);
+    check('V1-RS1: a transcript Zeus cannot parse is UNKNOWN, never in scope',
+      unreadable.state === 'READ_SCOPE_UNKNOWN', unreadable.state);
+    check('V1-RS2: and the summary refuses to claim it was in scope',
+      readScopeSummary(unreadable).inScope === null
+      && readScopeSummary(unreadable).inspected === false,
+      JSON.stringify(readScopeSummary(unreadable)));
+
+    const empty = checkReadScope('', roots, meta);
+    check('V1-RS3: an absent transcript is UNKNOWN too, and says which',
+      empty.state === 'READ_SCOPE_UNKNOWN'
+      && /returned no transcript/.test((empty as any).detail),
+      (empty as any).detail);
+
+    // The distinction the write check had to learn: nothing found and nothing
+    // readable are different facts.
+    const quiet = ['{"type":"thread.started","thread_id":"x"}',
+      '{"type":"turn.started"}',
+      '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"hi"}}',
+      '{"type":"turn.completed"}'].join('\n');
+    const q = checkReadScope(quiet, roots, meta);
+    check('V1-RS4: a REAL zero — recognised transcript, no tool calls — is in scope',
+      q.state === 'VERIFIED_IN_SCOPE' && (q as any).toolCalls === 0, q.state);
+  }
+
+  section('V1 read scope: what the two provider transcripts say was called');
+  {
+    const codex = [
+      '{"type":"thread.started","thread_id":"x"}',
+      JSON.stringify({ type: 'item.started', item: { id: 'i1', type: 'command_execution',
+        command: '/bin/bash -lc "rg --files"' } }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'command_execution',
+        command: '/bin/bash -lc "rg --files"' } }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'i2', type: 'command_execution',
+        command: '/bin/bash -lc "sed -n 1,80p app/src/pages/landing.jsx"' } }),
+    ].join('\n');
+    const parsedCodex = toolCallsIn(codex);
+    check('V1-RS5: a codex transcript is recognised and its shell commands read',
+      parsedCodex.recognised && parsedCodex.calls.length === 2,
+      `${parsedCodex.calls.length} call(s)`);
+    check('V1-RS6: a command reported at started AND completed counts once',
+      parsedCodex.calls.filter((c) => /rg --files/.test(c.text)).length === 1);
+
+    const claude = [
+      '{"type":"system","subtype":"init","tools":["Bash","Read"]}',
+      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start' } }),
+      JSON.stringify({ type: 'assistant', message: { content: [
+        { type: 'text', text: 'looking' },
+        { type: 'tool_use', name: 'Read', input: { file_path: '/opt/zeus-engine/src/mission/oracle.ts' } },
+      ] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [
+        { type: 'tool_use', name: 'Bash', input: { command: 'cat app/package.json' } },
+      ] } }),
+      '{"type":"result","subtype":"success"}',
+    ].join('\n');
+    const parsedClaude = toolCallsIn(claude);
+    check('V1-RS7: a claude transcript is recognised and its tool inputs read',
+      parsedClaude.recognised && parsedClaude.calls.length === 2,
+      parsedClaude.calls.map((c) => c.tool).join(', '));
+    check('V1-RS8: the streamed deltas of the same call are not counted again',
+      parsedClaude.calls.filter((c) => c.tool === 'Read').length === 1);
+
+    // Only the CALLS. A grep that returns a hundred paths is one reach.
+    const withResults = [
+      JSON.stringify({ type: 'item.completed', item: { id: 'i1', type: 'command_execution',
+        command: '/bin/bash -lc "rg zeus app/src"',
+        aggregated_output: '/opt/zeus-engine/src/a.ts\n/opt/zeus-engine/src/b.ts\n' } }),
+    ].join('\n');
+    const res = checkReadScope(withResults, roots2(), meta2());
+    check('V1-RS9: paths in tool OUTPUT are not counted as reads',
+      res.state === 'VERIFIED_IN_SCOPE', JSON.stringify(readScopeSummary(res)));
+  }
+
+  section('V1 read scope: what counts as leaving the repository');
+  {
+    const roots = roots2();
+    const cls = (p: string) => classifyPath(p, roots)?.kind ?? 'IN_SCOPE';
+
+    check('V1-RS10: a path inside the repository is in scope',
+      cls('app/src/pages/landing.jsx') === 'IN_SCOPE'
+      && cls('/work/talkbridge/app/src') === 'IN_SCOPE');
+    // Every codex command begins /bin/bash -lc. A report whose top finding is
+    // the shell it ran in is a report nobody reads twice.
+    check('V1-RS11: the shell and the OS are not escapes',
+      cls('/bin/bash') === 'IN_SCOPE' && cls('/usr/bin/env') === 'IN_SCOPE'
+      && cls('/tmp/scratch') === 'IN_SCOPE');
+    check('V1-RS12: Zeus\'s own installation is ZEUS_INSTALL',
+      cls('/opt/zeus-engine/src/mission/oracle.ts') === 'ZEUS_INSTALL');
+    // Inside the project, and still not the project.
+    check('V1-RS13: .zeus is MISSION_STATE even though it lives in the repo',
+      cls('.zeus') === 'MISSION_STATE'
+      && cls('.zeus/state/tasks/talkbridge~M-0031/events.jsonl') === 'MISSION_STATE'
+      && cls('/work/talkbridge/.zeus/state') === 'MISSION_STATE');
+    check('V1-RS14: another project on the same host is OUTSIDE_PROJECT',
+      cls('/work/other-project/src') === 'OUTSIDE_PROJECT'
+      && cls('/var/lib/agent/.claude/settings.json') === 'OUTSIDE_PROJECT');
+    // Zeus developed on itself must not report every read as an escape.
+    const selfHosted = { projectRoot: '/opt/zeus-engine', zeusRoot: '/opt/zeus-engine',
+      stateRoot: null };
+    check('V1-RS15: when Zeus IS the project, its source is the work, not an escape',
+      classifyPath('src/mission/oracle.ts', selfHosted) === null
+      && classifyPath('/opt/zeus-engine/src/engine/exec.ts', selfHosted) === null);
+    check('V1-RS16: and its .zeus is still out of bounds even then',
+      classifyPath('.zeus/state', selfHosted)?.kind === 'MISSION_STATE');
+
+    // MEASURED AGAINST THE REAL CORPUS. Replaying every transcript on the host
+    // found three escapes and two were rg patterns. A signal that is
+    // two-thirds noise is not a signal, so these exact strings are pinned.
+    const noise = [
+      "rg -n 'from\\s+[\\'\"]([^\\'\"]+)' app/src",
+      "rg -n '\\$[0-9.]+/month' app/src/mock.js",
+      "rg -n '/i18n|/setSettingsMany' app/src",
+      "rg -n '(mock|content)\\.js' app/src",
+    ].join(' && ');
+    check('V1-RS18: regex fragments on a command line are not reads',
+      pathsIn(noise).length === 0, pathsIn(noise).join(', '));
+    check('V1-RS19: a single-segment absolute token is a regex delimiter, not a path',
+      pathsIn('rg /month app').length === 0 && pathsIn('cat /etc/hosts').length === 1);
+    check('V1-RS20: and the real reads still survive the filter',
+      pathsIn('sed -n 1,5p /opt/zeus-engine/src/mission/oracle.ts').length === 1
+      && pathsIn('grep -rl x .zeus/state/tasks/*/events.jsonl').length === 1,
+      pathsIn('grep -rl x .zeus/state/tasks/*/events.jsonl').join(', '));
+
+    check('V1-RS17: paths are found bare, dot-relative and absolute',
+      pathsIn('find .zeus -maxdepth 3').includes('.zeus')
+      && pathsIn('sed -n 1,5p ./app/x.js').includes('./app/x.js')
+      && pathsIn('cat /etc/hosts').includes('/etc/hosts'));
+  }
+
+  section('V1 read scope: the M-0032 transcript, replayed');
+  {
+    // The four commands the oracle critic actually ran, in order.
+    const transcript = [
+      '{"type":"thread.started","thread_id":"01a03c81"}',
+      cmd('/bin/bash -lc "pwd && rg --files | sed -n 1,240p"'),
+      cmd('/bin/bash -lc "sed -n 1,260p app/src/pages/landing.jsx"'),
+      cmd('/bin/bash -lc "find .zeus -maxdepth 3 -type f -print | sort"'),
+      cmd('/bin/bash -lc "sed -n 1,500p /opt/zeus-engine/src/mission/oracle.ts"'),
+      '{"type":"turn.completed"}',
+    ].join('\n');
+
+    const v = checkReadScope(transcript, roots2(), meta2());
+    check('V1-RS41: the run that caused this is caught',
+      v.state === 'ROLE_READ_ESCAPE', v.state);
+    const p = (v as any).payload;
+    check('V1-RS42: and both kinds are named — Zeus\'s source and the event log',
+      p.byKind.ZEUS_INSTALL >= 1 && p.byKind.MISSION_STATE >= 1,
+      JSON.stringify(p.byKind));
+    check('V1-RS43: reading the project itself did not become a finding',
+      !(v as any).reaches.some((r: any) => /landing\.jsx/.test(r.resolved)),
+      (v as any).reaches.map((r: any) => r.resolved).join(', '));
+    check('V1-RS21: each reach carries the command it appeared in, so a human can judge',
+      (v as any).reaches.every((r: any) => r.via && r.tool),
+      JSON.stringify((v as any).reaches[0]));
+    check('V1-RS22: a MISSION_STATE reach says what it costs — independence',
+      /independence/.test(String(p.independenceRisk ?? '')), String(p.independenceRisk ?? ''));
+    check('V1-RS23: the record says plainly that V1 did not stop it',
+      /does not stop the stage/.test(String(p.detail)), String(p.detail));
+
+    // Project-only work must stay silent, or the signal is worthless.
+    const clean = [
+      '{"type":"thread.started","thread_id":"x"}',
+      cmd('/bin/bash -lc "rg --files"'),
+      cmd('/bin/bash -lc "sed -n 1,260p app/src/pages/landing.jsx"'),
+      cmd('/bin/bash -lc "cat app/package.json && git status --short"'),
+      '{"type":"turn.completed"}',
+    ].join('\n');
+    const c = checkReadScope(clean, roots2(), meta2());
+    check('V1-RS24: a stage that stayed in the repository reports nothing',
+      c.state === 'VERIFIED_IN_SCOPE', JSON.stringify(readScopeSummary(c)));
+  }
+
+  section('V1 read scope: evidence, not a gate');
+  {
+    const v = checkReadScope([cmd('/bin/bash -lc "cat /opt/zeus-engine/src/x.ts"')].join('\n'),
+      roots2(), meta2());
+    check('V1-RS25: V1 records a read escape and does NOT stop the stage',
+      v.state === 'ROLE_READ_ESCAPE' && blocksInV1(v) === false);
+    check('V1-RS26: nor does it stop for an unknown one',
+      blocksInV1(checkReadScope('', roots2(), meta2())) === false);
+
+    // The write check DOES stop. The two must not be confused for each other.
+    check('V1-RS27: the write check still blocks, so the two are not the same lever',
+      blocks({ state: 'WRITE_CHECK_UNAVAILABLE', ms: 1, detail: 'x' })
+      && !blocks({ state: 'VERIFIED_CLEAN', ms: 1 }));
+
+    // A computed event-type name is invisible to discoverEventTypes, so the
+    // redaction probe would never exercise a payload carrying verbatim command
+    // lines. Both names must be literal at their emit sites.
+    const ops = fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    check('V1-RS28: both event names are LITERAL at the emit site, so RS2 covers them',
+      /type: 'ROLE_READ_ESCAPE'/.test(ops) && /type: 'READ_SCOPE_UNKNOWN'/.test(ops));
+  }
+
+  section('V1 read scope: the prompt that sent it looking');
+  {
+    // The critic faulted an EXTERNAL_FACT probe for not being a declared
+    // command. Zeus's own validator says otherwise, and now so does the prompt.
+    const ctx = { commands: { build: 'npm --prefix api run build' },
+      failingChecks: [], findings: [] };
+    const probe = {
+      criterionId: 'p/M-0001/C-0001', type: 'EXTERNAL_FACT' as const,
+      statement: 'the app workspace builds',
+      evaluator: { kind: 'probe' as const, command: 'npm --prefix app run build',
+        expect: 'PASSED' as const, requiresNetwork: false },
+      affectedBy: [], required: true, requiresAuthority: [], derivedFrom: [],
+    };
+    check('V1-RS29: a probe naming an undeclared command IS valid — the M-0032 finding was wrong',
+      validateOracle([probe], ctx).valid, JSON.stringify(validateOracle([probe], ctx).findings));
+    check('V1-RS30: and the glossary now says so, in the prompt, before it has to guess',
+      /NOT required to be a declared command/.test(CRITIQUE_GLOSSARY)
+      && /CORRECT USE of the/.test(CRITIQUE_GLOSSARY));
+    check('V1-RS31: the glossary defines every mode the reply is asked to choose from',
+      ['AUTO', 'OPTIONAL_CONFIRMATION', 'REQUIRED_CONSENT']
+        .every((m) => new RegExp(`  ${m}\\s`).test(CRITIQUE_GLOSSARY)));
+    check('V1-RS32: and states what a finding costs, which is why it went looking',
+      /can only RAISE/.test(CRITIQUE_GLOSSARY)
+      && /ANY finding removes the automatic path/.test(CRITIQUE_GLOSSARY));
+    check('V1-RS33: the glossary reaches the critic — it is in the header, not beside it',
+      CRITIQUE_HEADER.includes(CRITIQUE_GLOSSARY));
+  }
+
+  section('V1 read scope: the boundary is stated where every stage sees it');
+  {
+    const idx = repoIndex(process.cwd(), null, { maxFiles: 10 });
+    const sec = intelSection({ projectId: 'p', index: { ...idx, root: '/work/talkbridge' },
+      graph: null, graphAvailable: false, graphifyVersion: null });
+    check('V1-RS34: the repository root is named as the boundary',
+      /WHAT IS IN SCOPE/.test(sec)
+      && /boundary of this task: \/work\/talkbridge/.test(sec));
+    check('V1-RS35: .zeus is named, with the reason independence depends on it',
+      /\.zeus\/ inside this repository/.test(sec) && /independence/.test(sec));
+    check('V1-RS36: an undefined term is to be reported, not looked up',
+      /Do\s*\n?.*not go looking for its implementation/.test(sec.replace(/\n/g, ' ')));
+    check('V1-RS37: and the agent is told the transcript is read afterwards',
+      /records every path you named/.test(sec));
+
+    // THE SECTION THIS ALMOST BROKE ONCE ALREADY. My last addition to the
+    // repository-intelligence section tripped ORACLE_CRITIQUE_POLICY and the
+    // Oracle Critic silently never ran. Prose about "previous verdicts" is
+    // exactly the shape the leak scanner looks for.
+    const payload = buildReviewPayload({
+      taskId: 'p/M-0001', projectId: 'p', baseSha: 'a', headSha: 'a',
+      policy: ORACLE_CRITIQUE_POLICY, header: CRITIQUE_HEADER,
+      inputs: [{ kind: 'repository-intelligence' as any,
+        label: 'the repository this contract is about', content: sec }],
+    });
+    check('V1-RS38: the new scope text does NOT contaminate the critique payload',
+      payload.valid, payload.violations.map((v) => v.detail).join(' | '));
+  }
+}
+
+/* -- fixtures for the read-scope section ---------------------------------- */
+
+function roots2() {
+  return { projectRoot: '/work/talkbridge',
+    zeusRoot: '/opt/zeus-engine', stateRoot: null };
+}
+function meta2() {
+  return { stage: 'oracle-critic', traceCallId: 'TC-test', provider: 'codex' };
+}
+/** One codex `command_execution` line, which is how every shell call arrives. */
+function cmd(command: string): string {
+  return JSON.stringify({ type: 'item.completed',
+    item: { id: `i${Math.abs(hashOf(command)) % 1000}`, type: 'command_execution', command } });
+}
+function hashOf(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i += 1) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return h;
 }

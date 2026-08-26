@@ -29,6 +29,7 @@ import { compileOracle, critiqueOracle, proposeAcceptance } from './compile';
 import { attach, evidenceLogPath, REPO_AWARE } from '../graph/access';
 import { checkWrites, isReadOnlyStage, verdictFor, type WriteVerdict }
   from '../engine/writecheck';
+import { checkReadScope, type ReadScopeVerdict } from '../engine/readscope';
 import { decide, type FrontDoorDecision } from './frontdoor';
 import { chatStreamId } from './chat';
 import { createHash } from 'crypto';
@@ -45,6 +46,15 @@ import type { GraphAccess } from '../engine/providers';
  * would start a second REPL instead of a tool.
  */
 const ZEUS_CLI_PATH = require('path').resolve(__dirname, '..', 'cli.ts');
+/**
+ * Where Zeus itself lives, derived rather than configured.
+ *
+ * An agent that reads this directory is reading the machinery that is grading
+ * it. Deriving it from `__dirname` means it is correct for a git checkout, a
+ * global npm install and the compiled `dist/` alike, and cannot drift out of
+ * date the way a setting would.
+ */
+const ZEUS_INSTALL_ROOT = require('path').resolve(__dirname, '..', '..');
 import {
   critiquePlan, planAcceptance, planMission, requireAcceptedOracle, PlanCriticFinding,
 } from './planner';
@@ -222,6 +232,14 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
    * stage wrote anything. Null for stages that are allowed to write.
    */
   verifyWrites: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
+  /**
+   * Reads the provider's own transcript afterwards and records where the stage
+   * LOOKED. Never null and never blocking: the write check guards the tree, and
+   * this one is the only thing that notices an agent leaving the repository at
+   * all. Every stage gets it, because reading out of scope has nothing to do
+   * with whether a stage is allowed to write.
+   */
+  inspectReads: (traceCallId: string, raw: string) => ReadScopeVerdict;
   keep: (content: string) => BlobRef | null;
   trace?: (type: string, payload: Record<string, unknown>) => void;
 } {
@@ -298,10 +316,51 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
     }
     : null;
 
+  // WHAT THE PAYLOAD POLICY CANNOT SEE.
+  //
+  // ORACLE_CRITIQUE_POLICY, the leak patterns and the contaminated-payload
+  // refusal all guard what Zeus HANDS an agent. None of them guards what the
+  // agent FETCHES, and M-0032's oracle critic walked straight around them: it
+  // read Zeus's own source for the definitions the prompt never gave it, and
+  // enumerated every mission's event log on the way past.
+  //
+  // OBSERVATIONAL IN V1, on purpose. Nobody yet knows how often this happens,
+  // and a gate tuned on a guess fires either constantly or never. The prompt
+  // now says the repository root is the boundary; this says whether that held.
+  const inspectReads = (traceCallId: string, raw: string): ReadScopeVerdict => {
+    const verdict = checkReadScope(raw ?? '', {
+      projectRoot: engine.opts.projectRoot,
+      zeusRoot: ZEUS_INSTALL_ROOT,
+      stateRoot: engine.stateRoot,
+    }, { stage, traceCallId, provider: engine.providerFor(stage).id });
+    // TWO LITERAL TYPES, for the reason the write check has two: the event
+    // registry finds types by scanning for a literal `type:` beside a
+    // `payload`, and a computed name is a type the redaction probe never
+    // exercises. ROLE_READ_ESCAPE carries verbatim command lines.
+    if (missions && missionId) {
+      try {
+        if (verdict.state === 'ROLE_READ_ESCAPE') {
+          missions.events.append({ taskId: missionId,
+            type: 'ROLE_READ_ESCAPE', payload: verdict.payload });
+        } else if (verdict.state === 'READ_SCOPE_UNKNOWN') {
+          missions.events.append({ taskId: missionId,
+            type: 'READ_SCOPE_UNKNOWN',
+            payload: { reasonCode: 'READ_SCOPE_UNKNOWN', stage, traceCallId,
+              detail: verdict.detail, checkMs: verdict.ms,
+              consequence: 'where this stage looked is not known; V1 does not '
+                + 'stop for it, but this call is NOT evidence that the stage '
+                + 'stayed inside the repository' } });
+        }
+      } catch { /* the verdict still reaches the caller */ }
+    }
+    return verdict;
+  };
+
   return {
     traceLevel: trace.level,
     traceLevelSource: trace.source,
     verifyWrites,
+    inspectReads,
     readOnlyStage: isReadOnlyStage(stage),
     repoGraph: attached?.access ?? null,
     graphState: attached?.state ?? null,
@@ -794,6 +853,31 @@ Promise<FrontDoorDecision> {
     // Read AFTER the call, so the log holds what the tools actually answered
     // rather than what the agent said it asked.
     readOps: () => readGraphOps(logPath) as unknown as Array<Record<string, unknown>>,
+    // The front door does not go through route(), so its read scope has to be
+    // wired here. Same check, same two event names, written to the CHAT stream
+    // beside the message that caused it.
+    inspectReads: (id: string, raw: string) => {
+      const verdict = checkReadScope(raw ?? '', {
+        projectRoot: engine.opts.projectRoot,
+        zeusRoot: ZEUS_INSTALL_ROOT,
+        stateRoot: engine.stateRoot,
+      }, { stage: 'front-door', traceCallId: id, provider: engine.providerFor('front-door').id });
+      try {
+        if (verdict.state === 'ROLE_READ_ESCAPE') {
+          ctx.missions.events.append({ taskId: stream,
+            type: 'ROLE_READ_ESCAPE', payload: verdict.payload });
+        } else if (verdict.state === 'READ_SCOPE_UNKNOWN') {
+          ctx.missions.events.append({ taskId: stream,
+            type: 'READ_SCOPE_UNKNOWN',
+            payload: { reasonCode: 'READ_SCOPE_UNKNOWN', stage: 'front-door',
+              traceCallId: id, detail: verdict.detail, checkMs: verdict.ms,
+              consequence: 'where this call looked is not known; V1 does not stop '
+                + 'for it, but this call is NOT evidence that it stayed inside '
+                + 'the repository' } });
+        }
+      } catch { /* the verdict still reaches the caller */ }
+      return verdict;
+    },
     // Written to the CHAT stream, beside the message that caused them.
     trace: (type: string, payload: Record<string, unknown>) => {
       try { ctx.missions.events.append({ taskId: stream, type, payload }); }

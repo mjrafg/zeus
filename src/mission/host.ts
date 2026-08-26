@@ -282,8 +282,22 @@ export function missionHost(input: MissionHostInput): LoopHost {
     },
 
     probe(): PreconditionProbe {
-      const rec = lastTaskId ? engine.task(lastTaskId) : null;
-      const root = rec?.worktree ?? projectRoot;
+      // AGAINST THE MISSION'S INTEGRATED STATE, not against a working tree.
+      //
+      // This read `lastTaskId`'s WORKTREE, and after a task that did NOT
+      // integrate that worktree holds work the mission rejected. M-0034's
+      // N-0001 was blocked by its reviewer; its worktree still contained the
+      // app/src/i18n.jsx it had written; the next precondition check asked
+      // "does app/src/i18n.jsx exist?", got yes from the abandoned worktree,
+      // and declared PRECONDITION_DIVERGENCE. The plan was invalidated and the
+      // mission terminated - instead of spending the repair it was entitled to.
+      //
+      // The green sha IS the mission's state: integration commits in the
+      // worktree and advances the ratchet to that commit, so the project root
+      // may legitimately not contain an integrated file. Asking git about the
+      // ratchet answers the actual question, and answers it identically
+      // whether or not a task happens to have run.
+      const green = greenOf();
       const checks = lastTaskId ? checksOf(lastTaskId) : {};
       const outcomes = engine.events.read(missionId)
         .filter((e) => e.type === 'ORACLE_EVALUATED')
@@ -294,8 +308,21 @@ export function missionHost(input: MissionHostInput): LoopHost {
         }, {});
       return {
         fileExists: (p) => {
-          const abs = path.resolve(root, p);
-          return abs.startsWith(path.resolve(root) + path.sep) && fs.existsSync(abs);
+          // Traversal is refused before git is asked, exactly as it was when
+          // this resolved against a directory: a precondition may only ask
+          // about paths inside the repository it is a precondition for.
+          const abs = path.resolve(projectRoot, p);
+          if (!abs.startsWith(path.resolve(projectRoot) + path.sep)) return false;
+          const rel = path.relative(path.resolve(projectRoot), abs);
+          // `cat-file -e <sha>:<path>` exits non-zero when the path is not in
+          // that tree. No checkout, no working tree, no leftovers from a task
+          // whose work was refused.
+          const seen = gitSoft(projectRoot, ['cat-file', '-e', `${green}:${rel}`]);
+          if (seen.ok) return true;
+          // BEFORE THE FIRST INTEGRATION there is no green to ask, and the
+          // project root is the mission's state. Falling back to it keeps the
+          // baseline preconditions answerable on a fresh mission.
+          return green === 'HEAD' ? fs.existsSync(abs) : false;
         },
         checkOutcome: (name) => checks[name] ?? null,
         criterionState: (id) => outcomes[id] ?? 'UNEVALUATED',

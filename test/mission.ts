@@ -30,6 +30,7 @@ import { validatePlan, PlanFindingCode, globsOverlap } from '../src/mission/plan
 import { normaliseNodes } from '../src/mission/planner';
 import { normaliseCriteria } from '../src/mission/compile';
 import { priorPlanFor, latestCritiqueFindings } from '../src/mission/operations';
+import { missionHost, ledgerFrom } from '../src/mission/host';
 import {
   ratchetRef, advanceRatchet, readRatchet, deleteRatchet, reconstructRatchet, refSafeProject,
 } from '../src/mission/ratchet';
@@ -787,6 +788,67 @@ export async function missionSuite(): Promise<void> {
     const f2 = latestCritiqueFindings(missions, id2);
     check('RJ5: and a newer critique supersedes the older refusal',
       f2.length === 1 && f2[0].code === 'WEAK_RUBRIC', JSON.stringify(f2));
+  }
+
+  section('preconditions: a refused worktree is not the mission\'s state');
+  {
+    // talkbridge/M-0034: N-0001's reviewer blocked the task. Its worktree still
+    // held the app/src/i18n.jsx it had written, the next precondition check
+    // asked "does that file exist?", the abandoned worktree said yes, and Zeus
+    // declared PRECONDITION_DIVERGENCE, invalidated the plan and terminated the
+    // mission - instead of spending the repair the node was entitled to.
+    const root = path.join(TMP, `precond-${Date.now()}`);
+    fs.mkdirSync(root, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', root]);
+    fs.writeFileSync(path.join(root, 'committed.txt'), 'in the repository\n');
+    execFileSync('git', ['-C', root, 'add', '-A']);
+    execFileSync('git', ['-C', root, '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit', '-qm', 'base']);
+
+    const cfg = defaultConfig('precond');
+    writeConfig(root, cfg);
+    const engine = new Engine({
+      projectRoot: root, config: cfg,
+      supervisor: new ProcessSupervisor(deriveBudgets(), undefined, path.join(root, '.zeus/state')),
+      providers: { planner: mockProvider(), implementer: mockProvider(), reviewer: mockProvider() },
+    });
+    const missions = new MissionRegistry({
+      events: engine.events, projectId: engine.projectId, stateRoot: engine.stateRoot,
+    });
+    const m = missions.create('a goal', 'sha0');
+    const oracle: any = { missionId: m.missionId, version: 1, criteria: [],
+      acceptanceMode: 'REQUIRED_CONSENT', compiledAt: new Date(0).toISOString(),
+      compilerProviderId: 'x', criticProviderId: 'y' };
+    const host = missionHost({
+      engine, missionId: m.missionId, projectRoot: root, oracle,
+      ledger: ledgerFrom(oracle), supervisor: engine.opts.supervisor,
+      judge: engine.opts.providers.reviewer,
+    });
+
+    // A task runs (so the host has a `lastTaskId`) and writes a file into its
+    // OWN worktree that it never got to integrate.
+    const node: any = { nodeId: `${m.missionId}/N-0001`, description: 'work',
+      dependsOn: [], preconditions: [], reads: [], writes: [], affectedCriteria: [],
+      predictedEffects: [], estimatedTier: 'NORMAL', estimatedCost: 1, risk: 'LOW' };
+    const taskId = host.createTask(node, { missionId: m.missionId, repair: false, prior: null });
+    const wt = engine.task(taskId)?.worktree ?? '';
+    // The worktree is materialised lazily; the point of the fixture is that a
+    // file EXISTS at the path the probe used to read.
+    fs.mkdirSync(wt, { recursive: true });
+    fs.writeFileSync(path.join(wt, 'refused.txt'), 'never integrated\n');
+
+    const probe = host.probe();
+    check('PW1: a file only in a refused worktree does NOT satisfy a precondition',
+      probe.fileExists('refused.txt') === false,
+      `worktree ${fs.existsSync(path.join(wt, 'refused.txt')) ? 'has it' : 'does not'}`);
+    check('PW2: a file in the mission\'s integrated state still does',
+      probe.fileExists('committed.txt') === true);
+    // The traversal refusal is a property of the check, not of which directory
+    // it happened to resolve against.
+    check('PW3: a path outside the repository is still refused outright',
+      probe.fileExists('../../etc/passwd') === false);
+
+    fs.rmSync(root, { recursive: true, force: true });
   }
 
   fs.rmSync(TMP, { recursive: true, force: true });

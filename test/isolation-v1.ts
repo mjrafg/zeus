@@ -188,6 +188,41 @@ export async function isolationV1Suite(): Promise<void> {
       /does not revert it/.test(String(p.detail)), String(p.detail).slice(0, 70));
   }
 
+  section('V1: a check that could not run is not a check that passed');
+  {
+    // This returned {clean: true} for a tree it could not inspect, and the
+    // comment claimed the absence was recorded elsewhere. It was not. A
+    // non-repository, a missing git, or git refusing on "dubious ownership"
+    // when the process runs as a different user than the repo's owner all read
+    // exactly like a tree inspected and found spotless — a fail-open in the one
+    // check whose entire job is catching writes.
+    const notRepo = checkWrites(path.join(TMP, 'not-a-repo-at-all'));
+    check('V1-U1: an uninspectable tree is NOT reported as inspected',
+      notRepo.clean === true && (notRepo as any).inspected === false,
+      JSON.stringify(notRepo));
+    check('V1-U2: and it says the answer is unknown, not that nothing happened',
+      /UNKNOWN — not confirmed clean/.test(String((notRepo as any).uninspectable)),
+      String((notRepo as any).uninspectable));
+
+    const real = repo();
+    const looked = checkWrites(real);
+    check('V1-U3: a real clean tree IS marked inspected, so the two differ',
+      looked.clean === true && (looked as any).inspected === true,
+      JSON.stringify({ clean: looked.clean, inspected: (looked as any).inspected }));
+
+    fs.writeFileSync(path.join(real, 'tracked.txt'), 'edited\n');
+    const dirty = checkWrites(real) as any;
+    check('V1-U4: and a violation is inspected by definition',
+      dirty.clean === false && dirty.inspected === true, JSON.stringify(dirty.inspected));
+    // Three states, all distinguishable on the record.
+    check('V1-U5: clean, dirty and unknown are three states, not two',
+      new Set([
+        `${looked.clean}/${(looked as any).inspected}`,
+        `${dirty.clean}/${dirty.inspected}`,
+        `${notRepo.clean}/${(notRepo as any).inspected}`,
+      ]).size === 3, 'told apart');
+  }
+
   section('V1: porcelain is parsed by column, because the columns mean different things');
   {
     // X is the index, Y is the working tree. Conflating them loses whether the

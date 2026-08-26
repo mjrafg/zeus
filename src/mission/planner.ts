@@ -163,7 +163,8 @@ export interface PlanInput {
   repoGraph?: GraphAccess | null;
   /** Looks at the tree after the call; null for stages allowed to write. */
   verifyWrites?: ((traceCallId: string, before: string | null) =>
-  { clean: boolean; durationMs: number; payload?: Record<string, unknown> }) | null;
+  { clean: boolean; durationMs: number; inspected?: boolean;
+    uninspectable?: string; payload?: Record<string, unknown> }) | null;
   /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
   intel?: string | null;
   /** Where the graph server appends what it answered, for the manifest. */
@@ -436,6 +437,8 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
       ...(input.verifyWrites ? (() => {
         const v = input.verifyWrites!(traceCallId, input.baseSha ?? null);
         return { writeCheck: { clean: v.clean, ms: v.durationMs,
+          inspected: v.inspected !== false,
+          ...(v.uninspectable ? { uninspectable: v.uninspectable } : {}),
           ...(v.payload ? { violation: v.payload } : {}) } };
       })() : {}),
       ...(input.graphLogPath ? (() => {
@@ -606,7 +609,8 @@ export async function critiquePlan(input: {
   repoGraph?: GraphAccess | null;
   /** Looks at the tree after the call; null for stages allowed to write. */
   verifyWrites?: ((traceCallId: string, before: string | null) =>
-  { clean: boolean; durationMs: number; payload?: Record<string, unknown> }) | null;
+  { clean: boolean; durationMs: number; inspected?: boolean;
+    uninspectable?: string; payload?: Record<string, unknown> }) | null;
   /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
   intel?: string | null;
   /** Where the graph server appends what it answered, for the manifest. */
@@ -716,6 +720,8 @@ export async function critiquePlan(input: {
       ...(input.verifyWrites ? (() => {
         const v = input.verifyWrites!(traceCallId, input.baseSha ?? null);
         return { writeCheck: { clean: v.clean, ms: v.durationMs,
+          inspected: v.inspected !== false,
+          ...(v.uninspectable ? { uninspectable: v.uninspectable } : {}),
           ...(v.payload ? { violation: v.payload } : {}) } };
       })() : {}),
       ...(input.graphLogPath ? (() => {

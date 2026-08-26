@@ -28,12 +28,17 @@ import { readOnlyGit } from './gitro';
 
 export interface WriteCheckClean {
   clean: true;
+  /** The tree was actually looked at. False means the answer is unknown. */
+  inspected: boolean;
+  /** Set only when inspected is false: why Zeus could not look. */
+  uninspectable?: string;
   revision: string | null;
   durationMs: number;
 }
 
 export interface WriteCheckViolation {
   clean: false;
+  inspected: true;
   revision: string | null;
   durationMs: number;
   /** Tracked files whose contents differ in the working tree. */
@@ -130,13 +135,25 @@ export function checkWrites(cwd: string): WriteCheck {
   const st = git(['status', '--porcelain', '--untracked-files=all'], cwd);
   const porcelain = st.out;
   if (!st.ok) {
-    // Not a git repository, or git is unavailable. Reported as clean because a
-    // tree Zeus cannot inspect is not evidence of a violation — the absence is
-    // recorded on the event instead.
-    return { clean: true, revision, durationMs: Date.now() - began };
+    // A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT PASSED.
+    //
+    // This returned {clean: true} and the comment claimed the absence was
+    // recorded elsewhere. It was not. A tree Zeus cannot inspect — not a
+    // repository, git missing, or git refusing on `dubious ownership` when the
+    // process runs as a different user than the repo's owner — read exactly
+    // like a tree that was inspected and found spotless.
+    //
+    // That is a fail-open in the one check whose entire job is catching
+    // writes, and the ownership case is not hypothetical: it is one deployment
+    // change away.
+    return {
+      clean: true, inspected: false, revision, durationMs: Date.now() - began,
+      uninspectable: 'git could not report the status of this tree, so whether '
+        + 'the role wrote anything is UNKNOWN — not confirmed clean',
+    };
   }
   if (!porcelain.trim()) {
-    return { clean: true, revision, durationMs: Date.now() - began };
+    return { clean: true, inspected: true, revision, durationMs: Date.now() - began };
   }
 
   // Only now, and only because something changed.
@@ -144,7 +161,7 @@ export function checkWrites(cwd: string): WriteCheck {
   const diff = git(['diff'], cwd).out.slice(0, MAX_DIFF_BYTES);
   const diffCached = git(['diff', '--cached'], cwd).out.slice(0, MAX_DIFF_BYTES);
   return {
-    clean: false, revision, durationMs: Date.now() - began,
+    clean: false, inspected: true, revision, durationMs: Date.now() - began,
     ...parsed, diff, diffCached, porcelain: porcelain.slice(0, MAX_DIFF_BYTES),
   };
 }

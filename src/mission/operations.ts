@@ -221,7 +221,8 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
    * stage wrote anything. Null for stages that are allowed to write.
    */
   verifyWrites: ((traceCallId: string, before: string | null) =>
-  { clean: boolean; durationMs: number; payload?: Record<string, unknown> }) | null;
+  { clean: boolean; durationMs: number; inspected?: boolean;
+    uninspectable?: string; payload?: Record<string, unknown> }) | null;
   keep: (content: string) => BlobRef | null;
   trace?: (type: string, payload: Record<string, unknown>) => void;
 } {
@@ -266,7 +267,11 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
     ? (traceCallId: string, before: string | null) => {
       const check = checkWrites(engine.opts.projectRoot);
       if (check.clean) {
-        return { clean: true as const, durationMs: check.durationMs };
+        // `inspected` travels with it, so a trace showing clean:true can still
+        // be read as "nobody looked" rather than "nothing happened".
+        return { clean: true as const, durationMs: check.durationMs,
+          inspected: check.inspected,
+          ...(check.inspected ? {} : { uninspectable: check.uninspectable }) };
       }
       // Only now is the expensive evidence collected, and only because there
       // is something to explain.

@@ -24,7 +24,7 @@ import { verifyGraphEvidence, goalRequiresGraphEvidence, intelSection, repoIndex
 import {
   checkReadScope, readScopeSummary, toolCallsIn, pathsIn, classifyPath, blocksInV1,
 } from '../src/engine/readscope';
-import { CRITIQUE_HEADER, CRITIQUE_GLOSSARY } from '../src/mission/compile';
+import { CRITIQUE_HEADER, CRITIQUE_GLOSSARY, critiqueOracle } from '../src/mission/compile';
 import { validateOracle } from '../src/mission/oracle';
 import { buildReviewPayload, ORACLE_CRITIQUE_POLICY } from '../src/engine/reviewcontext';
 
@@ -654,6 +654,108 @@ export async function isolationV1Suite(): Promise<void> {
     check('V1-RS38: the new scope text does NOT contaminate the critique payload',
       payload.valid, payload.violations.map((v) => v.detail).join(' | '));
   }
+
+  section('V1 read scope: the check FIRES on a real stage, not just in isolation');
+  {
+    // A DECLARED CAPABILITY THAT NEVER RUNS is the failure this codebase keeps
+    // finding: tools attached and never called, a critic wired and never
+    // reached, a check computed inside a payload literal and discarded. So the
+    // stage function is driven end to end and the trace record is read back.
+    // Nothing here reaches the supervisor or the policy: the fake provider
+    // answers without spawning. They exist because the signature asks for them.
+    const sup: any = { run: async () => ({ outcome: 'COMPLETED', stdout: '', exitCode: 0,
+      durationMs: 1, productSignal: true, violations: [] }) };
+    const policy: any = { worktreeRoot: TMP, network: false, allowedCommands: [] };
+    const CTX = { commands: { unitTest: 'npm test' }, failingChecks: [], findings: [] };
+
+    const transcript = [
+      '{"type":"thread.started","thread_id":"t"}',
+      JSON.stringify({ type: 'item.completed', item: { id: 'i1',
+        type: 'command_execution', command: '/bin/bash -lc "rg --files"' } }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'i2',
+        type: 'command_execution',
+        command: '/bin/bash -lc "sed -n 1,400p /opt/zeus-engine/src/mission/oracle.ts"' } }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'i3',
+        type: 'command_execution',
+        command: '/bin/bash -lc "find .zeus/state/tasks -name events.jsonl"' } }),
+      '{"type":"turn.completed"}',
+    ].join('\n');
+
+    const wandering = {
+      id: 'wandering',
+      async available() { return { ok: true, detail: 'fake' }; },
+      async invoke(req: any) {
+        return { ok: true, role: req.role,
+          structured: { findings: [], modeOpinion: 'AUTO' } as any,
+          text: '', raw: transcript,
+          exitCode: 0, durationMs: 1, outcome: 'COMPLETED', infrastructureFailure: null };
+      },
+    };
+
+    const events: Array<{ type: string; payload: any }> = [];
+    const scopeRoots = { projectRoot: '/work/talkbridge', zeusRoot: '/opt/zeus-engine',
+      stateRoot: null };
+
+    const critique = await critiqueOracle({
+      missionId: 'p/M-0001', projectId: 'p', goal: 'a goal',
+      criteria: [criterionForScope()], context: CTX,
+      provider: wandering as any, supervisor: sup, policy, baseSha: 'sha',
+      stage: 'oracle-critic',
+      trace: (type, payload) => events.push({ type, payload }),
+      inspectReads: (traceCallId: string, raw: string) =>
+        checkReadScope(raw, scopeRoots,
+          { stage: 'oracle-critic', traceCallId, provider: 'wandering' }),
+    } as any);
+
+    const finished = events.find((e) => e.type === 'MODEL_CALL_FINISHED');
+    check('V1-RS44: the stage records where it looked, on the call itself',
+      !!finished?.payload?.readScope, JSON.stringify(Object.keys(finished?.payload ?? {})));
+    check('V1-RS45: and it caught the wandering, through the real stage function',
+      finished?.payload?.readScope?.state === 'ROLE_READ_ESCAPE'
+      && finished?.payload?.readScope?.inScope === false,
+      JSON.stringify(finished?.payload?.readScope));
+    check('V1-RS46: naming both what it read and how much',
+      finished?.payload?.readScope?.byKind?.ZEUS_INSTALL === 1
+      && finished?.payload?.readScope?.byKind?.MISSION_STATE === 1,
+      JSON.stringify(finished?.payload?.readScope?.byKind));
+    // The write check stops a stage. This one must not, or V1 stopped
+    // observing and started gating without anyone deciding to.
+    check('V1-RS47: and the critique still returned — a read escape does NOT block in V1',
+      critique.ok === true && critique.infrastructureFailure === null,
+      String(critique.infrastructureFailure));
+
+    // The same stage, staying home: the field must be present and say so,
+    // rather than being absent whenever there is nothing to report.
+    const homebody = {
+      id: 'homebody',
+      async available() { return { ok: true, detail: 'fake' }; },
+      async invoke(req: any) {
+        return { ok: true, role: req.role,
+          structured: { findings: [], modeOpinion: 'AUTO' } as any, text: '',
+          raw: ['{"type":"thread.started","thread_id":"t"}',
+            JSON.stringify({ type: 'item.completed', item: { id: 'i1',
+              type: 'command_execution', command: '/bin/bash -lc "cat app/package.json"' } }),
+            '{"type":"turn.completed"}'].join('\n'),
+          exitCode: 0, durationMs: 1, outcome: 'COMPLETED', infrastructureFailure: null };
+      },
+    };
+    const quiet: Array<{ type: string; payload: any }> = [];
+    await critiqueOracle({
+      missionId: 'p/M-0001', projectId: 'p', goal: 'a goal',
+      criteria: [criterionForScope()], context: CTX,
+      provider: homebody as any, supervisor: sup, policy, baseSha: 'sha',
+      stage: 'oracle-critic',
+      trace: (type, payload) => quiet.push({ type, payload }),
+      inspectReads: (traceCallId: string, raw: string) =>
+        checkReadScope(raw, scopeRoots,
+          { stage: 'oracle-critic', traceCallId, provider: 'homebody' }),
+    } as any);
+    const ok = quiet.find((e) => e.type === 'MODEL_CALL_FINISHED');
+    check('V1-RS48: a stage that stayed home records that it was CHECKED and clean',
+      ok?.payload?.readScope?.state === 'VERIFIED_IN_SCOPE'
+      && ok?.payload?.readScope?.inspected === true,
+      JSON.stringify(ok?.payload?.readScope));
+  }
 }
 
 /* -- fixtures for the read-scope section ---------------------------------- */
@@ -674,4 +776,15 @@ function hashOf(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i += 1) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return h;
+
+}
+
+/** A minimal valid criterion, so the critique has something to be about. */
+function criterionForScope() {
+  return {
+    criterionId: 'p/M-0001/C-0001', type: 'EXECUTABLE' as const,
+    statement: 'the unit suite passes',
+    evaluator: { kind: 'command' as const, command: 'npm test', expect: 'PASSED' as const },
+    affectedBy: [], required: true, requiresAuthority: [] as any[], derivedFrom: [],
+  };
 }

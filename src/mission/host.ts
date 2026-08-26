@@ -19,6 +19,7 @@ import { Oracle } from './oracle';
 import { priorAttempt, repairBrief, type PriorAttempt } from './attempt';
 import { PlanGraph, TaskNode } from './types';
 import { advanceRatchet, readRatchet } from './ratchet';
+import { checkWrites } from '../engine/writecheck';
 import { acceptedCommands, evaluateCriteria } from './evaluate';
 import { PreconditionProbe } from './schedule';
 import { LoopHost, NodeExecution } from './loop';
@@ -112,6 +113,57 @@ function isIgnored(worktree: string, declared: string): boolean {
   return false;
 }
 
+
+/**
+ * The working tree that actually holds a given revision.
+ *
+ * THE RULE: A TREE HOLDS A REVISION IF ITS HEAD *IS* THAT REVISION. Verified,
+ * never inferred from recency.
+ *
+ * Everything in this file used to answer "where is the mission's state?" with
+ * `lastTaskId`'s worktree - the tree of whichever task ran most recently,
+ * integrated or not. That is a guess that happens to be right on the green path
+ * and is wrong on every other one. talkbridge/M-0034 showed the cheap version
+ * of it (a precondition), and the expensive version is one step away: the FINAL
+ * full evaluation runs when no node remains, which is exactly the state a
+ * mission reaches after its last node was ABANDONED - so the criteria would
+ * have been evaluated inside the refused worktree, and a mission whose only
+ * task the reviewer blocked could report ACHIEVED off code it had rejected.
+ *
+ * Integration commits IN the worktree and advances the ratchet to that commit,
+ * so the project root legitimately may not hold an integrated revision, and the
+ * integrating worktree legitimately does. Asking each candidate what its HEAD
+ * is settles it without knowing which case we are in.
+ *
+ * NULL IS AN ANSWER. When no tree holds the revision - a pruned worktree, a
+ * mission resumed in a process that never created one - the mission's state is
+ * not materialised anywhere, and the honest result is UNEVALUATED rather than a
+ * verdict read out of whatever directory was nearest.
+ */
+export function treeAtRevision(candidates: string[], sha: string | null): string | null {
+  if (!sha) return null;
+  for (const dir of candidates) {
+    if (!dir) continue;
+    let head: string;
+    try { head = fs.existsSync(dir) ? gitSoft(dir, ['rev-parse', 'HEAD']).out.trim() : ''; }
+    catch { continue; }
+    if (!head || head !== sha) continue;
+    // A MATCHING HEAD IS NOT ENOUGH, and this is the half that actually
+    // catches M-0034. A task that never integrated never committed, so its
+    // worktree HEAD is still the revision it BRANCHED from - the green - while
+    // its working tree holds the change the mission refused. By HEAD alone
+    // that tree looks exactly like the green, and evaluating in it would prove
+    // criteria against rejected code.
+    //
+    // FAIL CLOSED on an uninspectable tree, for the reason every other check
+    // in this codebase does: "could not look" is not "looked and it was fine".
+    const w = checkWrites(dir);
+    if (!w.inspected || !w.clean) continue;
+    return dir;
+  }
+  return null;
+}
+
 export function missionHost(input: MissionHostInput): LoopHost {
   const { engine, missionId, projectRoot, oracle } = input;
   const say = input.onEvent ?? (() => {});
@@ -119,6 +171,16 @@ export function missionHost(input: MissionHostInput): LoopHost {
 
   const greenOf = (): string => readRatchet(projectRoot, missionId)
     ?? (engine.task([...tasks.keys()][0] ?? '')?.baseSha ?? 'HEAD');
+
+  /**
+   * Every tree that could hold a revision, project root first.
+   *
+   * Order is a search order, not a preference: `treeAtRevision` accepts a
+   * candidate only when its HEAD matches, so a wrong candidate cannot win by
+   * being early.
+   */
+  const treeCandidates = (): string[] => [projectRoot,
+    ...[...tasks.values()].map((t) => t.worktree).filter(Boolean)];
 
   /** The check outcomes a task actually recorded, newest wins. */
   const checksOf = (taskId: string): Record<string, string> => {
@@ -240,9 +302,22 @@ export function missionHost(input: MissionHostInput): LoopHost {
     },
 
     async evaluate(ctx) {
-      const taskId = lastTaskId;
-      const rec = taskId ? engine.task(taskId) : null;
-      const worktree = rec?.worktree ?? projectRoot;
+      // AGAINST THE REVISION THE CALLER NAMED. `ctx.sha` is already the right
+      // answer at both call sites - the green for the final full pass, the
+      // just-integrated commit for the incremental one - and it was being
+      // ignored in favour of whichever task ran last.
+      const worktree = treeAtRevision(treeCandidates(), ctx.sha);
+      if (!worktree) {
+        // Not a failure of the criteria. Nothing could be evaluated, so
+        // nothing is claimed: UNEVALUATED is the outcome that exists for
+        // exactly this, and reporting PROVEN or FAILED here would be inventing
+        // a verdict about a tree nobody could read.
+        return { results: oracle.criteria.map((c) => ({
+          criterionId: c.criterionId, outcome: 'UNEVALUATED' as const,
+          evidence: [], detail: `no working tree holds ${String(ctx.sha).slice(0, 12)}, `
+            + 'so the mission\'s integrated state could not be evaluated' })) };
+      }
+      const rec = lastTaskId ? engine.task(lastTaskId) : null;
       const run = await evaluateCriteria({
         oracle, projectId: engine.projectId, worktree,
         supervisor: input.supervisor,
@@ -259,9 +334,15 @@ export function missionHost(input: MissionHostInput): LoopHost {
     },
 
     async observe(node, ctx): Promise<ObservedEvidence> {
-      const rec = lastTaskId ? engine.task(lastTaskId) : null;
-      const root = rec?.worktree ?? projectRoot;
+      // A PREDICTED ARTIFACT IS A CLAIM ABOUT THE INTEGRATED CHANGE, so it is
+      // checked in the tree that holds the revision that was integrated - not
+      // in whichever tree happens to be most recent.
+      const root = treeAtRevision(treeCandidates(), ctx.sha);
       const artifacts: Record<string, boolean> = {};
+      if (!root) {
+        // An unanswered prediction must read as a mismatch, never as a pass.
+        return { checks: lastTaskId ? checksOf(lastTaskId) : {}, artifacts, facts: {} };
+      }
       for (const eff of node.predictedEffects ?? []) {
         if (eff.kind === 'expectedArtifact') {
           // Resolved inside the worktree and refused if it escapes: a

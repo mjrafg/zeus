@@ -33,7 +33,7 @@ import {
   requireAcceptedOracle, planMission, critiquePlan, planAcceptance,
 } from './mission/planner';
 import { runMissionLoop } from './mission/loop';
-import { missionHost, ledgerFrom } from './mission/host';
+import { missionHost, ledgerFrom, treeAtRevision } from './mission/host';
 import {
   missionUsage, progressFrom, providerSpendOf, negotiateBudget,
   mergeMissionBudgets, BudgetNegotiation, MissionBudgets,
@@ -1349,18 +1349,38 @@ async function cmdMission(argv: string[]): Promise<number> {
       const eng = mock ? engineFor(ctx.root, ctx.cfg, { mock: true }) : engine;
       const idx = rest.indexOf('--criteria');
       const subset = idx >= 0 ? (rest[idx + 1] ?? '').split(',').filter(Boolean).map(resolveCriterion(id)) : [];
+      // AGAINST THE MISSION'S INTEGRATED STATE, and this RECORDS what it
+      // finds, so getting the tree wrong does not merely mislead a reader - it
+      // writes ORACLE_EVALUATED into the log, where derivedAchievement and the
+      // progress ledger both read it, and can overwrite a PROVEN the execution
+      // loop established.
+      //
+      // The comment this replaces said a mission has no worktree "until the
+      // execution loop creates one, which is stage 3". Stage 3 exists. After
+      // an integration the ratchet is ahead of the project root, so evaluating
+      // ctx.root reports on the BASE while claiming to report on the mission.
+      const target = rec.ratchetSha ?? rec.baseSha;
+      const integrated = [...missions.events.read(id)]
+        .filter((e) => e.type === 'INTEGRATION_RESULT'
+          && (e.payload as any)?.integrated === true)
+        .map((e) => eng.task(String((e.payload as any)?.taskId ?? ''))?.worktree)
+        .filter((w): w is string => !!w);
+      const tree = treeAtRevision([ctx.root, ...integrated], target);
+      if (!tree) {
+        err(`${C.r}✗${C.x} no clean working tree holds ${String(target).slice(0, 12)}, `
+          + 'so this mission\'s integrated state cannot be evaluated; nothing was recorded');
+        return 1;
+      }
       const run = await evaluateCriteria({
         oracle: rec.oracle as Oracle, projectId: eng.projectId,
         // The ledger comes from what the LOG says was accepted, not from the
         // object being evaluated.
         ledger: acceptedCommands(rec.oracle as Oracle),
-        // M2 evaluates against the project itself: a mission has no worktree
-        // until the execution loop creates one, which is stage 3.
-        worktree: ctx.root, supervisor: eng.opts.supervisor,
-        policy: defaultPolicy(ctx.root, ctx.root),
+        worktree: tree, supervisor: eng.opts.supervisor,
+        policy: defaultPolicy(tree, tree),
         judge: eng.opts.providers.reviewer,
         scope: subset.length ? 'incremental' : 'full',
-        criterionIds: subset, baseSha: rec.baseSha,
+        criterionIds: subset, baseSha: target,
       });
       missions.recordEvaluation(id, {
         oracleVersion: run.oracleVersion, scope: run.scope,

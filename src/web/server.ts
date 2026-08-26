@@ -866,8 +866,18 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
           const id = resolveId(task, sc.projectId);
           if (!isTaskId(id)) { send(res, 400, { error: 'NOT_A_TASK_ID', id }); return; }
           const created = sc.store.read(id).find((e) => e.type === 'TASK_CREATED');
-          const worktree = (created?.payload as any)?.worktree ?? sc.root;
-          const base = (created?.payload as any)?.baseSha ?? 'HEAD';
+          const worktree = (created?.payload as any)?.worktree;
+          const base = (created?.payload as any)?.baseSha;
+          // NO FALLBACK TO THE PROJECT ROOT. A task's diff is a question about
+          // that task's tree; answering it from the project root at HEAD..HEAD
+          // returns an empty diff, which reads as "this task changed nothing"
+          // when the truth is "this task is not on the log".
+          if (!worktree || !base) {
+            send(res, 404, { error: 'NO_TASK_WORKTREE', id,
+              detail: 'no TASK_CREATED record names a worktree for this task, so there '
+                + 'is no tree to diff; an empty diff would claim it changed nothing' });
+            return;
+          }
           send(res, 200, { taskId: id, from: base, to: 'HEAD',
             diff: diff(base, 'HEAD', worktree) });
           return;

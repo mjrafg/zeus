@@ -30,7 +30,7 @@ import { validatePlan, PlanFindingCode, globsOverlap } from '../src/mission/plan
 import { normaliseNodes } from '../src/mission/planner';
 import { normaliseCriteria } from '../src/mission/compile';
 import { priorPlanFor, latestCritiqueFindings } from '../src/mission/operations';
-import { missionHost, ledgerFrom } from '../src/mission/host';
+import { missionHost, ledgerFrom, treeAtRevision } from '../src/mission/host';
 import {
   ratchetRef, advanceRatchet, readRatchet, deleteRatchet, reconstructRatchet, refSafeProject,
 } from '../src/mission/ratchet';
@@ -849,6 +849,71 @@ export async function missionSuite(): Promise<void> {
       probe.fileExists('../../etc/passwd') === false);
 
     fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  section('authoritative state: a tree holds a revision only if its HEAD IS that revision');
+  {
+    const gitq = (cwd: string, args: string[]) =>
+      execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+
+    const repo = path.join(TMP, `tree-${Date.now()}`);
+    fs.mkdirSync(repo, { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+    execFileSync('git', ['-C', repo, 'add', '-A']);
+    execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit', '-qm', 'c1']);
+    const c1 = gitq(repo, ['rev-parse', 'HEAD']);
+
+    // A task worktree, exactly as the engine makes one: branched from the
+    // mission's state, and free to commit on top of it.
+    const wt = path.join(TMP, `tree-wt-${Date.now()}`);
+    execFileSync('git', ['-C', repo, 'worktree', 'add', '-q', '--detach', wt, c1]);
+
+    check('ATS1: a clean tree whose HEAD is the revision holds it',
+      treeAtRevision([wt], c1) === wt);
+    check('ATS2: a tree at a different revision never holds it',
+      treeAtRevision([repo], 'f'.repeat(40)) === null);
+    check('ATS3: no candidate holds it means null, not the nearest directory',
+      treeAtRevision([repo, wt], 'f'.repeat(40)) === null);
+    check('ATS4: a null revision resolves to nothing',
+      treeAtRevision([repo, wt], null) === null);
+
+    // THE M-0034 SHAPE. A task the reviewer blocked never integrated, so it
+    // never committed: its HEAD is still the revision it branched FROM, while
+    // its working tree holds the change the mission refused. By HEAD alone it
+    // is indistinguishable from the mission's own state.
+    fs.writeFileSync(path.join(wt, 'refused.txt'), 'never integrated\n');
+    check('ATS5: HEAD matches, but a DIRTY tree does not hold the revision',
+      gitq(wt, ['rev-parse', 'HEAD']) === c1 && treeAtRevision([wt], c1) === null,
+      'the refused worktree is refused');
+    check('ATS6: and the clean project root still does, so the answer is not just "no"',
+      treeAtRevision([repo, wt], c1) === repo);
+    fs.rmSync(path.join(wt, 'refused.txt'));
+
+    // INTEGRATED WORK STAYS VISIBLE THOUGH THE PROJECT ROOT NEVER MOVED.
+    // Integration commits IN the worktree and advances the ratchet to that
+    // commit, so the project root legitimately does not contain it.
+    fs.writeFileSync(path.join(wt, 'b.txt'), 'two\n');
+    execFileSync('git', ['-C', wt, 'add', '-A']);
+    execFileSync('git', ['-C', wt, '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit', '-qm', 'c2']);
+    const c2 = gitq(wt, ['rev-parse', 'HEAD']);
+    check('ATS7: an integrated revision is found in the tree that made it',
+      treeAtRevision([repo, wt], c2) === wt, `${c2.slice(0, 8)}`);
+    check('ATS8: and the project root, still at the old revision, is not offered instead',
+      gitq(repo, ['rev-parse', 'HEAD']) === c1 && treeAtRevision([repo], c2) === null);
+    // ORDER IS A SEARCH ORDER, NOT A PREFERENCE. A candidate cannot win by
+    // being early: the HEAD check decides, so reversing the list is the same
+    // question with the same answer.
+    check('ATS9: the answer does not depend on candidate order',
+      treeAtRevision([wt, repo], c2) === treeAtRevision([repo, wt], c2)
+      && treeAtRevision([wt, repo], c1) === repo);
+    check('ATS10: a directory that is not a repository is skipped, not returned',
+      treeAtRevision([path.join(TMP, 'no-such-dir'), wt], c2) === wt);
+
+    execFileSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt]);
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 
   fs.rmSync(TMP, { recursive: true, force: true });

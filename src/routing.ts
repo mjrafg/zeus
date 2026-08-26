@@ -41,6 +41,11 @@ export const PIPELINE_STAGES = [
   'front-door',
   'oracle', 'oracle-critic', 'planner', 'plan-critic',
   'implementer', 'reviewer', 'repair',
+  // LITE. One agent that plans AND writes, in place of design-then-implement.
+  // In the table rather than hard-wired for the same reason as every other
+  // stage: "which model builds my change" is a thing an operator should be
+  // able to see and set in one place.
+  'builder',
 ] as const;
 
 export type PipelineStage = typeof PIPELINE_STAGES[number];
@@ -55,6 +60,7 @@ export const STAGE_ROLE: Record<PipelineStage, 'planner' | 'implementer' | 'revi
   implementer: 'implementer',
   reviewer: 'reviewer',
   repair: 'implementer',
+  builder: 'implementer',
 };
 
 /** Human wording for a settings screen, so the UI does not invent its own. */
@@ -67,6 +73,7 @@ export const STAGE_LABEL: Record<PipelineStage, string> = {
   implementer: 'Implementer',
   reviewer: 'Reviewer',
   repair: 'Repair',
+  builder: 'Builder',
 };
 
 export const STAGE_DESCRIPTION: Record<PipelineStage, string> = {
@@ -78,6 +85,7 @@ export const STAGE_DESCRIPTION: Record<PipelineStage, string> = {
   implementer: 'writes the change inside an isolated worktree',
   reviewer: 'reviews the change against current source',
   repair: 'retries a node that failed, with the failure in hand',
+  builder: 'plans and writes the change in one turn, for the lite pipeline',
 };
 
 /* ------------------------------------------------------------------------ *
@@ -254,6 +262,9 @@ export const ZEUS_DEFAULT_ROUTING: Record<PipelineStage, RouteChoice> = {
   implementer: { provider: 'claude' },
   reviewer: { provider: 'codex' },
   repair: { provider: 'claude' },
+  // Same provider as the implementer it replaces: the lite pipeline changes
+  // how many calls a change costs, not who is trusted to write code.
+  builder: { provider: 'claude' },
 };
 
 /**

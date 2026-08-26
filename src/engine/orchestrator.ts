@@ -786,9 +786,55 @@ export class Engine {
       });
     }
 
-    // ---- DESIGN ------------------------------------------------------------
-    this.setState(taskId, 'DESIGN', 'design');
-    const design = await this.agent('planner', rec, [
+    // ---- BUILD (lite) or DESIGN then IMPLEMENT (full) ----------------------
+    //
+    // ONE CALL OR TWO IS A QUESTION ABOUT COST, NOT ABOUT SAFETY. Nothing
+    // downstream reads the design: `scopeAllowlist` is asked for in the prompt
+    // below and consulted by no code anywhere - what actually bounds a change
+    // is `diffViolations` over the real diff, the protected-path policy and
+    // maxFilesChanged, all of which run identically either way. So the lite
+    // path merges the two calls and gives up the separately-readable plan,
+    // which is the only thing it costs.
+    const lite = this.opts.config.project.pipeline === 'lite';
+    if (lite) {
+      this.setState(taskId, 'IMPLEMENT', 'implement');
+      const built = await this.agent('implementer', rec, [
+        'Plan and make this change in the current worktree, in one turn.',
+        `TASK: ${rec.description}`,
+        `PROJECT TYPE: ${adapter?.name ?? 'unknown'}`,
+        `WORKTREE: ${rec.worktree}`,
+        '',
+        'INSPECT BEFORE YOU EDIT. Read the code the task is about and the code',
+        'around it. A change written from the task description alone edits the',
+        'file that sounded right rather than the one that is.',
+        '',
+        'Then make the change. Keep it to what the task asks for: an unrelated',
+        'improvement is a second change hiding inside this one, and the reviewer',
+        'reads the whole diff.',
+        '',
+        'Reply with ONLY: {"status":"IMPLEMENTED"|"FAILED","plan":"what you did and why",',
+        ' "filesChanged":[],"reason":""}',
+      // A lite REPAIR is still a repair: the stage decides which model runs,
+      // and an operator who routed repair to a different model meant it here
+      // too.
+      ].join('\n'), false, rec.repair ? 'repair' : 'builder');
+      if (!built.ok) {
+        const state: TaskState = built.infrastructureFailure ? 'NEEDS_RECONCILIATION' : 'FAILED';
+        this.setState(taskId, state, 'implement',
+          { reason: built.infrastructureFailure ?? 'the build did not complete' });
+        return state;
+      }
+      // Recorded under the same name the full pipeline uses, because it is the
+      // same fact: what the agent decided to do. A reader comparing a lite task
+      // with a full one should not have to know which produced which event.
+      this.record({ taskId, type: 'DESIGN_RECORDED', payload: {
+        design: { plan: (built.structured as any)?.plan ?? '', mergedWithImplement: true },
+      } });
+    }
+    // Restored: dropping this made every FULL task skip straight to IMPLEMENT,
+    // which the lifecycle test caught on the first run.
+    if (!lite) this.setState(taskId, 'DESIGN', 'design');
+    const design = lite ? null : await this.agent('planner', rec, [
       'You are planning a change in an existing repository.',
       `TASK: ${rec.description}`,
       `PROJECT TYPE: ${adapter?.name ?? 'unknown'}`,
@@ -796,13 +842,15 @@ export class Engine {
       'Inspect current source before planning. Reply with ONLY a JSON object:',
       '{"plan":"...","scopeAllowlist":["path"],"requiredTests":["command"],"acceptance":["..."]}',
     ].join('\n'), true);
-    if (!design.ok) {
+    if (design && !design.ok) {
       // A provider outage is not a failed design.
       const state: TaskState = design.infrastructureFailure ? 'NEEDS_RECONCILIATION' : 'FAILED';
       this.setState(taskId, state, 'design', { reason: design.infrastructureFailure ?? 'design failed' });
       return state;
     }
-    this.record({ taskId, type: 'DESIGN_RECORDED', payload: { design: design.structured ?? {} } });
+    if (design) {
+      this.record({ taskId, type: 'DESIGN_RECORDED', payload: { design: design.structured ?? {} } });
+    }
     if (this.task(taskId)?.cancelRequested) return 'CANCELLED';
 
     const afterDesign = this.budgetBreach(taskId);
@@ -810,17 +858,19 @@ export class Engine {
 
     // ---- IMPLEMENT ---------------------------------------------------------
     const implementStartedAt = Date.now();
-    this.setState(taskId, 'IMPLEMENT', 'implement');
-    const impl = await this.agent('implementer', rec, [
-      'Implement the following change in the current worktree.',
-      `TASK: ${rec.description}`,
-      `PLAN: ${JSON.stringify(design.structured ?? {})}`,
-      'Reply with ONLY: {"status":"IMPLEMENTED"|"FAILED","filesChanged":[],"reason":""}',
-    ].join('\n'), false);
-    if (!impl.ok) {
-      const state: TaskState = impl.infrastructureFailure ? 'NEEDS_RECONCILIATION' : 'FAILED';
-      this.setState(taskId, state, 'implement', { reason: impl.infrastructureFailure ?? 'implementation failed' });
-      return state;
+    if (design) {
+      this.setState(taskId, 'IMPLEMENT', 'implement');
+      const impl = await this.agent('implementer', rec, [
+        'Implement the following change in the current worktree.',
+        `TASK: ${rec.description}`,
+        `PLAN: ${JSON.stringify(design.structured ?? {})}`,
+        'Reply with ONLY: {"status":"IMPLEMENTED"|"FAILED","filesChanged":[],"reason":""}',
+      ].join('\n'), false);
+      if (!impl.ok) {
+        const state: TaskState = impl.infrastructureFailure ? 'NEEDS_RECONCILIATION' : 'FAILED';
+        this.setState(taskId, state, 'implement', { reason: impl.infrastructureFailure ?? 'implementation failed' });
+        return state;
+      }
     }
     const changed = this.spans.sync('decision.changed-files', 'DECISION', () => this.changedFiles(rec));
     this.record({ taskId, type: 'CODE_CHANGE', payload: { filesChanged: changed } });
@@ -849,7 +899,7 @@ export class Engine {
     // ---- EVIDENCE-CHAIN INTEGRITY -------------------------------------------
     // The one place where "the tests passed" could be a lie the platform told
     // itself. These rules are not configurable.
-    const contract = this.spans.sync('decision.design-contract', 'DECISION', () => designContract(design.structured));
+    const contract = this.spans.sync('decision.design-contract', 'DECISION', () => designContract(design ? design.structured : {}));
     const integrity: IntegrityReport = this.spans.sync('decision.integrity', 'DECISION',
       () => inspectIntegrity(parsed, contract));
     const evidenceCoupled = this.spans.sync('decision.evidence-coupling', 'DECISION',

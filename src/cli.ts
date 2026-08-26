@@ -34,6 +34,7 @@ import {
 } from './mission/planner';
 import { runMissionLoop } from './mission/loop';
 import { missionHost, ledgerFrom, treeAtRevision } from './mission/host';
+import { runLite } from './mission/lite';
 import {
   missionUsage, progressFrom, providerSpendOf, negotiateBudget,
   mergeMissionBudgets, BudgetNegotiation, MissionBudgets,
@@ -112,6 +113,8 @@ ${C.b}Usage${C.x}
                                          the Control Center; --projects enables the home
   zeus doctor                            report what this machine can actually do
   zeus run "<task>" [--mock]              run a task in this project
+  zeus lite "<change>" [--note "..."]     two stages: plan+code, then review
+  zeus lite continue <taskId> --note "..."  send a blocked attempt back with guidance
   zeus status [<taskId>]
   zeus cancel <taskId> [--reason "..."]
   zeus logs [<taskId>] [--follow]
@@ -689,6 +692,79 @@ function engineFor(root: string, cfg: ProjectConfig, opts: { mock?: boolean } = 
     ? { planner: mockProvider(), implementer: mockProvider(), reviewer: mockProvider() }
     : { planner: claudeProvider(), implementer: claudeProvider(), reviewer: codexProvider() };
   return new Engine({ projectRoot: root, config: cfg, supervisor, providers });
+}
+
+
+/**
+ * `zeus lite` — two stages: one agent plans and writes, one reviews.
+ *
+ * A separate command rather than a flag on `zeus run`, because it is a
+ * different SHAPE of work and not a different setting: it owns the repair the
+ * reviewer's findings earn, and `zeus run` deliberately owns nothing after the
+ * task ends.
+ */
+async function cmdLite(argv: string[]): Promise<number> {
+  const ctx = requireProject();
+  if (!ctx) return 2;
+  const noteAt = argv.indexOf('--note');
+  const note = noteAt >= 0 ? String(argv[noteAt + 1] ?? '') : null;
+  const positional = argv.filter((a, i) =>
+    !a.startsWith('--') && i !== noteAt + 1);
+  const json = argv.includes('--json');
+
+  // `continue` sends a blocked attempt back with a person's own words in front
+  // of the findings that refused it.
+  const resuming = positional[0] === 'continue';
+  const target = resuming ? String(positional[1] ?? '') : positional.join(' ');
+  if (!target) {
+    err('usage: zeus lite "<what to change>" [--note "..."]\n'
+      + '       zeus lite continue <taskId> --note "..."');
+    return 2;
+  }
+
+  const cfg = ctx.cfg;
+  if (cfg.project.pipeline !== 'lite') {
+    // Said rather than assumed. Running the two-stage loop against a project
+    // configured for the full pipeline would silently give it a design call it
+    // did not ask for, and the run would not be lite at all.
+    err(`${C.y}!${C.x} this project's pipeline is `
+      + `${C.b}${cfg.project.pipeline ?? 'full'}${C.x}; set it with `
+      + `${C.b}zeus config set project.pipeline lite${C.x}`);
+    return 2;
+  }
+
+  const engine = engineFor(ctx.root, cfg, { mock: argv.includes('--mock') });
+  const owned = engine.acquire();
+  if (!owned.ok) { err(`${C.r}✗${C.x} ${owned.reason}`); return 4; }
+  try {
+    let goal = target;
+    if (resuming) {
+      const rec = engine.task(target);
+      if (!rec) { err(`${C.r}✗${C.x} unknown task ${target}`); return 2; }
+      // The GOAL is the original task's, with the repair brief rebuilt from
+      // the log by runLite. Re-typing it would let the two drift.
+      goal = rec.description.split('\nTHIS IS A REPAIR')[0]
+        .split('\n\nWHAT THE PERSON WHO SENT THIS BACK')[0];
+    }
+    const result = await runLite({
+      engine, goal, note,
+      resumeFrom: resuming ? target : null,
+      onEvent: (line) => { if (!json) out(`  ${C.dim}${line}${C.x}`); },
+    });
+    if (json) { out(JSON.stringify(result, null, 1)); return result.accepted ? 0 : 1; }
+    out('');
+    for (const a of result.attempts) {
+      const colour = a.state === 'COMPLETED' ? C.g : a.state === 'BLOCKED' ? C.y : C.r;
+      out(`${C.b}${a.taskId}${C.x} ${colour}${a.state}${C.x}`
+        + `${a.repair ? ` ${C.dim}(repair)${C.x}` : ''}`);
+      for (const f of a.findings) {
+        out(`  ${C.y}${f.severity}${C.x} ${f.file ? `${f.file}: ` : ''}${f.claim.slice(0, 120)}`);
+      }
+      for (const c of a.failedChecks) out(`  ${C.r}${c.name}${C.x} ${c.outcome}`);
+    }
+    if (result.nextStep) out(`\n${C.dim}${result.nextStep}${C.x}`);
+    return result.accepted ? 0 : 1;
+  } finally { engine.release(); }
 }
 
 /** `zeus run` — the operator watches the lifecycle happen. */
@@ -2493,6 +2569,7 @@ export async function main(argv: string[]): Promise<number> {
     case 'version': case '--version': case '-v': out(VERSION); return 0;
     case 'help': case '--help': case '-h': case undefined: usage(); return 0;
     case 'run': return cmdRun(rest);
+    case 'lite': return cmdLite(rest);
     case 'status': return cmdStatus(rest);
     case 'cancel': return cmdCancel(rest);
     case 'logs': return cmdLogs(rest);

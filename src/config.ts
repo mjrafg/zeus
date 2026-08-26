@@ -18,7 +18,23 @@ export const PROJECT_DIR = '.zeus';
 
 export interface ProjectConfig {
   version: number;
-  project: { name: string; adapter: string; root: string; packageManager?: string };
+  project: { name: string; adapter: string; root: string; packageManager?: string;
+    /**
+     * How much ceremony a change goes through.
+     *
+     * `full` is Mission Mode: a compiled contract, two critics, a plan, and a
+     * loop that integrates node by node. It is the right shape when the goal
+     * is large enough that being wrong about WHAT to build is the expensive
+     * mistake.
+     *
+     * `lite` is two stages: one agent plans and writes the change, one
+     * independent reviewer reads the diff. Everything that makes a review
+     * worth having is unchanged - the worktree, the checks, the review
+     * context policy, the write and read checks. What is dropped is the
+     * contract machinery, which is ceremony when the goal is one obvious
+     * change.
+     */
+    pipeline?: 'full' | 'lite' };
   commands: Commands;
   policy: {
     protectedPaths: string[];

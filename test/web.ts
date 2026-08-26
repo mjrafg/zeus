@@ -3247,8 +3247,11 @@ export async function webSuite(): Promise<void> {
     // took providers.planner; the oracle critic and the plan critic both took
     // providers.reviewer. Wanting a cheaper model for one and not the other
     // was not expressible, and no log said which model wrote a plan.
-    check('RT1: the pipeline has eight stages, each nameable on its own',
-      PIPELINE_STAGES.length === 8
+    // 8 -> 9 with the lite pipeline's `builder`. Pinned rather than derived so
+    // that adding a stage is a decision somebody made on purpose: a stage
+    // nobody acknowledged is a stage with no routing, no label and no screen.
+    check('RT1: the pipeline has nine stages, each nameable on its own',
+      PIPELINE_STAGES.length === 9 && PIPELINE_STAGES.includes('builder')
       && PIPELINE_STAGES.includes('oracle') && PIPELINE_STAGES.includes('planner')
       && PIPELINE_STAGES.includes('oracle-critic') && PIPELINE_STAGES.includes('plan-critic')
       && PIPELINE_STAGES.includes('repair'),
@@ -3308,7 +3311,7 @@ export async function webSuite(): Promise<void> {
 
       const r = await get(`${server.url}/api/routing`, auth);
       check('AR1: the screen is given every stage, with what each one is for',
-        r.status === 200 && r.json.stages.length === 8
+        r.status === 200 && r.json.stages.length === 9
         && r.json.stages.every((s2: any) => s2.label && s2.description),
         JSON.stringify(r.json?.stages?.map((s2: any) => s2.label)));
       check('AR2: and the providers\u2019 own catalogue, so nothing is hardcoded in the page',
@@ -3316,7 +3319,7 @@ export async function webSuite(): Promise<void> {
         && r.json.capabilities.every((c: any) => typeof c.closed === 'boolean'),
         JSON.stringify(r.json?.capabilities?.map((c: any) => c.provider)));
       check('AR3: with the resolved table and the tier each field came from',
-        r.json.routes.length === 8 && r.json.routes[0].source.provider,
+        r.json.routes.length === 9 && r.json.routes[0].source.provider,
         JSON.stringify(r.json?.routes?.[0]?.source));
 
       const bad = await post(server, '/api/routing',

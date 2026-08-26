@@ -20,6 +20,8 @@ import { EventStore } from '../src/engine/events';
 import { Engine, classifyCheck, checkAllowsAcceptance } from '../src/engine/orchestrator';
 import { mockProvider, parseStructured } from '../src/engine/providers';
 import { defaultConfig, writeConfig } from '../src/config';
+import { runLite } from '../src/mission/lite';
+import { PIPELINE_STAGES, STAGE_LABEL, STAGE_DESCRIPTION, STAGE_ROLE } from '../src/routing';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zeus-engine-'));
 const mkRepo = (name: string, files: Record<string, string>): string => {
@@ -592,8 +594,161 @@ export async function engineSuites(): Promise<void> {
   await multiProjectSuite();
   await noBypassSuite();
   await p1Suites();
+  await liteSuite();
+  await liteLoopSuite();
   fs.rmSync(TMP, { recursive: true, force: true });
 }
+
+async function liteSuite(): Promise<void> {
+  section('zeus lite: two stages, and nothing that made review worth having removed');
+  const root = mkRepo('lite-sample', {
+    'package.json': JSON.stringify({ name: 'lite', scripts: { test: 'node -e "process.exit(0)"' } }),
+    'package-lock.json': '{}',
+    'src/index.js': 'module.exports = 1;\n',
+  });
+  const cfg = defaultConfig(root);
+  cfg.commands.unitTest = 'node -e process.exit(0)';
+  cfg.commands.typecheck = null;
+  cfg.project.pipeline = 'lite';
+  writeConfig(root, cfg);
+
+  const sup = new ProcessSupervisor(deriveBudgets({ heavyTimeoutSeconds: 60, lightTimeoutSeconds: 60 }));
+  const engine = new Engine({
+    projectRoot: root, config: cfg, supervisor: sup,
+    providers: { planner: mockProvider(), implementer: mockProvider(), reviewer: mockProvider() },
+  });
+  engine.acquire();
+  const rec = engine.createTask('Fix the login validation bug');
+  await engine.run(rec.taskId);
+  const evs = engine.events.read(rec.taskId);
+  const states = evs.filter((e) => e.type === 'STATE_CHANGED').map((e) => (e.payload as any).to);
+
+  // TWO STAGES MEANS TWO STAGES. The whole point is one model call where the
+  // full pipeline makes two, so the absence of DESIGN is the feature, not an
+  // omission - and asserting on the count would pass if design merely ran
+  // under a different name.
+  check('LT1: a lite task never enters DESIGN — plan and code are one call',
+    !states.includes('DESIGN') && states.includes('IMPLEMENT'), states.join(' → '));
+  check('LT2: and it still verifies and still gets reviewed',
+    states.includes('VERIFY') && states.includes('REVIEW'), states.join(' → '));
+  // The independent review is the thing lite must NOT drop: it is what the
+  // dropped ceremony was protecting in the first place.
+  check('LT3: the review context is still assembled under its policy',
+    evs.some((e) => e.type === 'REVIEW_CONTEXT'));
+  check('LT4: the plan is still recorded, so a reader can see what it decided',
+    evs.some((e) => e.type === 'DESIGN_RECORDED'
+      && (e.payload as any)?.design?.mergedWithImplement === true));
+  // ROUTABLE LIKE ANY OTHER STAGE. A stage an operator cannot see or route is
+  // a hardcoded model wearing a stage's name.
+  const started = evs.filter((e) => e.type === 'MODEL_CALL_STARTED')
+    .map((e) => (e.payload as any).stage);
+  check('LT5: the build runs as the `builder` stage, not as an anonymous implementer',
+    started.includes('builder') && !started.includes('planner'), started.join(', '));
+  check('LT6: builder is in the routing table, with a label and a description',
+    PIPELINE_STAGES.includes('builder' as any)
+    && !!STAGE_LABEL.builder && !!STAGE_DESCRIPTION.builder
+    && STAGE_ROLE.builder === 'implementer');
+
+  // THE DEFAULT IS UNCHANGED. An existing project that never heard of this
+  // setting must run exactly as it did before.
+  const fullRoot = mkRepo('full-sample', {
+    'package.json': JSON.stringify({ name: 'full', scripts: { test: 'node -e "process.exit(0)"' } }),
+    'package-lock.json': '{}',
+    'src/index.js': 'module.exports = 1;\n',
+  });
+  const fullCfg = defaultConfig(fullRoot);
+  fullCfg.commands.unitTest = 'node -e process.exit(0)';
+  fullCfg.commands.typecheck = null;
+  writeConfig(fullRoot, fullCfg);
+  check('LT7: a project that never set a pipeline is still full — no silent migration',
+    fullCfg.project.pipeline === undefined);
+  const fullEngine = new Engine({
+    projectRoot: fullRoot, config: fullCfg, supervisor: sup,
+    providers: { planner: mockProvider(), implementer: mockProvider(), reviewer: mockProvider() },
+  });
+  fullEngine.acquire();
+  const fullRec = fullEngine.createTask('Fix something else');
+  await fullEngine.run(fullRec.taskId);
+  const fullStates = fullEngine.events.read(fullRec.taskId)
+    .filter((e) => e.type === 'STATE_CHANGED').map((e) => (e.payload as any).to);
+  check('LT8: and it still designs before it implements',
+    fullStates.includes('DESIGN') && fullStates.includes('IMPLEMENT'),
+    fullStates.join(' → '));
+  fullEngine.release();
+  engine.release();
+}
+
+/**
+ * The repair a reviewer's findings earn, without running a provider.
+ *
+ * `runLite` is a loop over `engine.run`, so a fake engine proves the loop's
+ * decisions - how many attempts, what each inherits, when it stops - which is
+ * the part that has been wrong three times this week.
+ */
+async function liteLoopSuite(): Promise<void> {
+  section('zeus lite: one repair, then a person, and the findings travel');
+
+  const made: Array<{ taskId: string; description: string; repair: boolean }> = [];
+  const fake = (states: string[]) => {
+    let n = 0;
+    const findings = [{ severity: 'IMPORTANT', claim: 'the aria-labels are still English', file: 'shell.jsx' }];
+    return {
+      createTask(description: string, opts: any = {}) {
+        const taskId = `p/T-000${made.length + 1}`;
+        made.push({ taskId, description, repair: !!opts.repair });
+        return { taskId, description, worktree: `/w/${taskId}` } as any;
+      },
+      task: (id: string) => ({ taskId: id, worktree: `/w/${id}` }) as any,
+      async run() { const s = states[Math.min(n, states.length - 1)]; n += 1; return s as any; },
+      // priorAttempt reads through engine.logs, which is the door the real
+      // repair path uses; a fake that answered a different one would be
+      // testing a call nobody makes.
+      logs: () => ([{ type: 'FINDINGS', payload: { findings } }] as any),
+      events: { read: () => ([] as any) },
+    } as any;
+  };
+
+  {
+    made.length = 0;
+    const blocked = await runLite({ engine: fake(['BLOCKED', 'BLOCKED']), goal: 'add a switcher' });
+    check('LT9: a blocked attempt earns exactly ONE automatic repair, then stops',
+      blocked.attempts.length === 2 && blocked.attempts[1].repair === true
+      && blocked.accepted === false, `${blocked.attempts.length} attempt(s)`);
+    // THE FINDINGS TRAVEL. A repair that re-derives the change from the same
+    // words that produced the first one cannot know what was refused.
+    check('LT10: the repair is told what the reviewer refused',
+      /THIS IS A REPAIR OF A FAILED ATTEMPT/.test(made[1].description)
+      && /aria-labels are still English/.test(made[1].description));
+    check('LT11: and it is created AS a repair, so it routes to the repair stage',
+      made[0].repair === false && made[1].repair === true);
+    check('LT12: the next step names the task and the command that unsticks it',
+      /zeus lite continue p\/T-0002 --note/.test(blocked.nextStep ?? ''),
+      blocked.nextStep ?? '');
+
+    made.length = 0;
+    const green = await runLite({ engine: fake(['COMPLETED']), goal: 'add a switcher' });
+    check('LT13: a review that raises nothing spends no repair at all',
+      green.accepted === true && green.attempts.length === 1);
+
+    // AN OUTAGE IS NOT A REFUSED CHANGE. Spending the one repair a person is
+    // entitled to on a provider failure burns it on something no repair fixes.
+    made.length = 0;
+    const broke = await runLite({ engine: fake(['NEEDS_RECONCILIATION']), goal: 'add a switcher' });
+    check('LT14: an infrastructure failure does NOT consume the repair',
+      broke.attempts.length === 1 && broke.accepted === false
+      && /not a review verdict/.test(broke.nextStep ?? ''), broke.nextStep ?? '');
+
+    // A PERSON'S WORDS AND THE REVIEWER'S FINDINGS ARE NOT ALTERNATIVES.
+    made.length = 0;
+    await runLite({ engine: fake(['BLOCKED']), goal: 'add a switcher',
+      note: 'translate the aria-labels too', resumeFrom: 'p/T-0001' });
+    check('LT15: a continuation carries the note AND the findings it was refused for',
+      /translate the aria-labels too/.test(made[0].description)
+      && /aria-labels are still English/.test(made[0].description)
+      && made[0].repair === true);
+  }
+}
+
 
 /* ---------------------------------------------------------------------------
  * P1 closure suites: reviewer independence, task budgets, event-store scale,

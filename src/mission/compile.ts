@@ -27,7 +27,7 @@ import {
 } from '../engine/reviewcontext';
 import {
   AcceptanceMode, Criterion, ModeDecision, OracleValidation, ProjectContext,
-  applyCriticMode, computeAcceptanceMode, makeCriterionId, oracleHash, validateOracle,
+  applyCriticMode, computeAcceptanceMode, makeCriterionId, isCriterionId, oracleHash, validateOracle,
   ACCEPTANCE_MODES, CriticFindingRef, FindingsFloor, findingsFloor,
 } from './oracle';
 
@@ -148,10 +148,25 @@ export function normaliseCriteria(missionId: string, raw: unknown, ctx?: Project
               ...(ev.repeat !== undefined ? { repeat: ev.repeat } : {}) }
           : (ev as any);
     const supplied = str(c?.criterionId);
+    // A SUPPLIED ID THAT IS ITSELF A CRITERION ID IS NOT A NAME, IT IS STALE
+    // NUMBERING, and keeping it is how talkbridge/M-0034 lost a criterion.
+    //
+    // The compiler answered its critic by INSERTING a criterion and not
+    // renumbering the rest, so Zeus's C-0005 arrived carrying the supplied id
+    // "…/C-0004" — the canonical id of a DIFFERENT criterion. That string then
+    // became an alias in the planner, the planner's correct reference to
+    // C-0004 was silently rewritten to C-0005, and every plan was refused for
+    // not covering a criterion it had covered.
+    //
+    // Descriptive names (`landing-chrome-translated`) are worth showing a
+    // human and are kept. A number in our own format is worth nothing: Zeus
+    // has already replaced it, and the two numberings disagree by construction.
+    const isStaleNumbering = !!supplied && isCriterionId(supplied);
     return {
-      // ALWAYS canonical, and always ours. The model's id becomes a slug.
+      // ALWAYS canonical, and always ours. The model's NAME becomes a slug.
       criterionId: makeCriterionId(missionId, i + 1),
-      ...(supplied && supplied !== makeCriterionId(missionId, i + 1) ? { slug: supplied } : {}),
+      ...(supplied && !isStaleNumbering && supplied !== makeCriterionId(missionId, i + 1)
+        ? { slug: supplied } : {}),
       ...(resolvedFromKey ? { resolvedFromKey } : {}),
       type: c?.type,
       statement: str(c?.statement),

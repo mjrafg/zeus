@@ -50,23 +50,67 @@ export function makeNodeId(missionId: string, seq: number): string {
  * canonical criterion id where possible, for the same reason: the planner
  * knows the criteria by the names it can see.
  */
+/**
+ * Resolves the names a model uses to the ids Zeus assigned - safely.
+ *
+ * THE RUN THIS EXISTS FOR. talkbridge/M-0034's planner wrote
+ * `affectedCriteria: ["talkbridge/M-0034/C-0004"]`, which was correct, and
+ * Zeus stored `C-0005`. The old map was one loop with last-write-wins: it set
+ * the identity mapping for C-0004, then reached C-0005, whose slug happened to
+ * be the string "talkbridge/M-0034/C-0004" (stale numbering from a compiler
+ * that inserted a criterion without renumbering) - and overwrote it. Four
+ * plans in a row were then refused for not covering a criterion every one of
+ * them had covered, and the planner was never told why.
+ *
+ * TWO RULES, and the second is the one that was missing:
+ *
+ *   IDENTITY IS NOT AN ALIAS. A canonical id, and the bare local label of a
+ *   canonical id, resolve to themselves. No alias may displace them, whatever
+ *   order the list happens to be in.
+ *
+ *   AN AMBIGUOUS ALIAS IS DROPPED, NOT GUESSED. If two entries claim the same
+ *   alias, neither gets it. The reference passes through untouched and the
+ *   deterministic validator refuses it BY NAME - which is a loud, readable
+ *   failure, where resolving it to the wrong id was a silent, unreadable one.
+ */
+export function aliasMap(entries: Array<{ canonical: string; alias?: string }>):
+Map<string, string> {
+  const identity = new Map<string, string>();
+  for (const e of entries) {
+    identity.set(e.canonical, e.canonical);
+    const local = e.canonical.slice(e.canonical.lastIndexOf('/') + 1);
+    if (local) identity.set(local, e.canonical);
+  }
+  // Aliases are collected first and applied only where they cannot collide,
+  // so the result does not depend on iteration order.
+  const claims = new Map<string, Set<string>>();
+  for (const e of entries) {
+    if (!e.alias || identity.has(e.alias)) continue;   // identity always wins
+    const to = claims.get(e.alias) ?? new Set<string>();
+    to.add(e.canonical);
+    claims.set(e.alias, to);
+  }
+  const out = new Map(identity);
+  for (const [alias, targets] of claims) {
+    if (targets.size === 1) out.set(alias, [...targets][0]);
+    // targets.size > 1: two things answer to one name. Neither gets it.
+  }
+  return out;
+}
+
 export function normaliseNodes(missionId: string, raw: unknown, criteria: Criterion[] = []): TaskNode[] {
   const list = Array.isArray(raw) ? raw : [];
-  // Two ways the planner might name a criterion, both resolvable to one id.
-  const byAlias = new Map<string, string>();
-  for (const c of criteria) {
-    byAlias.set(c.criterionId, c.criterionId);
-    if (c.slug) byAlias.set(c.slug, c.criterionId);
-    const local = c.criterionId.slice(c.criterionId.lastIndexOf('/') + 1);
-    byAlias.set(local, c.criterionId);
-  }
+  const byAlias = aliasMap(
+    criteria.map((c) => ({ canonical: c.criterionId, alias: c.slug })));
   // The planner names dependencies by ITS ids; we renumber, so the mapping
   // from its name to our id has to be built before dependsOn is rewritten.
-  const idOf = new Map<string, string>();
-  list.forEach((n: any, i) => {
-    const supplied = str(n?.nodeId);
-    if (supplied) idOf.set(supplied, makeNodeId(missionId, i + 1));
-  });
+  //
+  // Through the same collision rules as the criteria: a planner that names its
+  // second node "N-0001" must not silently redirect every dependency on the
+  // first one.
+  const idOf = aliasMap(list.map((n: any, i) => ({
+    canonical: makeNodeId(missionId, i + 1), alias: str(n?.nodeId) || undefined,
+  })));
 
   return list.map((n: any, i) => {
     const supplied = str(n?.nodeId);

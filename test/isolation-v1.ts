@@ -530,6 +530,21 @@ export async function isolationV1Suite(): Promise<void> {
       && pathsIn('grep -rl x .zeus/state/tasks/*/events.jsonl').length === 1,
       pathsIn('grep -rl x .zeus/state/tasks/*/events.jsonl').join(', '));
 
+    // M-0034 PRODUCED THIS CHECK'S FIRST TWO LIVE FINDINGS, AND BOTH WERE
+    // WRONG. `rg "from '../content.js'" app/src/pages/app-home.jsx` contains
+    // `../content.js`, which resolved against the project ROOT into a sibling
+    // that does not exist. A relative token has no known base: the agent's
+    // working directory need not be the root, and `..` inside a quoted pattern
+    // is not a path at all.
+    check('V1-RS49: a relative token that escapes by .. is NOT an escape',
+      classifyPath('../content.js', roots) === null
+      && classifyPath('../../etc/passwd', roots) === null);
+    check('V1-RS50: an absolute path still is, because it is unambiguous',
+      classifyPath('/opt/zeus-engine/src/x.ts', roots)?.kind === 'ZEUS_INSTALL');
+    // .zeus is matched by NAME, not by .. arithmetic, so it survives the rule.
+    check('V1-RS51: and .zeus is still caught, being matched by name',
+      classifyPath('.zeus/state/tasks', roots)?.kind === 'MISSION_STATE');
+
     check('V1-RS17: paths are found bare, dot-relative and absolute',
       pathsIn('find .zeus -maxdepth 3').includes('.zeus')
       && pathsIn('sed -n 1,5p ./app/x.js').includes('./app/x.js')

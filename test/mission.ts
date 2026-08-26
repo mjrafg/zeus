@@ -27,6 +27,9 @@ import {
 } from '../src/mission/types';
 import { MissionRegistry, reconstructFromEvents } from '../src/mission/registry';
 import { validatePlan, PlanFindingCode, globsOverlap } from '../src/mission/plan';
+import { normaliseNodes } from '../src/mission/planner';
+import { normaliseCriteria } from '../src/mission/compile';
+import { priorPlanFor, latestCritiqueFindings } from '../src/mission/operations';
 import {
   ratchetRef, advanceRatchet, readRatchet, deleteRatchet, reconstructRatchet, refSafeProject,
 } from '../src/mission/ratchet';
@@ -651,6 +654,139 @@ export async function missionSuite(): Promise<void> {
     const badText = said();
     check('MI88: a task id is refused by the mission CLI, by name',
       bad === 2 && /mission id expected/.test(badText), `${bad}: ${badText.trim()}`);
+  }
+
+  /* ---------------------------------------------------------------------- *
+   * talkbridge/M-0034: a correct reference, silently rewritten to another id.
+   *
+   * The planner wrote affectedCriteria ["…/C-0004"]. Zeus stored "…/C-0005",
+   * then refused the plan for not covering C-0004 - four times, in nineteen
+   * minutes, telling the planner nothing. Two independent defects, both here.
+   * ---------------------------------------------------------------------- */
+
+  section('aliases: identity is not an alias, and an ambiguous alias is dropped');
+  {
+    // The exact shape M-0034 produced: the compiler answered its critic by
+    // INSERTING a criterion and not renumbering, so Zeus's C-0005 arrived
+    // carrying the supplied id of a different criterion.
+    const collided: any[] = [
+      { criterionId: 'p/M-0034/C-0004', slug: 'landing-chrome-translated' },
+      { criterionId: 'p/M-0034/C-0005', slug: 'p/M-0034/C-0004' },
+    ];
+    const covers = (name: string) => normaliseNodes('p/M-0034',
+      [{ nodeId: 'chrome', affectedCriteria: [name] }], collided)[0].affectedCriteria;
+
+    check('AL1: a canonical id survives a later entry claiming it as a slug',
+      covers('p/M-0034/C-0004')[0] === 'p/M-0034/C-0004',
+      covers('p/M-0034/C-0004')[0]);
+    check('AL2: the bare local label resolves the same way',
+      covers('C-0004')[0] === 'p/M-0034/C-0004');
+    check('AL3: and a real descriptive name still resolves',
+      covers('landing-chrome-translated')[0] === 'p/M-0034/C-0004');
+    // The collided slug now points nowhere rather than somewhere wrong. Zeus
+    // has already replaced that numbering; there is no honest target for it.
+    check('AL4: the stale-numbering slug does not silently redirect anything',
+      covers('p/M-0034/C-0005')[0] === 'p/M-0034/C-0005');
+
+    // TWO THINGS ANSWERING TO ONE NAME: neither gets it. The reference passes
+    // through untouched, so the deterministic validator refuses it BY NAME -
+    // a loud failure where a guess was a silent one.
+    const ambiguous: any[] = [
+      { criterionId: 'p/M-0001/C-0001', slug: 'the-same-name' },
+      { criterionId: 'p/M-0001/C-0002', slug: 'the-same-name' },
+    ];
+    const amb = normaliseNodes('p/M-0001',
+      [{ nodeId: 'n', affectedCriteria: ['the-same-name'] }], ambiguous)[0].affectedCriteria;
+    check('AL5: an alias two criteria claim resolves to neither',
+      amb[0] === 'the-same-name', amb[0]);
+    check('AL6: order does not decide it — the reversed list answers identically',
+      normaliseNodes('p/M-0001', [{ nodeId: 'n', affectedCriteria: ['the-same-name'] }],
+        [...ambiguous].reverse())[0].affectedCriteria[0] === 'the-same-name');
+
+    // NODE IDS GET THE SAME PROTECTION. A planner naming its second node
+    // "N-0001" must not redirect every dependency on the first one.
+    const nodes = normaliseNodes('p/M-0001', [
+      { nodeId: 'p/M-0001/N-0002' },
+      { nodeId: 'second', dependsOn: ['p/M-0001/N-0002'] },
+    ], []);
+    check('AL7: a node slug cannot displace another node\'s canonical id',
+      nodes[1].dependsOn[0] === 'p/M-0001/N-0002', nodes[1].dependsOn[0]);
+    check('AL8: ordinary node slugs still resolve to canonical ids',
+      normaliseNodes('p/M-0001', [{ nodeId: 'first' }, { nodeId: 'b', dependsOn: ['first'] }], [])[1]
+        .dependsOn[0] === 'p/M-0001/N-0001');
+  }
+
+  section('aliases: the compiler\'s own numbering never becomes a name');
+  {
+    const ctx = { commands: { unitTest: 'npm test' }, failingChecks: [], findings: [] };
+    const raw = [
+      { criterionId: 'landing-chrome-translated', type: 'AI_JUDGED', statement: 'a',
+        evaluator: { kind: 'rubric', rubric: 'x'.repeat(20), artifacts: ['a'] } },
+      { criterionId: 'p/M-0034/C-0004', type: 'AI_JUDGED', statement: 'b',
+        evaluator: { kind: 'rubric', rubric: 'x'.repeat(20), artifacts: ['a'] } },
+    ];
+    const out = normaliseCriteria('p/M-0034', raw, ctx as any);
+    check('SN1: a descriptive name is kept as the slug',
+      out[0].slug === 'landing-chrome-translated', String(out[0].slug));
+    // A number in Zeus's own format is not a name. Zeus has replaced it, the
+    // two numberings disagree by construction, and keeping it is what created
+    // the collision above.
+    check('SN2: a supplied CRITERION ID is dropped, not kept as a slug',
+      out[1].slug === undefined, String(out[1].slug));
+    check('SN3: the canonical ids are still Zeus\'s, in order',
+      out.map((c) => c.criterionId).join() === 'p/M-0034/C-0001,p/M-0034/C-0002');
+  }
+
+  section('retries: a rejected attempt is still a previous attempt');
+  {
+    const store = new EventStore(path.join(TMP, `retry-${Date.now()}`));
+    const missions = new MissionRegistry({ events: store, projectId: 'p',
+      stateRoot: path.join(TMP, `retry-${Date.now()}`) });
+    const id = missions.create('a goal', 'sha').missionId;
+
+    // A plan the deterministic validator refused. It never reaches a critic,
+    // so its validator findings are the only thing the next planner can learn
+    // from - and priorPlanFor used to look only for PLAN_RECORDED, which this
+    // path never writes.
+    missions.recordPlanRejected(id, {
+      version: 1,
+      nodes: [{ nodeId: `${id}/N-0001`, affectedCriteria: [] } as any],
+      findings: [{ code: 'CRITERION_UNCOVERED', severity: 'error',
+        detail: 'no node claims to affect "C-0004"' } as any],
+      retryable: true, trigger: 'AUTO',
+    });
+    const after = priorPlanFor(missions, id);
+    check('RJ1: the next planner is given the plan that was just refused',
+      !!after && after.prior.graph.nodes.length === 1, JSON.stringify(!!after));
+    check('RJ2: and the finding it was refused for',
+      !!after && after.prior.findings.some((f: any) => f.code === 'CRITERION_UNCOVERED'),
+      JSON.stringify(after?.prior.findings));
+    check('RJ3: with no critic findings invented — no critic ran',
+      !!after && after.prior.critic.length === 0);
+
+    // A REFUSED COMPILE HAS THE SAME SHAPE, one layer up: it writes
+    // ORACLE_COMPILE_REJECTED and returns before any critic runs, and the
+    // recompile read only ORACLE_CRITIQUED.
+    const id2 = missions.create('another goal', 'sha').missionId;
+    missions.recordCompileRejected(id2, {
+      findings: [{ code: 'RUBRIC_MISSING', severity: 'error',
+        criterionId: `${id2}/C-0002`, detail: 'no rubric' }],
+      criteria: [{ criterionId: `${id2}/C-0001` }],
+      compilerProviderId: 'x', structuredHash: 'sha256:0',
+    });
+    const f = latestCritiqueFindings(missions, id2);
+    check('RJ4: a recompile after a refused compile is told why it was refused',
+      f.some((x) => x.code === 'RUBRIC_MISSING'), JSON.stringify(f));
+
+    // WHICHEVER CAME LAST WINS. The question is what happened last, not what
+    // last succeeded - so a newer critique still supersedes an older refusal.
+    missions.recordCritique(id2, { valid: true, modeOpinion: 'AUTO',
+      findings: [{ code: 'WEAK_RUBRIC', criterionId: `${id2}/C-0001`, detail: 'thin' }],
+      promptHash: 'h', hashes: {}, violations: [], criticProviderId: 'c',
+      reconciliation: { consistent: true, unsupportedClaims: [] } });
+    const f2 = latestCritiqueFindings(missions, id2);
+    check('RJ5: and a newer critique supersedes the older refusal',
+      f2.length === 1 && f2[0].code === 'WEAK_RUBRIC', JSON.stringify(f2));
   }
 
   fs.rmSync(TMP, { recursive: true, force: true });

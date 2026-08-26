@@ -82,13 +82,31 @@ export interface OperationContext {
  */
 export const MAX_ORACLE_RECOMPILES = 2;
 
-/** The findings of the most recent critique — what a recompile must answer. */
+/**
+ * What the last attempt has to answer — the critic's findings, or the
+ * validator's if the last attempt never reached a critic.
+ *
+ * THE SAME GAP THE PLAN LAYER HAD. This read only ORACLE_CRITIQUED, and a
+ * compile the deterministic validator refused writes ORACLE_COMPILE_REJECTED
+ * and returns before any critic runs. So a recompile after a schema failure
+ * was handed the findings of an OLDER, valid round and told nothing about the
+ * refusal it was supposed to be fixing.
+ *
+ * Whichever came last wins, for the same reason: the question is what happened
+ * last, not what last produced a critique.
+ */
 export function latestCritiqueFindings(missions: MissionRegistry,
   missionId: string): CriticFindingRef[] {
   const evs = [...missions.events.read(missionId)].reverse();
-  const q = evs.find((e) => e.type === 'ORACLE_CRITIQUED');
+  const q = evs.find((e) => e.type === 'ORACLE_CRITIQUED'
+    || e.type === 'ORACLE_COMPILE_REJECTED');
   const raw = (q?.payload as any)?.findings;
-  return Array.isArray(raw) ? raw.filter((f: any) => f && typeof f.code === 'string') : [];
+  if (!Array.isArray(raw)) return [];
+  // Validator findings carry `detail` and a code but no criterionId in the
+  // critic's shape; normalised here so the compiler sees one kind of thing.
+  return raw
+    .filter((f: any) => f && typeof f.code === 'string')
+    .map((f: any) => ({ code: f.code, criterionId: f.criterionId, detail: String(f.detail ?? '') }));
 }
 
 /**
@@ -120,7 +138,22 @@ export async function recompileMissionOracle(ctx: OperationContext,
         + `${MAX_ORACLE_RECOMPILES} rounds needs a person, not another round.` };
   }
 
-  const prior = rec.oracle as Oracle;
+  // THE ATTEMPT TO ANSWER, which is not always the accepted oracle.
+  //
+  // `rec.oracle` is only written when validation PASSES, so after a refused
+  // compile this showed the compiler an older, valid contract while the
+  // findings beside it described the newer, refused one. Two halves of two
+  // different rounds, presented as one attempt.
+  const rejected = [...missions.events.read(missionId)].reverse()
+    .find((e) => e.type === 'ORACLE_CRITIQUED' || e.type === 'ORACLE_COMPILE_REJECTED');
+  const refusedCriteria = rejected?.type === 'ORACLE_COMPILE_REJECTED'
+    ? ((rejected.payload as any)?.criteria as Criterion[] | undefined) : undefined;
+  const accepted = rec.oracle as Oracle;
+  const prior = {
+    criteria: Array.isArray(refusedCriteria) && refusedCriteria.length
+      ? refusedCriteria : accepted.criteria,
+    version: accepted.version,
+  };
   const findings = latestCritiqueFindings(missions, missionId);
   const attempt = rec.recompiles + 1;
 
@@ -577,10 +610,27 @@ export function liveRun(missions: MissionRegistry, missionId: string): LiveRun |
 export function priorPlanFor(missions: MissionRegistry, missionId: string):
 { prior: NonNullable<Parameters<typeof planMission>[0]['prior']> } | null {
   const log = missions.events.read(missionId);
-  const recorded = [...log].reverse().find((e) => e.type === 'PLAN_RECORDED');
-  if (!recorded) return null;
-  const p = (recorded.payload ?? {}) as any;
-  const graph = p.plan as PlanGraph | undefined;
+  // A REJECTED PLAN IS STILL A PREVIOUS ATTEMPT.
+  //
+  // This looked only for PLAN_RECORDED, which is written AFTER the
+  // deterministic validator passes - so a plan the validator refused left
+  // nothing here to find, and every retry started from the goal alone.
+  // talkbridge/M-0034 planned four times in nineteen minutes, was refused four
+  // times for the same finding, and no planner after the first was ever told
+  // there had been a finding at all.
+  //
+  // The newest of the two wins, because the question is "what happened last",
+  // not "what last succeeded".
+  const last = [...log].reverse().find((e) =>
+    e.type === 'PLAN_RECORDED' || e.type === 'PLAN_REJECTED');
+  if (!last) return null;
+  const p = (last.payload ?? {}) as any;
+  const rejected = last.type === 'PLAN_REJECTED';
+  // PLAN_RECORDED keeps the graph under `plan`; PLAN_REJECTED keeps the nodes
+  // it refused, which is the whole reason it records them.
+  const graph = (rejected
+    ? { version: Number(p.version ?? 0), nodes: p.nodes }
+    : p.plan) as PlanGraph | undefined;
   if (!graph || !Array.isArray(graph.nodes)) return null;
   const version = Number(p.version ?? graph.version ?? 0);
   const critique = [...log].reverse().find((e) => e.type === 'PLAN_CRITIQUED'
@@ -589,8 +639,11 @@ export function priorPlanFor(missions: MissionRegistry, missionId: string):
   return {
     prior: {
       graph, version,
-      findings: (p.scopeFindings ?? []) as PlanFinding[],
-      critic: Array.isArray(critic) ? critic : [],
+      // A rejected plan never reached a critic, so its validator findings are
+      // the ONLY thing the next planner can learn from. Recorded ones carry
+      // the scope gaps, as before.
+      findings: (rejected ? p.findings : p.scopeFindings) as PlanFinding[] ?? [],
+      critic: Array.isArray(critic) && !rejected ? critic : [],
     },
   };
 }

@@ -251,6 +251,20 @@ Omit<ReadReach, 'tool' | 'via'> | null {
 
   if (under(resolved, roots.projectRoot)) return null;
   if (SYSTEM_PREFIXES.some((p) => resolved.startsWith(p))) return null;
+
+  // A RELATIVE TOKEN HAS NO KNOWN BASE, so it cannot prove an escape.
+  //
+  // M-0034's planner produced both of this check's first live findings, and
+  // both were wrong: `rg "from '../content.js'" app/src/pages/app-home.jsx`
+  // contains `../content.js`, which resolved against the project ROOT into
+  // a sibling of the project root - a file that does not exist. The agent's
+  // working directory is not necessarily the root, `..` inside a quoted
+  // pattern is not a path at all, and resolving either against a guessed base
+  // produces a confident answer to a question nobody can answer.
+  //
+  // Absolute paths are unambiguous and still reported. `.zeus` is matched by
+  // NAME above rather than by arithmetic, so it survives this too.
+  if (!raw.startsWith('/')) return null;
   return { kind: 'OUTSIDE_PROJECT', path: raw, resolved };
 }
 

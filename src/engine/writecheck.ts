@@ -25,6 +25,7 @@
  */
 
 import { readOnlyGit } from './gitro';
+import { ZEUS_PATHSPEC_EXCLUDES } from './orchestrator';
 
 export interface WriteCheckClean {
   clean: true;
@@ -132,7 +133,19 @@ export function parsePorcelain(text: string): {
 export function checkWrites(cwd: string): WriteCheck {
   const began = Date.now();
   const revision = revisionOf(cwd);
-  const st = git(['status', '--porcelain', '--untracked-files=all'], cwd);
+  // ZEUS'S OWN STATE IS NOT THE PROJECT'S SOURCE.
+  //
+  // .zeus/ holds the event log, the worktrees, the graph and the config —
+  // written by Zeus, on every mission, by design. Counting it caught the
+  // Oracle "modifying" .zeus/config.yaml and .zeus/.gitignore, which `zeus
+  // init` had just created, and would have blocked every real run for doing
+  // exactly what it is supposed to do.
+  //
+  // The same exclusion the integrator already uses, for the same reason: the
+  // question is whether the ROLE touched the project, not whether Zeus was
+  // running.
+  const st = git(['status', '--porcelain', '--untracked-files=all',
+    '--', '.', ...ZEUS_PATHSPEC_EXCLUDES], cwd);
   const porcelain = st.out;
   if (!st.ok) {
     // A CHECK THAT COULD NOT RUN IS NOT A CHECK THAT PASSED.
@@ -158,8 +171,10 @@ export function checkWrites(cwd: string): WriteCheck {
 
   // Only now, and only because something changed.
   const parsed = parsePorcelain(porcelain);
-  const diff = git(['diff'], cwd).out.slice(0, MAX_DIFF_BYTES);
-  const diffCached = git(['diff', '--cached'], cwd).out.slice(0, MAX_DIFF_BYTES);
+  const diff = git(['diff', '--', '.', ...ZEUS_PATHSPEC_EXCLUDES], cwd)
+    .out.slice(0, MAX_DIFF_BYTES);
+  const diffCached = git(['diff', '--cached', '--', '.', ...ZEUS_PATHSPEC_EXCLUDES], cwd)
+    .out.slice(0, MAX_DIFF_BYTES);
   return {
     clean: false, inspected: true, revision, durationMs: Date.now() - began,
     ...parsed, diff, diffCached, porcelain: porcelain.slice(0, MAX_DIFF_BYTES),
@@ -201,4 +216,61 @@ export function violationPayload(input: {
     detail: 'a read-only role modified the repository; V1 records this and does '
       + 'not revert it, so the change is still present in the working tree',
   };
+}
+
+
+/* -- the verdict, as three states a caller must handle --------------------- */
+
+/**
+ * What the post-stage check concluded, in a shape that cannot be misread.
+ *
+ * Three states, because there are three facts. Returning a boolean forced
+ * "could not look" to pick a side, and it picked `clean` — which is how a
+ * fail-open gets built by accident rather than on purpose.
+ */
+export type WriteVerdict =
+  | { state: 'VERIFIED_CLEAN'; ms: number }
+  | { state: 'ROLE_WRITE_VIOLATION'; ms: number; payload: Record<string, unknown> }
+  | { state: 'WRITE_CHECK_UNAVAILABLE'; ms: number; detail: string };
+
+/**
+ * Whether this verdict must STOP the stage.
+ *
+ * UNAVAILABLE blocks exactly as hard as a violation does. The instruction is
+ * the only thing keeping a read-only role read-only in V1, and the check is
+ * the only thing confirming the instruction held — so a stage whose check
+ * could not run has no verification behind it at all. Continuing would mean
+ * accepting an unverified result while the record says the role was verified,
+ * which is worse than either failing or checking.
+ */
+export function blocks(v: WriteVerdict): boolean {
+  return v.state !== 'VERIFIED_CLEAN';
+}
+
+/** The one-line reason a stopped stage reports upward. */
+export function verdictDetail(v: WriteVerdict): string {
+  if (v.state === 'VERIFIED_CLEAN') return 'the repository was verified unchanged';
+  if (v.state === 'WRITE_CHECK_UNAVAILABLE') {
+    return `WRITE_CHECK_UNAVAILABLE: ${v.detail}`;
+  }
+  const p = v.payload as any;
+  const files = [...(p.changedFiles ?? []), ...(p.addedFiles ?? []),
+    ...(p.deletedFiles ?? [])].slice(0, 6);
+  return `ROLE_WRITE_VIOLATION: ${p.stage} modified the repository`
+    + (files.length ? ` (${files.join(', ')})` : '');
+}
+
+/** Turns a raw check into the verdict, given the stage it belongs to. */
+export function verdictFor(stage: string, traceCallId: string,
+  beforeRevision: string | null, check: WriteCheck): WriteVerdict {
+  if (!check.clean) {
+    return { state: 'ROLE_WRITE_VIOLATION', ms: check.durationMs,
+      payload: violationPayload({ stage, traceCallId, beforeRevision, check }) };
+  }
+  if (check.inspected === false) {
+    return { state: 'WRITE_CHECK_UNAVAILABLE', ms: check.durationMs,
+      detail: check.uninspectable
+        ?? 'the repository could not be inspected after this stage' };
+  }
+  return { state: 'VERIFIED_CLEAN', ms: check.durationMs };
 }

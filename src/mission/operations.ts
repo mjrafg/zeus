@@ -27,7 +27,8 @@ import {
 } from './oracle';
 import { compileOracle, critiqueOracle, proposeAcceptance } from './compile';
 import { attach, evidenceLogPath, REPO_AWARE } from '../graph/access';
-import { checkWrites, isReadOnlyStage, violationPayload } from '../engine/writecheck';
+import { checkWrites, isReadOnlyStage, verdictFor, type WriteVerdict }
+  from '../engine/writecheck';
 import { decide, type FrontDoorDecision } from './frontdoor';
 import { chatStreamId } from './chat';
 import { createHash } from 'crypto';
@@ -220,9 +221,7 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
    * Looks at the repository AFTER the call and records a violation if the
    * stage wrote anything. Null for stages that are allowed to write.
    */
-  verifyWrites: ((traceCallId: string, before: string | null) =>
-  { clean: boolean; durationMs: number; inspected?: boolean;
-    uninspectable?: string; payload?: Record<string, unknown> }) | null;
+  verifyWrites: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
   keep: (content: string) => BlobRef | null;
   trace?: (type: string, payload: Record<string, unknown>) => void;
 } {
@@ -264,24 +263,38 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
   // Handed to the caller rather than run here, because it must run AFTER the
   // provider call and route() returns before one is made.
   const verifyWrites = isReadOnlyStage(stage)
-    ? (traceCallId: string, before: string | null) => {
-      const check = checkWrites(engine.opts.projectRoot);
-      if (check.clean) {
-        // `inspected` travels with it, so a trace showing clean:true can still
-        // be read as "nobody looked" rather than "nothing happened".
-        return { clean: true as const, durationMs: check.durationMs,
-          inspected: check.inspected,
-          ...(check.inspected ? {} : { uninspectable: check.uninspectable }) };
+    ? (traceCallId: string, before: string | null): WriteVerdict => {
+      const verdict = verdictFor(stage, traceCallId, before,
+        checkWrites(engine.opts.projectRoot));
+      // Both failing states go on the log under their own name. An operator
+      // asking "why did this stage stop" should not have to infer it from a
+      // field on a trace record.
+      // WRITTEN AS TWO LITERAL TYPES, not one computed one.
+      //
+      // The event registry discovers types by scanning for a literal `type:`
+      // beside a `payload`, and RS2 exercises every DISCOVERED type against
+      // secret fixtures. `type: verdict.state` was invisible to that scan — so
+      // two new event types carrying raw `diff` and `porcelain` output would
+      // have gone into the log without ever being checked for leaks. A
+      // computed type name is a type nobody tested.
+      if (missions && missionId) {
+        try {
+          if (verdict.state === 'ROLE_WRITE_VIOLATION') {
+            missions.events.append({ taskId: missionId,
+              type: 'ROLE_WRITE_VIOLATION', payload: verdict.payload });
+          } else if (verdict.state === 'WRITE_CHECK_UNAVAILABLE') {
+            missions.events.append({ taskId: missionId,
+              type: 'WRITE_CHECK_UNAVAILABLE',
+              payload: { reasonCode: 'WRITE_CHECK_UNAVAILABLE', stage, traceCallId,
+                beforeRevision: before, detail: verdict.detail, checkMs: verdict.ms,
+                // Said plainly, because "unknown" is the whole point.
+                consequence: 'this stage is NOT verified; Zeus cannot say whether '
+                  + 'the role modified the repository, so it stops rather than '
+                  + 'continuing as though it had been checked' } });
+          }
+        } catch { /* the verdict still reaches the caller */ }
       }
-      // Only now is the expensive evidence collected, and only because there
-      // is something to explain.
-      const payload = violationPayload({ stage, traceCallId, beforeRevision: before, check });
-      try {
-        if (missions && missionId) {
-          missions.events.append({ taskId: missionId, type: 'ROLE_WRITE_VIOLATION', payload });
-        }
-      } catch { /* the violation still returns to the caller */ }
-      return { clean: false as const, durationMs: check.durationMs, payload };
+      return verdict;
     }
     : null;
 

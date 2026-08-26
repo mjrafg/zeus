@@ -14,6 +14,7 @@ import { execFileSync } from 'child_process';
 import { check, section } from './harness';
 import {
   checkWrites, parsePorcelain, isReadOnlyStage, READ_ONLY_STAGES, violationPayload,
+  verdictFor, blocks, verdictDetail,
 } from '../src/engine/writecheck';
 import {
   MCP_CAPABLE, GRAPH_TOOL_NAMES, graphToolIds, toolsFor, claudeProvider, codexProvider,
@@ -221,6 +222,106 @@ export async function isolationV1Suite(): Promise<void> {
         `${dirty.clean}/${dirty.inspected}`,
         `${notRepo.clean}/${(notRepo as any).inspected}`,
       ]).size === 3, 'told apart');
+  }
+
+  section('V1: zeus own state is not the project source');
+  {
+    // The Oracle was flagged for "modifying" .zeus/config.yaml and
+    // .zeus/.gitignore, which `zeus init` had just created. .zeus/ holds the
+    // event log, the worktrees and the graph — written by Zeus on every
+    // mission, by design — so counting it would have blocked every real run
+    // for doing exactly what it is supposed to do.
+    const r = repo();
+    fs.mkdirSync(path.join(r, '.zeus', 'state'), { recursive: true });
+    fs.writeFileSync(path.join(r, '.zeus', 'config.yaml'), 'version: 1\n');
+    fs.writeFileSync(path.join(r, '.zeus', 'state', 'events.jsonl'), '{}\n');
+    const z = checkWrites(r);
+    check('V1-ZX1: zeus writing its own state is not a role write violation',
+      z.clean === true && (z as any).inspected === true, JSON.stringify(z));
+
+    // And the exclusion must not become a hiding place for real edits.
+    fs.writeFileSync(path.join(r, 'tracked.txt'), 'a role really did edit this\n');
+    const both = checkWrites(r) as any;
+    check('V1-ZX2: but a real source edit alongside it still violates',
+      both.clean === false && both.modified.includes('tracked.txt'),
+      JSON.stringify(both.modified));
+    check('V1-ZX3: and .zeus never appears in the evidence',
+      !JSON.stringify(both).includes('.zeus/'), 'excluded from the record too');
+  }
+
+  section('V1: inspected:false is fail-CLOSED, not merely recorded');
+  {
+    // Recording "unknown" and continuing is still a fail-open: the pipeline
+    // proceeds on an unverified result while the trace says the role was
+    // checked. The instruction is the only thing keeping a read-only role
+    // read-only in V1, and this check is the only thing confirming it held.
+    const clean = verdictFor('reviewer', 'TC-1', 'aaa',
+      { clean: true, inspected: true, revision: 'bbb', durationMs: 3 });
+    const dirty = verdictFor('reviewer', 'TC-1', 'aaa', {
+      clean: false, inspected: true, revision: 'bbb', durationMs: 9,
+      modified: ['src/a.ts'], staged: [], deleted: [], untracked: [], renamed: [],
+      diff: 'x', diffCached: '', porcelain: ' M src/a.ts',
+    });
+    const unknown = verdictFor('reviewer', 'TC-1', 'aaa',
+      { clean: true, inspected: false, revision: null, durationMs: 4,
+        uninspectable: 'git refused: dubious ownership' });
+
+    check('V1-FC1: verified clean is the ONLY state that continues',
+      clean.state === 'VERIFIED_CLEAN' && !blocks(clean), clean.state);
+    check('V1-FC2: a violation blocks',
+      dirty.state === 'ROLE_WRITE_VIOLATION' && blocks(dirty), dirty.state);
+    check('V1-FC3: and an uninspectable tree blocks EXACTLY as hard',
+      unknown.state === 'WRITE_CHECK_UNAVAILABLE' && blocks(unknown), unknown.state);
+    check('V1-FC4: the three map one-to-one onto the required semantics',
+      new Set([clean.state, dirty.state, unknown.state]).size === 3,
+      [clean.state, dirty.state, unknown.state].join(' | '));
+    check('V1-FC5: the unavailable reason names what git actually said',
+      /dubious ownership/.test(verdictDetail(unknown)), verdictDetail(unknown));
+    check('V1-FC6: and it is never phrased as a pass',
+      !/clean|verified/i.test(verdictDetail(unknown).replace('WRITE_CHECK_UNAVAILABLE', '')),
+      verdictDetail(unknown));
+
+    // THE REGRESSION. Every read-only role, one at a time, with a check that
+    // cannot inspect: none may proceed as if the repository were verified.
+    const src = {
+      compile: fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'compile.ts'), 'utf8'),
+      planner: fs.readFileSync(path.join(__dirname, '..', 'src', 'mission', 'planner.ts'), 'utf8'),
+    };
+    check('V1-FC7: every stage that can be handed a verdict acts on it',
+      (src.compile.match(/if \(writeVerdict && blocks\(writeVerdict\)\)/g) ?? []).length === 2
+      && (src.planner.match(/if \(writeVerdict && blocks\(writeVerdict\)\)/g) ?? []).length === 2,
+      'oracle, oracle-critic, planner, plan-critic');
+    // The guard has to sit BEFORE the ordinary success path, or a blocked
+    // verdict is computed and then walked past.
+    for (const [name, text] of Object.entries(src)) {
+      check(`V1-FC8-${name}: the guard precedes the provider-failure branch`,
+        text.indexOf('if (writeVerdict && blocks(writeVerdict))')
+          < text.indexOf('if (!res.ok || res.infrastructureFailure'),
+        'ordered before continuing');
+    }
+    check('V1-FC9: a blocked stage reports the verdict as its failure, not a generic one',
+      /infrastructureFailure: verdictDetail\(writeVerdict\)/.test(src.compile)
+      && /verdictDetail\(writeVerdict\)/.test(src.planner), 'the reason travels');
+
+    // And the six roles are the ones that get a verifier at all.
+    const ops = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'mission', 'operations.ts'), 'utf8');
+    check('V1-FC10: only read-only stages are given a verifier',
+      /isReadOnlyStage\(stage\)\s*\n?\s*\?/.test(ops), 'gated on the role');
+    for (const role of ['front-door', 'oracle', 'oracle-critic', 'planner',
+      'plan-critic', 'reviewer']) {
+      check(`V1-FC11-${role}: ${role} is verified after every call`,
+        isReadOnlyStage(role), role);
+    }
+    check('V1-FC12: and the writers are still not, so their worktrees are untouched',
+      !isReadOnlyStage('implementer') && !isReadOnlyStage('repair'), 'writers exempt');
+
+    // The event an operator reads. Both blocking states get their own name.
+    check('V1-FC13: the unavailable case is emitted under its own event type',
+      /type: verdict\.state/.test(ops) && /WRITE_CHECK_UNAVAILABLE/.test(ops),
+      'named on the log');
+    check('V1-FC14: and says the stage is NOT verified, so nobody reads it as a pass',
+      /this stage is NOT verified/.test(ops), 'consequence stated');
   }
 
   section('V1: porcelain is parsed by column, because the columns mean different things');

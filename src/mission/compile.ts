@@ -17,6 +17,7 @@ import { Section, assemble, checklist } from './context';
 import { createHash } from 'crypto';
 import { Provider, AgentResponse, type GraphAccess } from '../engine/providers';
 import { readGraphOps, verifyGraphEvidence } from '../graph/intel';
+import { blocks, verdictDetail, type WriteVerdict } from '../engine/writecheck';
 import { ProcessSupervisor } from '../engine/exec';
 import { ExecutionPolicy } from '../engine/policy';
 import {
@@ -51,9 +52,14 @@ export interface CompileInput {
   /** The MCP server for this call's repository graph, or null. */
   repoGraph?: GraphAccess | null;
   /** Looks at the tree after the call; null for stages allowed to write. */
-  verifyWrites?: ((traceCallId: string, before: string | null) =>
-  { clean: boolean; durationMs: number; inspected?: boolean;
-    uninspectable?: string; payload?: Record<string, unknown> }) | null;
+  /**
+   * Looks at the tree after the call. Null for stages allowed to write.
+   *
+   * Returns a VERDICT rather than a boolean, because there are three outcomes
+   * and a boolean forces "could not look" to pick a side — which is how the
+   * fail-open got built in the first place.
+   */
+  verifyWrites?: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
   /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
   intel?: string | null;
   /** Where the graph server appends what it answered, for the manifest. */
@@ -253,6 +259,10 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
   const prompt = assembled.prompt;
 
   let res: AgentResponse;
+  // Declared out here for the same reason `res` is: the guard that acts on it
+  // lives after the catch, and a verdict scoped to the try would be observed
+  // and then unreachable.
+  let writeVerdict: WriteVerdict | null = null;
   try {
     const traceCallId = `TC-${createHash('sha256')
       .update(`${input.missionId}:${input.stage ?? 'unstaged'}:${Date.now()}`)
@@ -288,6 +298,11 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
       // widens what the compiler can LEARN without widening what it can do.
       graph: input.repoGraph ?? null,
     }, input.supervisor);
+    // BEFORE the record, because the record must report it and the code after
+    // it must be able to stop on it. Running this inside the payload literal
+    // meant the result was observed and then discarded.
+    writeVerdict = input.verifyWrites
+      ? input.verifyWrites(traceCallId, input.baseSha ?? null) : null;
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       outcome: res.outcome,
@@ -313,13 +328,15 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
       // Did this read-only role actually leave the repository alone? Recorded
       // on the call itself, because "which stage wrote" is a question about a
       // call and answering it from two places invites them to disagree.
-      ...(input.verifyWrites ? (() => {
-        const v = input.verifyWrites!(traceCallId, input.baseSha ?? null);
-        return { writeCheck: { clean: v.clean, ms: v.durationMs,
-          inspected: v.inspected !== false,
-          ...(v.uninspectable ? { uninspectable: v.uninspectable } : {}),
-          ...(v.payload ? { violation: v.payload } : {}) } };
-      })() : {}),
+      ...(writeVerdict ? { writeCheck: {
+        state: writeVerdict.state,
+        clean: writeVerdict.state === 'VERIFIED_CLEAN',
+        inspected: writeVerdict.state !== 'WRITE_CHECK_UNAVAILABLE',
+        ms: writeVerdict.ms,
+        detail: verdictDetail(writeVerdict),
+        ...(writeVerdict.state === 'ROLE_WRITE_VIOLATION'
+          ? { violation: writeVerdict.payload } : {}),
+      } } : {}),
       // Derived from the server's log, never from the reply. A model that
       // writes "I inspected landing.jsx" has made a claim; these lines were
       // written by the process that answered the query.
@@ -343,6 +360,22 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
     };
   }
 
+  // FAIL CLOSED. The instruction is the only thing keeping a read-only role
+  // read-only in V1, and this check is the only thing confirming the
+  // instruction held — so a stage whose check could not run has no
+  // verification behind it at all. Continuing would accept an unverified
+  // result while the record said the role was verified, which is worse than
+  // either failing or checking.
+  //
+  // A violation and an uninspectable tree block identically: one says the role
+  // wrote, the other says nobody can tell, and neither is "verified clean".
+  if (writeVerdict && blocks(writeVerdict)) {
+    return {
+      ok: false, infrastructureFailure: verdictDetail(writeVerdict),
+      criteria: [], validation: { valid: false, findings: [], criterionCount: 0 },
+      compilerProviderId: input.provider.id, structuredHash: oracleHash([]), raw: res.raw ?? '',
+    };
+  }
   if (!res.ok || res.infrastructureFailure) {
     return {
       ok: false,
@@ -437,9 +470,14 @@ export async function critiqueOracle(input: {
    */
   repoGraph?: GraphAccess | null;
   /** Looks at the tree after the call; null for stages allowed to write. */
-  verifyWrites?: ((traceCallId: string, before: string | null) =>
-  { clean: boolean; durationMs: number; inspected?: boolean;
-    uninspectable?: string; payload?: Record<string, unknown> }) | null;
+  /**
+   * Looks at the tree after the call. Null for stages allowed to write.
+   *
+   * Returns a VERDICT rather than a boolean, because there are three outcomes
+   * and a boolean forces "could not look" to pick a side — which is how the
+   * fail-open got built in the first place.
+   */
+  verifyWrites?: ((traceCallId: string, before: string | null) => WriteVerdict) | null;
   intel?: string | null;
   graphLogPath?: string | null;
   missionId: string; projectId: string; goal: string; criteria: Criterion[];
@@ -487,6 +525,10 @@ export async function critiqueOracle(input: {
   }
 
   let res: AgentResponse;
+  // Declared out here for the same reason `res` is: the guard that acts on it
+  // lives after the catch, and a verdict scoped to the try would be observed
+  // and then unreachable.
+  let writeVerdict: WriteVerdict | null = null;
   try {
     const traceCallId = `TC-${createHash('sha256')
       .update(`${input.missionId}:${input.stage ?? 'unstaged'}:${Date.now()}`)
@@ -527,6 +569,11 @@ export async function critiqueOracle(input: {
       // the repository, and could never catch a claim the compiler invented.
       graph: input.repoGraph ?? null,
     }, input.supervisor);
+    // BEFORE the record, because the record must report it and the code after
+    // it must be able to stop on it. Running this inside the payload literal
+    // meant the result was observed and then discarded.
+    writeVerdict = input.verifyWrites
+      ? input.verifyWrites(traceCallId, input.baseSha ?? null) : null;
     input.trace?.('MODEL_CALL_FINISHED', {
       traceCallId, stage: input.stage ?? null, provider: input.provider.id,
       outcome: res.outcome,
@@ -552,13 +599,15 @@ export async function critiqueOracle(input: {
       // Did this read-only role actually leave the repository alone? Recorded
       // on the call itself, because "which stage wrote" is a question about a
       // call and answering it from two places invites them to disagree.
-      ...(input.verifyWrites ? (() => {
-        const v = input.verifyWrites!(traceCallId, input.baseSha ?? null);
-        return { writeCheck: { clean: v.clean, ms: v.durationMs,
-          inspected: v.inspected !== false,
-          ...(v.uninspectable ? { uninspectable: v.uninspectable } : {}),
-          ...(v.payload ? { violation: v.payload } : {}) } };
-      })() : {}),
+      ...(writeVerdict ? { writeCheck: {
+        state: writeVerdict.state,
+        clean: writeVerdict.state === 'VERIFIED_CLEAN',
+        inspected: writeVerdict.state !== 'WRITE_CHECK_UNAVAILABLE',
+        ms: writeVerdict.ms,
+        detail: verdictDetail(writeVerdict),
+        ...(writeVerdict.state === 'ROLE_WRITE_VIOLATION'
+          ? { violation: writeVerdict.payload } : {}),
+      } } : {}),
       // Derived from the server's log, never from the reply. A model that
       // writes "I inspected landing.jsx" has made a claim; these lines were
       // written by the process that answered the query.
@@ -580,6 +629,23 @@ export async function critiqueOracle(input: {
       reconciliation: { consistent: true, unsupportedClaims: [] },
       criticProviderId: input.provider.id,
       infrastructureFailure: `critic provider threw: ${e?.message ?? e}`,
+    };
+  }
+  // FAIL CLOSED. The instruction is the only thing keeping a read-only role
+  // read-only in V1, and this check is the only thing confirming the
+  // instruction held — so a stage whose check could not run has no
+  // verification behind it at all. Continuing would accept an unverified
+  // result while the record said the role was verified, which is worse than
+  // either failing or checking.
+  //
+  // A violation and an uninspectable tree block identically: one says the role
+  // wrote, the other says nobody can tell, and neither is "verified clean".
+  if (writeVerdict && blocks(writeVerdict)) {
+    return {
+      ok: false, valid: true, payload, findings: [], modeOpinion: null,
+      reconciliation: { consistent: true, unsupportedClaims: [] },
+      criticProviderId: input.provider.id,
+      infrastructureFailure: verdictDetail(writeVerdict),
     };
   }
   if (!res.ok || res.infrastructureFailure || !res.structured) {

@@ -25,7 +25,9 @@ import {
   missionIdToDir, MISSION_EVENT_TYPES, RESERVED_MISSION_EVENT_NAMES,
   ACHIEVEMENTS, TERMINATION_REASONS, PlanGraph, TaskNode,
 } from '../src/mission/types';
-import { MissionRegistry, reconstructFromEvents } from '../src/mission/registry';
+import { MissionRegistry, reconstructFromEvents, critiqueForVersion }
+  from '../src/mission/registry';
+import { consentSubject } from '../src/mission/consent';
 import { validatePlan, PlanFindingCode, globsOverlap } from '../src/mission/plan';
 import { normaliseNodes } from '../src/mission/planner';
 import { normaliseCriteria } from '../src/mission/compile';
@@ -914,6 +916,119 @@ export async function missionSuite(): Promise<void> {
 
     execFileSync('git', ['-C', repo, 'worktree', 'remove', '--force', wt]);
     fs.rmSync(repo, { recursive: true, force: true });
+  }
+
+  section('consent: a critique belongs to a VERSION, not to a position in the log');
+  {
+    const store = new EventStore(path.join(TMP, `cv-${Date.now()}`));
+    const missions = new MissionRegistry({ events: store, projectId: 'p',
+      stateRoot: path.join(TMP, `cv-${Date.now()}`) });
+    const id = missions.create('a goal', 'sha0').missionId;
+    const oracleV = (version: number): any => ({
+      missionId: id, version, acceptanceMode: 'REQUIRED_CONSENT',
+      compiledAt: new Date(0).toISOString(), compilerProviderId: 'c', criticProviderId: 'r',
+      criteria: [{ criterionId: `${id}/C-0001`, type: 'EXECUTABLE',
+        statement: 'the suite passes',
+        evaluator: { kind: 'command', command: 'npm test', expect: 'PASSED' },
+        affectedBy: [], required: true, requiresAuthority: [], derivedFrom: [] }],
+    });
+    const critique = (version: number, code: string) => missions.recordCritique(id, {
+      version, valid: true, findings: [{ code, criterionId: `${id}/C-0001`, detail: code }],
+      modeOpinion: 'AUTO', promptHash: 'h', hashes: {}, violations: [],
+      criticProviderId: 'r', reconciliation: { consistent: true, unsupportedClaims: [] },
+    });
+    const codesNow = () => (consentSubject(missions, id, 'oracle')?.findings ?? [])
+      .map((f: any) => f.code);
+
+    // 1. oracle v1 + critique v1
+    missions.recordOracle(id, oracleV(1), 'sha256:1', { valid: true, findings: [], criterionCount: 1 });
+    critique(1, 'WEAK_RUBRIC_V1');
+    check('CV1: the critique of v1 stands against v1',
+      codesNow().join() === 'WEAK_RUBRIC_V1'
+      && consentSubject(missions, id, 'oracle')?.decidable === true, codesNow().join());
+
+    // 2. oracle v2 recorded, its critique not yet. The old code showed v1's
+    //    findings here - the newest critique on the log - under v2's name.
+    missions.recordOracle(id, oracleV(2), 'sha256:2', { valid: true, findings: [], criterionCount: 1 });
+    const orphaned = consentSubject(missions, id, 'oracle');
+    check('CV2: v2 with no critique yet shows NOTHING, not v1\'s findings',
+      (orphaned?.findings ?? []).length === 0, JSON.stringify(orphaned?.findings));
+    check('CV2b: and it is not decidable, with the reason naming the version',
+      orphaned?.decidable === false && /oracle v2/.test(String(orphaned?.detail)),
+      String(orphaned?.detail));
+
+    // 3. oracle v2 + critique v2
+    critique(2, 'SCOPE_INVENTION_V2');
+    check('CV3: once v2 is critiqued, v2\'s findings appear',
+      codesNow().join() === 'SCOPE_INVENTION_V2'
+      && consentSubject(missions, id, 'oracle')?.decidable === true, codesNow().join());
+
+    // 4. an older version critiqued again, AFTER v2's critique. It is the
+    //    newest ORACLE_CRITIQUED on the log and it owns v1, so it must not
+    //    shadow the critique that owns the version in force.
+    critique(1, 'LATE_CRITIQUE_OF_V1');
+    check('CV4: a newer critique of an OLDER version cannot shadow the current one',
+      codesNow().join() === 'SCOPE_INVENTION_V2', codesNow().join());
+    check('CV4b: and the older version still resolves to its own latest critique',
+      critiqueForVersion(store.read(id), 1)?.findings
+        .map((f: any) => f.code).join() === 'LATE_CRITIQUE_OF_V1');
+
+    // 5. ORDER CANNOT DECIDE IT. Same events, shuffled: a pairing read from a
+    //    field gives the same answer from any arrangement, which a pairing
+    //    read from position cannot.
+    const evs = store.read(id);
+    const shuffled = [...evs].reverse();
+    const byOrder = [evs, shuffled, [...evs].slice().sort((a, b) => a.type.localeCompare(b.type))]
+      .map((list) => critiqueForVersion(list, 2)?.findings.map((f: any) => f.code).join());
+    check('CV5: the pairing is identical under every event ordering',
+      new Set(byOrder).size === 1 && byOrder[0] === 'SCOPE_INVENTION_V2',
+      JSON.stringify(byOrder));
+  }
+
+  section('consent: the backward-compatibility rule for version-less critiques');
+  {
+    // Events written before ORACLE_CRITIQUED carried a version. The rule is
+    // STATED, not a silent pairing with the newest oracle: a version-less
+    // critique belongs to the version IN FORCE when it was appended, which the
+    // preceding ORACLE_COMPILED names. That is log ORDER - guaranteed by the
+    // hash chain - rather than the adjacency of two calls, which is not.
+    const ev = (type: string, payload: any): any => ({ type, payload });
+    const legacy = [
+      ev('MISSION_CREATED', { goal: 'g' }),
+      ev('ORACLE_COMPILED', { version: 1 }),
+      ev('ORACLE_CRITIQUED', { findings: [{ code: 'OLD_V1' }] }),   // no version
+      ev('ORACLE_COMPILED', { version: 2 }),
+      ev('ORACLE_CRITIQUED', { findings: [{ code: 'OLD_V2' }] }),   // no version
+    ];
+    check('CV6: a version-less critique belongs to the version in force when it was written',
+      critiqueForVersion(legacy, 1)?.findings.map((f: any) => f.code).join() === 'OLD_V1'
+      && critiqueForVersion(legacy, 2)?.findings.map((f: any) => f.code).join() === 'OLD_V2');
+    check('CV6b: and it is marked legacy, so a reader knows it was derived',
+      critiqueForVersion(legacy, 2)?.legacy === true
+      && critiqueForVersion(legacy, 1)?.legacy === true);
+
+    // NO ORACLE BEFORE IT: it belongs to no version rather than to the newest.
+    const orphan = [
+      ev('MISSION_CREATED', { goal: 'g' }),
+      ev('ORACLE_CRITIQUED', { findings: [{ code: 'BELONGS_TO_NOTHING' }] }),
+      ev('ORACLE_COMPILED', { version: 1 }),
+    ];
+    check('CV7: a version-less critique with no oracle before it belongs to none',
+      critiqueForVersion(orphan, 1) === null);
+
+    // A RECORDED VERSION ALWAYS WINS over the derived one, so a mixed log -
+    // old events plus new ones - resolves each event by its own best evidence.
+    const mixed = [
+      ev('ORACLE_COMPILED', { version: 1 }),
+      ev('ORACLE_CRITIQUED', { findings: [{ code: 'DERIVED_V1' }] }),
+      ev('ORACLE_COMPILED', { version: 2 }),
+      ev('ORACLE_CRITIQUED', { version: 1, findings: [{ code: 'STATED_V1' }] }),
+    ];
+    check('CV8: a stated version beats the version in force at that point',
+      critiqueForVersion(mixed, 1)?.findings.map((f: any) => f.code).join() === 'STATED_V1'
+      && critiqueForVersion(mixed, 1)?.legacy === false
+      && critiqueForVersion(mixed, 2) === null,
+      'v2 has no critique of its own');
   }
 
   fs.rmSync(TMP, { recursive: true, force: true });

@@ -24,7 +24,7 @@ import { Engine, TERMINAL } from './engine/orchestrator';
 import { ProcessSupervisor } from './engine/exec';
 import { defaultPolicy } from './engine/policy';
 import { readOnlyGit } from './engine/gitro';
-import { MissionRegistry } from './mission/registry';
+import { MissionRegistry, critiqueForVersion } from './mission/registry';
 import { PlanGraph, ScopeMismatchError, scopeOf, localLabel as missionLabel } from './mission/types';
 import { reconstructRatchet, ratchetRef, readRatchet } from './mission/ratchet';
 import { compileOracle, critiqueOracle, proposeAcceptance } from './mission/compile';
@@ -908,12 +908,21 @@ async function cmdSelfAudit(argv: string[]): Promise<number> {
  * correct. Removal is therefore something a person asks for, and this is where
  * they ask.
  */
-/** The findings from the most recent critique on this mission. */
+/**
+ * The findings STANDING AGAINST the oracle this mission would accept.
+ *
+ * The same question consent asks, so it is answered the same way: by version
+ * ownership, not by which critique is newest. This read the newest
+ * ORACLE_CRITIQUED, which is vN's only when nothing went wrong between
+ * recording an oracle and recording its critique - and `acceptDespite` writes
+ * what it returns into ORACLE_ACCEPTED as the findings a human accepted
+ * despite, which is a permanent claim about what that person was shown.
+ */
 function latestFindings(missions: MissionRegistry, missionId: string): CriticFindingRef[] {
-  const evs = [...missions.events.read(missionId)].reverse();
-  const q = evs.find((e) => e.type === 'ORACLE_CRITIQUED');
-  const raw = (q?.payload as any)?.findings;
-  return Array.isArray(raw) ? raw.filter((f: any) => f && typeof f.code === 'string') : [];
+  const version = missions.mission(missionId)?.oracleVersion ?? 0;
+  const owned = critiqueForVersion(missions.events.read(missionId), version);
+  return (owned?.findings ?? [])
+    .filter((f: any) => f && typeof f.code === 'string') as CriticFindingRef[];
 }
 
 /** Accepts an oracle with the standing findings recorded against it. */

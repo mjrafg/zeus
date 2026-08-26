@@ -38,6 +38,65 @@ const strArray = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x i
  * Exported separately from the store read so a property test can hand it any
  * prefix of any sequence without touching a filesystem.
  */
+
+/**
+ * The critique that stands against a given oracle version.
+ *
+ * THE QUESTION IS OWNERSHIP, not recency. "What did the critic say about the
+ * contract in front of me" is answered by the critique OF THAT CONTRACT, and
+ * the newest critique on the log is that only by coincidence.
+ *
+ * RECORDED VERSIONS ARE MATCHED EXACTLY, which makes the answer independent of
+ * where the events sit in the log: a critique of v1 appended after a critique
+ * of v2 cannot shadow it, because neither is chosen by position.
+ *
+ * LEGACY EVENTS - written before `version` existed - are resolved by an
+ * EXPLICIT RULE rather than a silent fallback to the newest oracle: a
+ * version-less critique belongs to the version that was IN FORCE when it was
+ * appended, which is the version named by the most recent ORACLE_COMPILED
+ * before it. That is a fact about the order of a hash-chained log, which is
+ * guaranteed, rather than about two calls sitting next to each other in a
+ * function, which is not. A legacy critique with no ORACLE_COMPILED before it
+ * belongs to no version and is never shown.
+ *
+ * Among the critiques that DO own a version, the last one wins: re-critiquing
+ * the same contract supersedes, which is the one place recency is the right
+ * rule.
+ */
+export interface StandingCritique {
+  version: number;
+  findings: unknown[];
+  modeOpinion: string | null;
+  valid: boolean;
+  /** True when ownership was derived from log order, not read from the event. */
+  legacy: boolean;
+}
+
+export function critiqueForVersion(evs: StoredEvent[], version: number):
+StandingCritique | null {
+  let inForce: number | null = null;
+  let owned: StandingCritique | null = null;
+  for (const e of evs) {
+    if (e.type === 'ORACLE_COMPILED') {
+      const v = (e.payload as any)?.version;
+      inForce = typeof v === 'number' ? v : inForce;
+      continue;
+    }
+    if (e.type !== 'ORACLE_CRITIQUED') continue;
+    const p = (e.payload ?? {}) as any;
+    const stated = typeof p.version === 'number' ? p.version : null;
+    const belongsTo = stated ?? inForce;
+    if (belongsTo === null || belongsTo !== version) continue;
+    owned = {
+      version, legacy: stated === null,
+      findings: Array.isArray(p.findings) ? p.findings : [],
+      modeOpinion: typeof p.modeOpinion === 'string' ? p.modeOpinion : null,
+      valid: p.valid !== false,
+    };
+  }
+  return owned;
+}
+
 export function reconstructFromEvents(missionId: string, evs: StoredEvent[]): MissionRecord | null {
   const created = evs.find((e) => e.type === 'MISSION_CREATED');
   if (!created) return null;                       // not a mission log (yet)
@@ -409,7 +468,21 @@ export class MissionRegistry {
     });
   }
 
+  /**
+   * What the critic said, and WHICH ORACLE IT SAID IT ABOUT.
+   *
+   * `version` is required rather than optional because the alternative was
+   * adjacency: every caller happens to invoke this immediately after
+   * `recordOracle`, and consent paired the newest critique with the newest
+   * oracle on the strength of that habit. Habit is not a relationship. A path
+   * that recorded an oracle and failed before its critique would have shown a
+   * human the PREVIOUS version's findings under the new version's name, and
+   * nothing in the types would have objected.
+   *
+   * Version ownership is the semantic relationship, so it is written down.
+   */
   recordCritique(missionId: string, critique: {
+    version: number;
     valid: boolean; findings: unknown[]; modeOpinion: string | null;
     promptHash: string; hashes: Record<string, string>; violations: unknown[];
     criticProviderId: string; reconciliation: unknown; providerUsage?: unknown;

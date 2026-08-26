@@ -214,6 +214,9 @@ export async function recompileMissionOracle(ctx: OperationContext,
   missions.recordOracle(missionId, oracle, compiled.structuredHash, compiled.validation,
     compiled.providerUsage);
   missions.recordCritique(missionId, {
+    // The contract this critique is ABOUT, written down rather than inferred
+    // from the fact that recordOracle happened to run a line earlier.
+    version: oracle.version,
     valid: critique.valid, findings: critique.findings, modeOpinion: critique.modeOpinion,
     promptHash: critique.payload.promptHash, hashes: critique.payload.hashes,
     violations: critique.payload.violations, criticProviderId: critique.criticProviderId,
@@ -519,6 +522,9 @@ export async function compileMissionOracle(ctx: OperationContext, missionId: str
   missions.recordOracle(missionId, oracle, compiled.structuredHash, compiled.validation,
     compiled.providerUsage);
   missions.recordCritique(missionId, {
+    // The contract this critique is ABOUT, written down rather than inferred
+    // from the fact that recordOracle happened to run a line earlier.
+    version: oracle.version,
     valid: critique.valid, findings: critique.findings, modeOpinion: critique.modeOpinion,
     promptHash: critique.payload.promptHash, hashes: critique.payload.hashes,
     violations: critique.payload.violations, criticProviderId: critique.criticProviderId,

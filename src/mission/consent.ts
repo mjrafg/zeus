@@ -16,7 +16,7 @@
  */
 
 import * as crypto from 'crypto';
-import { MissionRegistry } from './registry';
+import { MissionRegistry, critiqueForVersion } from './registry';
 import { StoredEvent } from '../engine/events';
 
 export type ConsentKind = 'oracle' | 'plan';
@@ -82,9 +82,15 @@ export function consentSubject(missions: MissionRegistry, missionId: string,
   if (!rec) return null;
 
   if (kind === 'oracle') {
-    const critique = [...log].reverse().find((e) => e.type === 'ORACLE_CRITIQUED');
     const version = rec.oracleVersion ?? 0;
-    const findings = (critique?.payload as any)?.findings ?? [];
+    // OWNERSHIP, NOT RECENCY. This took the newest ORACLE_CRITIQUED and showed
+    // it under `rec.oracleVersion`, which is the same event only because both
+    // compile paths record the oracle and its critique one line apart. Any
+    // path that recorded an oracle and then failed would have put v(N-1)'s
+    // findings in front of a human as the findings standing against vN, and
+    // consent is the decision those findings exist to inform.
+    const critique = critiqueForVersion(log, version);
+    const findings = critique?.findings ?? [];
     const digest = findingsDigest(findings);
     const answered = refusedByAPerson(log, version, digest);
     return {
@@ -93,7 +99,8 @@ export function consentSubject(missions: MissionRegistry, missionId: string,
         && !answered,
       detail: !rec.oracle ? 'no oracle has been compiled'
         : rec.oracleAccepted ? 'this oracle is already accepted'
-          : !critique ? 'no critique on the log — there is no second opinion to consent over'
+          : !critique ? `no critique on the log for oracle v${version} — there is `
+              + 'no second opinion to consent over'
             : answered
               ? `oracle v${version} was refused; the next move is a recompile that answers `
                 + `its ${findings.length} finding(s)`

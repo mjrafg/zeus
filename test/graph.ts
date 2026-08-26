@@ -243,14 +243,25 @@ export async function graphSuite(): Promise<void> {
     check('IS1: a ready graph is announced with its revision and size',
       /PROJECT GRAPH/.test(ready) && /status: READY/.test(ready)
       && /indexed revision: abc123/.test(ready), 'announced');
+    // REPINNED ON THE PROPERTY, not the sentence. These asserted the exact
+    // prose of an earlier version, so rewording the guidance failed them while
+    // the rule they exist to protect was still there. A test that breaks when
+    // the wording changes and passes when the RULE changes is pinned to the
+    // wrong thing.
     check('IS2: the source-of-truth rule is stated, not implied',
-      /SOURCE OF\s*\n?TRUTH/.test(ready) && /trust the source/.test(ready),
-      'rule present');
-    check('IS3: repeated exploration is explicitly permitted',
-      /repeatedly/.test(ready) && /no limit/i.test(ready), 'no arbitrary cap implied');
-    check('IS4: and bounded by budget rather than by a turn count',
-      /cost and time budget/.test(ready) && !/maximum \d+ (queries|calls)/i.test(ready),
-      'budget-bounded');
+      /USE THE SOURCE TO DECIDE WHAT IS TRUE/.test(ready)
+      && /the source wins/.test(ready), 'rule present');
+    // WAS: "repeated exploration is explicitly permitted" - asserting the words
+    // "repeatedly" and "no limit". Both were true and both read as
+    // encouragement: M-0033's critic spent 316k input tokens and made no graph
+    // call at all. What the prompt owes an agent is a stopping rule, not a
+    // reassurance that it has none.
+    check('IS3: the prompt gives a stopping rule rather than a licence to explore',
+      /Stop\s*\n?once more evidence is unlikely to change your conclusion/.test(ready)
+      && !/no limit/i.test(ready), 'stop-shaped');
+    check('IS4: and it is bounded by materiality, not by a turn count',
+      /material uncertainty/.test(ready)
+      && !/maximum \d+ (queries|calls)/i.test(ready), 'materiality-bounded');
 
     const blind = intelSection({ projectId: 'p', index: ix, graphAvailable: false,
       graphifyVersion: null,

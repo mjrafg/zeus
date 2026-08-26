@@ -160,7 +160,9 @@ export const FRONT_DOOR_HEADER = [
   ' "readings":[{"intent":"...","reading":"..."}]  // for AMBIGUOUS only',
   '}',
   '',
-  'Tool calls are not your final message. Make as many as you need first.',
+  'Tool calls are not your final message: investigate first, then answer. When',
+  'you do need to look, start from the graph and let it point you at the source,',
+  'and stop once more looking cannot change your answer or your classification.',
 ].join('\n');
 
 export function buildPrompt(message: string, context: string | null): string {

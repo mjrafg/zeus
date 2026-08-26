@@ -19,12 +19,15 @@ import {
 import {
   MCP_CAPABLE, GRAPH_TOOL_NAMES, graphToolIds, toolsFor, claudeProvider, codexProvider,
 } from '../src/engine/providers';
-import { verifyGraphEvidence, goalRequiresGraphEvidence, intelSection, repoIndex }
+import { verifyGraphEvidence, goalRequiresGraphEvidence, intelSection, repoIndex, GRAPH_FIRST }
   from '../src/graph/intel';
 import {
   checkReadScope, readScopeSummary, toolCallsIn, pathsIn, classifyPath, blocksInV1,
 } from '../src/engine/readscope';
-import { CRITIQUE_HEADER, CRITIQUE_GLOSSARY, critiqueOracle } from '../src/mission/compile';
+import { CRITIQUE_HEADER, CRITIQUE_GLOSSARY, critiqueOracle, compileOracle }
+  from '../src/mission/compile';
+import { planMission, critiquePlan } from '../src/mission/planner';
+import { decide } from '../src/mission/frontdoor';
 import { validateOracle } from '../src/mission/oracle';
 import { buildReviewPayload, ORACLE_CRITIQUE_POLICY } from '../src/engine/reviewcontext';
 
@@ -755,6 +758,156 @@ export async function isolationV1Suite(): Promise<void> {
       ok?.payload?.readScope?.state === 'VERIFIED_IN_SCOPE'
       && ok?.payload?.readScope?.inspected === true,
       JSON.stringify(ok?.payload?.readScope));
+  }
+
+  /* ---------------------------------------------------------------------- *
+   * Graph-first investigation: the guidance has to REACH the agent.
+   *
+   * M-0033 ran its Oracle and its Oracle Critic with the graph attached and
+   * made zero graph calls between them - the critic reaching its answer through
+   * 316,228 input tokens of hand discovery. The tools were attached and the
+   * intelligence section was delivered. What was missing was any explanation of
+   * what the tools were FOR, and a prompt that told the agent it had no limit.
+   *
+   * These check the WORDS ARRIVE, in the prompt each stage actually sends.
+   * Asserting on intelSection alone would prove only that the text exists.
+   * ---------------------------------------------------------------------- */
+
+  section('graph-first: the guidance reaches every stage that holds the tools');
+  {
+    const READY: any = {
+      projectId: 'p', indexedRevision: 'sha', currentRevision: 'sha',
+      graphPath: 'g.json', present: true, stale: false, nodes: 900, edges: 2600,
+      indexedAt: null, indexMs: null, fault: null, detail: '',
+    };
+    const INDEX: any = { root: '/work/proj', revision: 'sha', directories: ['app', 'api'],
+      manifests: [], fileCount: 139, truncated: false };
+    const withGraph = intelSection({ projectId: 'p', index: INDEX, graph: READY,
+      graphAvailable: true, graphifyVersion: '0.9.49' });
+    const withoutGraph = intelSection({ projectId: 'p', index: INDEX, graph: READY,
+      graphAvailable: false, graphifyVersion: '0.9.49' });
+
+    check('GF1: the shared text is delivered when the tools are actually attached',
+      withGraph.includes(GRAPH_FIRST));
+    // Telling an agent to prefer a tool it has not got is worse than silence:
+    // it reads as "you failed to use the graph" on a call that never had one.
+    check('GF2: and is NOT delivered when they are not',
+      !withoutGraph.includes(GRAPH_FIRST) && /available: NO/.test(withoutGraph));
+
+    // Every stage prompt, captured from the stage function itself.
+    const prompts: Record<string, string> = {};
+    const capture = (id: string, reply: unknown) => ({
+      id, async available() { return { ok: true, detail: 'capturing fake' }; },
+      async invoke(req: any) {
+        prompts[id] = req.prompt;
+        return { ok: true, role: req.role, structured: reply as any, text: '',
+          raw: '{"type":"turn.completed"}', exitCode: 0, durationMs: 1,
+          outcome: 'COMPLETED', infrastructureFailure: null };
+      },
+    });
+    const gsup: any = { run: async () => ({ outcome: 'COMPLETED', stdout: '', exitCode: 0,
+      durationMs: 1, productSignal: true, violations: [] }) };
+    const gpolicy: any = { worktreeRoot: TMP, network: false, allowedCommands: [] };
+    const GCTX = { commands: { unitTest: 'npm test' }, failingChecks: [], findings: [] };
+    const gcriterion: any = {
+      criterionId: 'p/M-0001/C-0001', type: 'EXECUTABLE', statement: 'the suite passes',
+      evaluator: { kind: 'command', command: 'npm test', expect: 'PASSED' },
+      affectedBy: [], required: true, requiresAuthority: [], derivedFrom: [],
+    };
+    const common = { missionId: 'p/M-0001', projectId: 'p', goal: 'add a language switcher',
+      context: GCTX, supervisor: gsup, policy: gpolicy, baseSha: 'sha',
+      intel: withGraph, repoGraph: {} as any };
+
+    await compileOracle({ ...common, provider: capture('oracle', { criteria: [] }) } as any);
+    await critiqueOracle({ ...common, criteria: [gcriterion],
+      provider: capture('oracle-critic', { findings: [], modeOpinion: 'AUTO' }) } as any);
+    await planMission({ ...common, criteria: [gcriterion],
+      provider: capture('planner', { nodes: [] }) } as any);
+    await critiquePlan({ ...common, criteria: [gcriterion],
+      graph: { missionId: 'p/M-0001', version: 1, nodes: [] } as any,
+      validation: { valid: true, findings: [], roots: [], nodeCount: 0 } as any,
+      provider: capture('plan-critic', { findings: [] }) } as any);
+    await decide({ message: 'will changing content.js affect the signed-in app?',
+      context: withGraph, provider: capture('front-door', { intent: 'QUESTION',
+        confidence: 0.9, summary: 's', answer: 'a' }) as any,
+      supervisor: gsup, policy: gpolicy, projectId: 'p', tools: ['Read'] } as any);
+
+    const STAGES = ['oracle', 'oracle-critic', 'planner', 'plan-critic', 'front-door'];
+    const missing = STAGES.filter((s) => !(prompts[s] ?? '').includes(GRAPH_FIRST));
+    check('GF3: every graph-holding stage sends the graph-first guidance',
+      missing.length === 0 && STAGES.every((s) => !!prompts[s]),
+      missing.length ? `missing in ${missing.join(', ')}` : `${STAGES.length} stages`);
+
+    // ONE TEXT, not five paraphrases. Five copies drift, and then two agents
+    // are working to different rules while the tests still pass.
+    const identical = STAGES.every((s) =>
+      (prompts[s].match(new RegExp(GRAPH_FIRST.split('\n')[0], 'g')) ?? []).length === 1);
+    check('GF4: it is the SAME text everywhere, appearing once per prompt',
+      identical);
+
+    check('GF5: no stage still tells the agent it has no limit',
+      STAGES.every((s) => !/no limit on how many|as many as you need/i.test(prompts[s])),
+      STAGES.filter((s) => /no limit on how many|as many as you need/i.test(prompts[s])).join(', '));
+    check('GF6: each stage is told when to STOP instead',
+      STAGES.every((s) => /unlikely to change|cannot change your answer/i.test(prompts[s])));
+  }
+
+  section('graph-first: it is guidance, not a quota and not a gate');
+  {
+    // THE FAILURE MODE THIS TEXT COULD EASILY HAVE. "Always make at least one
+    // graph call" is trivially satisfiable and measures nothing; the goal is a
+    // cheaper investigation, not a higher graphQueryCount.
+    check('GF7: the text never demands a call be made',
+      !/always (call|use|query)|at least one (graph )?(call|query)|must (call|query)/i
+        .test(GRAPH_FIRST), 'no mandatory-call language');
+    check('GF8: and says outright that a pointless graph call is a waste',
+      /DO NOT TRAVERSE THE GRAPH FOR ITS OWN SAKE/.test(GRAPH_FIRST)
+      && /cannot change your answer is the/.test(GRAPH_FIRST));
+    check('GF9: it names the broad-discovery commands it is displacing',
+      ['rg --files', 'find .', 'recursive', 'repository-wide grep']
+        .every((c) => GRAPH_FIRST.includes(c)));
+    check('GF10: it names the escapes to source, including a stale graph',
+      /already know the file/.test(GRAPH_FIRST)
+      && /no navigation question/.test(GRAPH_FIRST)
+      && /STALE/.test(GRAPH_FIRST));
+    check('GF11: the mental model is stated as two lines, not implied',
+      GRAPH_FIRST.includes('USE THE GRAPH TO FIND WHERE TO LOOK.')
+      && GRAPH_FIRST.includes('USE THE SOURCE TO DECIDE WHAT IS TRUE.'));
+    check('GF12: and source still wins a disagreement',
+      /the source wins/.test(GRAPH_FIRST));
+
+    // Nothing here may become a correctness gate. verifyGraphEvidence is the
+    // only thing that turns graph use into a requirement, and it fires only on
+    // a goal that DEMANDS the graph in its own words.
+    check('GF13: ordinary goals are still not required to produce graph evidence',
+      !goalRequiresGraphEvidence('add a language switcher to the landing page'),
+      'guidance did not become a gate');
+  }
+
+  section('graph-first: the new text is safe to deliver to a critic');
+  {
+    const READY2: any = {
+      projectId: 'p', indexedRevision: 'sha', currentRevision: 'sha',
+      graphPath: 'g.json', present: true, stale: false, nodes: 900, edges: 2600,
+      indexedAt: null, indexMs: null, fault: null, detail: '',
+    };
+    const sec = intelSection({ projectId: 'p',
+      index: { root: '/work/proj', revision: 'sha', directories: [], manifests: [],
+        fileCount: 1, truncated: false } as any,
+      graph: READY2, graphAvailable: true, graphifyVersion: '0.9.49' });
+    // MY OWN LAST ADDITION TO THIS SECTION BROKE THIS. A repository-intelligence
+    // section that trips ORACLE_CRITIQUE_POLICY does not fail loudly - the
+    // critique is refused, the critic never runs, and the contract is accepted
+    // with no second opinion. Checked on the graph-AVAILABLE variant, which is
+    // the one carrying the new words.
+    const payload = buildReviewPayload({
+      taskId: 'p/M-0001', projectId: 'p', baseSha: 'a', headSha: 'a',
+      policy: ORACLE_CRITIQUE_POLICY, header: CRITIQUE_HEADER,
+      inputs: [{ kind: 'repository-intelligence' as any,
+        label: 'the repository this contract is about', content: sec }],
+    });
+    check('GF14: the graph-first text does not contaminate the critique payload',
+      payload.valid, payload.violations.map((v) => v.detail).join(' | '));
   }
 }
 

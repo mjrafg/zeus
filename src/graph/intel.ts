@@ -96,6 +96,67 @@ export function repoIndex(root: string, revision: string | null,
  * announces repository intelligence over a graph that is not attached teaches
  * the model to trust a tool that will answer emptily.
  */
+/**
+ * Why an agent should reach for the graph before it reaches for `rg`.
+ *
+ * WRITTEN FOR A MEASURED PROBLEM, not a preference. talkbridge/M-0033 ran its
+ * Oracle and its Oracle Critic with the graph attached and made ZERO graph
+ * calls between them; the critic spent 316,228 input tokens and 276 seconds
+ * getting to an answer, most of it discovering the repository by hand with
+ * `rg --files`, `find`, and reading files whole to work out which one mattered.
+ * The tools were there. Nothing had ever explained what they were FOR.
+ *
+ * THIS IS NOT A QUOTA. The point is not to raise graphQueryCount, and the text
+ * says so twice: a graph call that cannot change the answer is exactly the same
+ * waste as a repository-wide grep. The point is that the first question in most
+ * investigations is WHERE, and the graph answers WHERE in milliseconds and a
+ * few lines of context, while broad discovery answers it in thousands of tokens
+ * the agent then has to reason through.
+ *
+ * Delivered only when the graph is actually reachable on this call. Telling an
+ * agent to prefer a tool it has not got is worse than saying nothing.
+ */
+export const GRAPH_FIRST = [
+  'GRAPH-FIRST INVESTIGATION',
+  '',
+  'The graph exists to make this FASTER AND NARROWER. It is not a box to tick,',
+  'and calling it more often is not the goal.',
+  '',
+  'When the question in front of you is WHERE — which file, which symbol, what',
+  'this depends on, what depends on it, who references it, how far a change',
+  'reaches — ask the graph before you go looking. A graph query answers in',
+  'milliseconds and costs you a few lines of context. Discovering the same fact',
+  'by hand costs thousands of tokens you then have to read past to think.',
+  '',
+  'The usual shape of a good investigation:',
+  '',
+  '  1. graph_search        locate the files and symbols the task is about',
+  '  2. graph_dependencies  what it needs',
+  '     graph_dependents    what needs it — the blast radius of changing it',
+  '     graph_references    the exact files and lines that mention it',
+  '     graph_path          how two things are connected',
+  '  3. Read                only the source those queries pointed you at,',
+  '                         to verify what the graph claimed',
+  '  4. Read more           only when it can still change your conclusion',
+  '',
+  'PREFER THE GRAPH OVER BROAD DISCOVERY. `rg --files`, `find .`, a recursive',
+  'listing, a repository-wide grep, or opening several large files just to work',
+  'out which one matters — each of these answers a WHERE question the expensive',
+  'way, and fills your context with material you did not need.',
+  '',
+  'DO NOT TRAVERSE THE GRAPH FOR ITS OWN SAKE. Go straight to the source when',
+  'you already know the file, when there is no navigation question to answer,',
+  'when the graph cannot express what you are asking, or when the status above',
+  'says the graph is STALE. A graph call that cannot change your answer is the',
+  'same waste as a repository-wide grep.',
+  '',
+  'USE THE GRAPH TO FIND WHERE TO LOOK.',
+  'USE THE SOURCE TO DECIDE WHAT IS TRUE.',
+  '',
+  'If the graph and the current source disagree, the source wins — and say in',
+  'your answer that the graph disagreed.',
+].join('\n');
+
 export function intelSection(opts: {
   projectId: string;
   index: RepoIndex;
@@ -146,6 +207,8 @@ export function intelSection(opts: {
     L.push('  graph_references    the files and lines that reference it');
     L.push('  graph_path          how two things are connected');
     L.push('  Read, Grep, Glob    the source itself');
+    L.push('');
+    L.push(GRAPH_FIRST);
   } else {
     L.push('  available: NO');
     L.push(`  reason: ${opts.unavailableBecause
@@ -179,20 +242,17 @@ export function intelSection(opts: {
 
   L.push('');
   L.push('HOW TO USE THIS');
-  L.push('You may call repository tools repeatedly, in as many rounds as you need.');
-  L.push('There is no limit on how many queries or reads you may make; you are bounded');
-  L.push('only by this mission’s cost and time budget.');
-  L.push('');
-  L.push('The graph tells you WHERE TO LOOK. Current source files are the SOURCE OF');
-  L.push('TRUTH. If the graph says A depends on B and the source shows otherwise,');
-  L.push('trust the source and say that the graph disagreed.');
+  // WAS: "There is no limit on how many queries or reads you may make." True,
+  // and read as encouragement. An agent told it has no limit does not become
+  // thorough, it becomes expensive: M-0033's critic answered a landing-page
+  // question with 316k input tokens and no graph query at all. The budget was
+  // never the constraint that mattered; knowing when to stop is.
+  L.push('Investigate only as far as needed to resolve material uncertainty. Stop');
+  L.push('once more evidence is unlikely to change your conclusion. If something you');
+  L.push('find contradicts an earlier assumption, revise it before you answer.');
   L.push('');
   L.push('Do not assume the framework, routes, dependencies, tests, build commands or');
   L.push('structure of this repository. Verify what you rely on.');
-  L.push('');
-  L.push('Continue investigating until further inspection is unlikely to materially');
-  L.push('change your decision. If something you find contradicts an earlier assumption,');
-  L.push('revise your understanding before you answer.');
 
   // THE BOUNDARY, SAID OUT LOUD.
   //

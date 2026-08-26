@@ -262,7 +262,9 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
     'to prevent.',
     '',
     'The "reply with ONLY a JSON object" rule below governs your FINAL MESSAGE.',
-    'Tool calls are not your final message. Make as many as you need first.',
+    'Tool calls are not your final message: investigate first, then answer.',
+    'Start from the graph and let it point you at the source. Stop investigating',
+    'once more looking is unlikely to change a criterion.',
     '',
     COMPILE_HEADER,
   ].join('\n') : COMPILE_HEADER;

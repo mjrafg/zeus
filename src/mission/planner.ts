@@ -382,7 +382,9 @@ export async function planMission(input: PlanInput): Promise<PlanResult> {
     'Find the real files, their dependencies and what depends on them first.',
     '',
     'Any "reply with ONLY" rule below governs your FINAL MESSAGE. Tool calls are',
-    'not your final message. Make as many as you need first.',
+    'not your final message: investigate first, then answer. Start from the graph',
+    '— graph_dependents is the question a plan actually needs answered — and stop',
+    'once more looking is unlikely to change a node.',
     '',
     PLAN_HEADER,
   ].join('\n') : PLAN_HEADER;

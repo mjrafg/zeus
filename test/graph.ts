@@ -238,9 +238,11 @@ export async function graphSuite(): Promise<void> {
       graph: { projectId: 'p', indexedRevision: 'abc123', currentRevision: 'abc123',
         graphPath: '/g', present: true, stale: false, nodes: 9, edges: 4,
         indexedAt: null, indexMs: 5, fault: null, detail: 'ok' } });
+    // The section now states TWO facts under two headings: what the project's
+    // graph is, and whether THIS call can reach it.
     check('IS1: a ready graph is announced with its revision and size',
-      /Graphify: AVAILABLE/.test(ready) && /Graph status: READY/.test(ready)
-      && /Indexed revision: abc123/.test(ready), 'announced');
+      /PROJECT GRAPH/.test(ready) && /status: READY/.test(ready)
+      && /indexed revision: abc123/.test(ready), 'announced');
     check('IS2: the source-of-truth rule is stated, not implied',
       /SOURCE OF\s*\n?TRUTH/.test(ready) && /trust the source/.test(ready),
       'rule present');
@@ -258,8 +260,9 @@ export async function graphSuite(): Promise<void> {
         detail: 'extract exited 1' } });
     // A prompt announcing repository intelligence over a graph that is not
     // attached teaches the model to trust a tool that answers emptily.
-    check('IS5: with no graph the prompt says UNAVAILABLE',
-      /Graphify: UNAVAILABLE/.test(blind) && !/Graphify: AVAILABLE/.test(blind), 'honest');
+    check('IS5: with no graph the prompt says access is unavailable',
+      /YOUR ACCESS TO IT/.test(blind) && /available: NO/.test(blind)
+      && !/available: YES/.test(blind), 'honest');
     check('IS6: it names the fault rather than going quiet',
       /GRAPHIFY_INDEX_FAILED/.test(blind), 'fault named');
     check('IS7: and it does NOT advertise tools the call does not hold',
@@ -413,8 +416,13 @@ export async function graphSuite(): Promise<void> {
     // READ-ONLY critic the ability to write.
     check('MCP1: claude is known to use MCP tools non-interactively',
       MCP_CAPABLE.has('claude'), [...MCP_CAPABLE].join(','));
-    check('MCP2: codex is not, so it is not offered them',
-      !MCP_CAPABLE.has('codex'), [...MCP_CAPABLE].join(','));
+    // V1 inverted this deliberately. codex was excluded because its exec mode
+    // cancelled MCP calls behind an approval gate, and the only ways past that
+    // gate weakened the sandbox — a bad trade while the sandbox was the
+    // boundary. V1 does not keep it as the boundary, so the trade is gone and
+    // the codex critics get the graph they were always supposed to have.
+    check('MCP2: codex can hold them too, now that the sandbox is not the boundary',
+      MCP_CAPABLE.has('codex'), [...MCP_CAPABLE].join(','));
 
     const blind = intelSection({ projectId: 'p', index: repoIndex(path.join(TMP, 'repo'), 'abc123'),
       graph: null, graphAvailable: false, graphifyVersion: '0.9.49',

@@ -318,22 +318,19 @@ export interface GraphAccess {
 /**
  * Which providers can actually USE an MCP tool in a non-interactive run.
  *
- * MEASURED, not assumed. claude accepts --mcp-config and calls the tools. codex
- * discovers them, begins the call, and then fails it with "user cancelled MCP
- * tool call": its exec mode routes MCP calls through an approval gate that has
- * nobody to ask. The documented ways past it — --approve-for-me, which switches
- * the sandbox to workspace-write, and --dangerously-bypass-approvals-and-sandbox,
- * which removes the sandbox — both hand a READ-ONLY critic the ability to write,
- * and no amount of repository intelligence is worth that trade.
+ * BOTH, since V1 chose a trusted host. codex used to be absent: its exec mode
+ * routed MCP calls through an approval gate with nobody to ask, so the graph
+ * tools were discovered, begun, and failed with "user cancelled MCP tool call".
+ * The only ways past that gate weakened the sandbox, and while the sandbox was
+ * the boundary that trade was not worth making.
  *
- * default_tools_approval_mode (auto|prompt|writes|approve) and enabled_tools were
- * both tried against codex 0.147.0 and did not change the outcome.
- *
- * So the codex path is told the truth: no graph tools, and the prompt says so.
- * It still receives the deterministic repository index, which is the larger
- * half of the fix and costs nothing.
+ * V1 does not keep the sandbox as the boundary. Read-only is a role
+ * instruction verified afterwards by a git write-check, so the gate can go and
+ * the codex critics — Oracle Critic, Plan Critic, Reviewer — get the graph
+ * they were always supposed to have. A critic that cannot see the repository
+ * can only check a claim against the claim.
  */
-export const MCP_CAPABLE = new Set(['claude']);
+export const MCP_CAPABLE = new Set(['claude', 'codex']);
 
 /** The graph tools, named so a --allowed-tools entry can name them. */
 export const GRAPH_TOOL_NAMES = [
@@ -413,7 +410,15 @@ export function claudeProvider(binOverride?: string): Provider {
       ...(r.model ? ['--model', r.model] : []),
       ...(r.reasoning ? ['--effort', r.reasoning] : []),
       '--output-format', 'stream-json', '--include-partial-messages', '--verbose',
-      '--permission-mode', r.readOnly ? 'manual' : 'acceptEdits',
+      // V1 IS A TRUSTED HOST. `manual` meant a read-only call asked permission
+      // of a person who was not there, and the ask is what a non-interactive
+      // run cannot satisfy. Read-only is now a ROLE INSTRUCTION verified after
+      // the fact by a git write-check, not a prompt nobody can answer.
+      //
+      // Anyone who needs a real boundary runs Zeus inside a container, a VM or
+      // a disposable host. That is a stronger boundary than this ever was, and
+      // it does not cost every agent its tools.
+      '--permission-mode', 'bypassPermissions',
       // --strict-mcp-config so the call gets THIS project's graph and nothing
       // else: without it the user's own configured servers join the session,
       // and a mission would silently gain tools nobody scoped to it.
@@ -433,7 +438,20 @@ export function codexProvider(binOverride?: string): Provider {
       return found ? { ok: true, detail: found } : { ok: false, detail: `${bin} not found on PATH` };
     },
     invoke: (req, sup) => runCli('codex', bin, (r) => [
-      'exec', '--json', '--sandbox', 'read-only', '--skip-git-repo-check',
+      'exec', '--json', '--skip-git-repo-check',
+      // TRUSTED HOST, V1. `--sandbox read-only` is what cancelled every MCP
+      // tool call in a non-interactive run: codex routed them through an
+      // approval gate that had nobody to ask, so the graph tools were
+      // discovered, begun and then failed with "user cancelled MCP tool call".
+      //
+      // The consequence was not local. It cost the codex critics — Oracle
+      // Critic, Plan Critic, Reviewer — any sight of the repository graph,
+      // which meant a critic could only check a claim against the claim.
+      //
+      // So the gate goes, deliberately and visibly, and read-only becomes a
+      // role instruction that Zeus VERIFIES after the call instead of a
+      // sandbox that prevents the tools from working at all.
+      '--dangerously-bypass-approvals-and-sandbox',
       ...(r.model ? ['--model', r.model] : []),
       // Codex takes effort as a config override rather than a flag of its own.
       ...(r.reasoning ? ['-c', `model_reasoning_effort=\"${r.reasoning}\"`] : []),

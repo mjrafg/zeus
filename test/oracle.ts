@@ -111,8 +111,8 @@ export async function oracleSuite(): Promise<void> {
     // rather than slipped in, and it matters here because RS2 exercises every
     // DISCOVERED type against secret fixtures — a type that arrived unnoticed
     // would be a type nobody had checked for leaks.
-    check('OR12: the event-type total is pinned at 63',
-      discovered.length === 63, `${discovered.length} types`);
+    check('OR12: the event-type total is pinned at 64',
+      discovered.length === 64, `${discovered.length} types`);
     check('OR12e: the chat events are discovered automatically, like every other family',
       ['CHAT_MESSAGE', 'CHAT_CARD_DECISION'].every((n) => discovered.includes(n)));
     check('OR12d: the budget revision and the stop decision are discovered automatically',

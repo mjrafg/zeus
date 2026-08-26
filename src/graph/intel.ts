@@ -113,10 +113,30 @@ export function intelSection(opts: {
   L.push(`Repository revision: ${opts.index.revision ?? 'unknown'}`);
   L.push('');
 
+  // TWO FACTS, STATED SEPARATELY.
+  //
+  // "Graphify: UNAVAILABLE" used to cover both "this project has no graph" and
+  // "this project has a perfectly good graph that YOU cannot reach" — and an
+  // agent told the second reads it as the first, concludes the repository has
+  // no navigable structure, and stops asking. The project's graph is a fact
+  // about the project; access is a fact about this call.
+  const projectHasGraph = !!g && g.present && !g.stale;
+  L.push('PROJECT GRAPH');
+  if (projectHasGraph) {
+    L.push(`  status: READY${opts.graphifyVersion ? ` (graphify ${opts.graphifyVersion})` : ''}`);
+    L.push(`  indexed revision: ${g!.indexedRevision}`);
+    L.push(`  size: ${g!.nodes} node(s), ${g!.edges} edge(s)`);
+  } else if (g && g.present && g.stale) {
+    L.push('  status: STALE — it describes an older revision of this repository');
+    L.push(`  indexed revision: ${g.indexedRevision}`);
+  } else {
+    L.push(`  status: ${g?.fault ?? 'NOT BUILT'}${g?.detail ? ` — ${g.detail}` : ''}`);
+  }
+  L.push('');
+  L.push('YOUR ACCESS TO IT');
+
   if (opts.graphAvailable && g && !g.fault) {
-    L.push(`Graphify: AVAILABLE${opts.graphifyVersion ? ` (${opts.graphifyVersion})` : ''}`);
-    L.push(`Graph status: READY — ${g.nodes} node(s), ${g.edges} edge(s)`);
-    L.push(`Indexed revision: ${g.indexedRevision}`);
+    L.push('  available: YES');
     L.push('');
     L.push('Repository tools available to you:');
     L.push('  graph_search        find files/symbols by name or concept');
@@ -127,12 +147,20 @@ export function intelSection(opts: {
     L.push('  graph_path          how two things are connected');
     L.push('  Read, Grep, Glob    the source itself');
   } else {
-    L.push('Graphify: UNAVAILABLE');
-    L.push(`Graph status: ${opts.unavailableBecause
-      ?? `${g?.fault ?? 'GRAPHIFY_UNAVAILABLE'}${g?.detail ? ` — ${g.detail}` : ''}`}`);
+    L.push('  available: NO');
+    L.push(`  reason: ${opts.unavailableBecause
+      ?? `${g?.fault ?? 'no graph tools were attached to this call'}`
+        + `${g?.detail ? ` — ${g.detail}` : ''}`}`);
     L.push('');
-    L.push('You have NO graph tools for this call. Use Read, Grep and Glob, and');
-    L.push('state plainly in your answer which repository facts you could not verify.');
+    if (projectHasGraph) {
+      // The distinction that matters: the map exists, YOU cannot read it.
+      L.push('The project graph above exists and is current — you simply have no tools');
+      L.push('for it on this call. Do not conclude the repository has no structure. Use');
+      L.push('Read, Grep and Glob, and say which relationships you could not verify.');
+    } else {
+      L.push('You have NO graph tools for this call. Use Read, Grep and Glob, and');
+      L.push('state plainly in your answer which repository facts you could not verify.');
+    }
   }
 
   L.push('');
@@ -233,4 +261,63 @@ export function renderEvidence(e: Evidence): string[] {
   }
   L.push(`Repository revision: ${e.revision ?? 'unknown'}`);
   return L;
+}
+
+
+/* -- required graph evidence ---------------------------------------------- */
+
+/**
+ * Whether a goal explicitly asks for the graph to be used.
+ *
+ * A HEURISTIC over the goal text, and stated as one. It is not intent
+ * classification — that belongs to the front door — it is "did the person who
+ * wrote this mission say the dependency graph must be consulted". Being wrong
+ * here costs an extra recorded note, not a wrong decision.
+ */
+export function goalRequiresGraphEvidence(goal: string): boolean {
+  const g = (goal ?? '').toLowerCase();
+  const namesGraph = /\b(dependency graph|graph traversal|graph search|graph evidence|graphify|graph_\w+|blast radius|transitive (consumer|dependent)s?)\b/.test(g);
+  const demandsIt = /\b(must use|use the .{0,20}graph|establish the .{0,30}graph|graph.{0,20}as the primary)\b/.test(g);
+  return namesGraph || demandsIt;
+}
+
+export interface GraphEvidenceVerdict {
+  required: boolean;
+  established: boolean;
+  queryCount: number;
+  distinctTools: string[];
+  reason: string;
+}
+
+/**
+ * Whether the graph was ACTUALLY used, from the server's own log.
+ *
+ * `graphAttached: true` says a tool server was started. It says nothing about
+ * whether anything was asked of it, and the first Oracle to hold graph tools
+ * made zero queries — so treating attachment as evidence would have certified
+ * an investigation that never happened.
+ *
+ * A query that returned nothing still counts as USE: asking and finding
+ * nothing is a finding. What does not count is not asking.
+ */
+export function verifyGraphEvidence(goal: string,
+  ops: Array<{ tool?: unknown }> | null | undefined): GraphEvidenceVerdict {
+  const required = goalRequiresGraphEvidence(goal);
+  const list = Array.isArray(ops) ? ops : [];
+  const graphOps = list.filter((o) => /^graph_/.test(String((o as any)?.tool ?? '')));
+  const distinctTools = [...new Set(graphOps.map((o) => String((o as any).tool)))];
+  const established = graphOps.length > 0;
+  return {
+    required,
+    established,
+    queryCount: graphOps.length,
+    distinctTools,
+    reason: !required
+      ? 'this goal does not require graph evidence'
+      : established
+        ? `${graphOps.length} graph query(s) across ${distinctTools.length} tool(s)`
+        : 'the goal requires graph-based investigation and the stage made NO graph '
+          + 'queries — attachment is not evidence, so any graph-derived claim in this '
+          + 'answer is unsupported',
+  };
 }

@@ -27,6 +27,7 @@ import {
 } from './oracle';
 import { compileOracle, critiqueOracle, proposeAcceptance } from './compile';
 import { attach, evidenceLogPath, REPO_AWARE } from '../graph/access';
+import { checkWrites, isReadOnlyStage, violationPayload } from '../engine/writecheck';
 import { decide, type FrontDoorDecision } from './frontdoor';
 import { chatStreamId } from './chat';
 import { createHash } from 'crypto';
@@ -213,6 +214,14 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
   graphLogPath: string | null;
   /** The REPOSITORY INTELLIGENCE section to put in the prompt. */
   intel: string | null;
+  /** Whether this stage was told not to modify source. */
+  readOnlyStage: boolean;
+  /**
+   * Looks at the repository AFTER the call and records a violation if the
+   * stage wrote anything. Null for stages that are allowed to write.
+   */
+  verifyWrites: ((traceCallId: string, before: string | null) =>
+  { clean: boolean; durationMs: number; payload?: Record<string, unknown> }) | null;
   keep: (content: string) => BlobRef | null;
   trace?: (type: string, payload: Record<string, unknown>) => void;
 } {
@@ -243,9 +252,39 @@ function route(engine: Engine, stage: PipelineStage, missions?: MissionRegistry,
     ? traceLevelFor(missions, missionId, engine.opts.projectRoot)
     : { level: 'normal' as TraceLevel, source: 'zeus-default' as const };
   const store = new TraceStore(engine.stateRoot);
+  // V1 VERIFIES INSTEAD OF PREVENTING.
+  //
+  // The provider sandbox used to make a read-only role read-only, and it was
+  // also what cancelled every MCP tool call in a non-interactive codex run —
+  // so the price of the boundary was that the critics could not see the graph
+  // they were meant to check claims against. The sandbox is gone; the
+  // instruction stays; and Zeus looks at the tree afterwards.
+  //
+  // Handed to the caller rather than run here, because it must run AFTER the
+  // provider call and route() returns before one is made.
+  const verifyWrites = isReadOnlyStage(stage)
+    ? (traceCallId: string, before: string | null) => {
+      const check = checkWrites(engine.opts.projectRoot);
+      if (check.clean) {
+        return { clean: true as const, durationMs: check.durationMs };
+      }
+      // Only now is the expensive evidence collected, and only because there
+      // is something to explain.
+      const payload = violationPayload({ stage, traceCallId, beforeRevision: before, check });
+      try {
+        if (missions && missionId) {
+          missions.events.append({ taskId: missionId, type: 'ROLE_WRITE_VIOLATION', payload });
+        }
+      } catch { /* the violation still returns to the caller */ }
+      return { clean: false as const, durationMs: check.durationMs, payload };
+    }
+    : null;
+
   return {
     traceLevel: trace.level,
     traceLevelSource: trace.source,
+    verifyWrites,
+    readOnlyStage: isReadOnlyStage(stage),
     repoGraph: attached?.access ?? null,
     graphState: attached?.state ?? null,
     graphFault: attached?.fault ?? null,

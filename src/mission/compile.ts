@@ -16,7 +16,7 @@
 import { Section, assemble, checklist } from './context';
 import { createHash } from 'crypto';
 import { Provider, AgentResponse, type GraphAccess } from '../engine/providers';
-import { readGraphOps } from '../graph/intel';
+import { readGraphOps, verifyGraphEvidence } from '../graph/intel';
 import { ProcessSupervisor } from '../engine/exec';
 import { ExecutionPolicy } from '../engine/policy';
 import {
@@ -50,6 +50,9 @@ export interface CompileInput {
   stage?: string;
   /** The MCP server for this call's repository graph, or null. */
   repoGraph?: GraphAccess | null;
+  /** Looks at the tree after the call; null for stages allowed to write. */
+  verifyWrites?: ((traceCallId: string, before: string | null) =>
+  { clean: boolean; durationMs: number; payload?: Record<string, unknown> }) | null;
   /** The REPOSITORY INTELLIGENCE section, delivered as a section like any other. */
   intel?: string | null;
   /** Where the graph server appends what it answered, for the manifest. */
@@ -297,6 +300,23 @@ export async function compileOracle(input: CompileInput): Promise<CompileResult>
         structuredKeys: res.structured ? Object.keys(res.structured) : [] },
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
+      // Was the graph actually USED, when the goal said it must be? From the
+      // server's log, never from graphAttached — the first Oracle to hold graph
+      // tools made zero queries, and attachment would have certified an
+      // investigation that never happened.
+      ...(input.graphLogPath && (input as any).goal ? (() => {
+        const v = verifyGraphEvidence(String((input as any).goal),
+          readGraphOps(input.graphLogPath!) as any);
+        return v.required ? { graphEvidence: v } : {};
+      })() : {}),
+      // Did this read-only role actually leave the repository alone? Recorded
+      // on the call itself, because "which stage wrote" is a question about a
+      // call and answering it from two places invites them to disagree.
+      ...(input.verifyWrites ? (() => {
+        const v = input.verifyWrites!(traceCallId, input.baseSha ?? null);
+        return { writeCheck: { clean: v.clean, ms: v.durationMs,
+          ...(v.payload ? { violation: v.payload } : {}) } };
+      })() : {}),
       // Derived from the server's log, never from the reply. A model that
       // writes "I inspected landing.jsx" has made a claim; these lines were
       // written by the process that answered the query.
@@ -413,6 +433,9 @@ export async function critiqueOracle(input: {
    * command is X" against the repository itself.
    */
   repoGraph?: GraphAccess | null;
+  /** Looks at the tree after the call; null for stages allowed to write. */
+  verifyWrites?: ((traceCallId: string, before: string | null) =>
+  { clean: boolean; durationMs: number; payload?: Record<string, unknown> }) | null;
   intel?: string | null;
   graphLogPath?: string | null;
   missionId: string; projectId: string; goal: string; criteria: Criterion[];
@@ -513,6 +536,23 @@ export async function critiqueOracle(input: {
         structuredKeys: res.structured ? Object.keys(res.structured) : [] },
       infrastructureFailure: res.infrastructureFailure,
       wallMs: res.durationMs,
+      // Was the graph actually USED, when the goal said it must be? From the
+      // server's log, never from graphAttached — the first Oracle to hold graph
+      // tools made zero queries, and attachment would have certified an
+      // investigation that never happened.
+      ...(input.graphLogPath && (input as any).goal ? (() => {
+        const v = verifyGraphEvidence(String((input as any).goal),
+          readGraphOps(input.graphLogPath!) as any);
+        return v.required ? { graphEvidence: v } : {};
+      })() : {}),
+      // Did this read-only role actually leave the repository alone? Recorded
+      // on the call itself, because "which stage wrote" is a question about a
+      // call and answering it from two places invites them to disagree.
+      ...(input.verifyWrites ? (() => {
+        const v = input.verifyWrites!(traceCallId, input.baseSha ?? null);
+        return { writeCheck: { clean: v.clean, ms: v.durationMs,
+          ...(v.payload ? { violation: v.payload } : {}) } };
+      })() : {}),
       // Derived from the server's log, never from the reply. A model that
       // writes "I inspected landing.jsx" has made a claim; these lines were
       // written by the process that answered the query.

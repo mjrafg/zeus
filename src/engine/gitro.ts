@@ -156,6 +156,17 @@ export class ReadOnlyGitError extends Error {
 }
 
 export interface ReadOnlyGitOptions {
+  /**
+   * Return git's output byte-for-byte instead of trimmed.
+   *
+   * `.trim()` is right for `rev-parse HEAD` and WRONG for anything whose first
+   * column is meaningful whitespace. `git status --porcelain` encodes the index
+   * in column one and the worktree in column two, so " M file" means "modified,
+   * not staged" — and trimming turns it into "M file", which reads as staged
+   * and shifts every offset by one. It cost a missed modification and a missed
+   * deletion, silently, in the check whose entire job is noticing them.
+   */
+  raw?: boolean;
   /** Called before the error is thrown, so a caller can record an event. */
   onRefusal?: (refusal: GitRefusal) => void;
   timeoutMs?: number;
@@ -183,12 +194,13 @@ export function readOnlyGit(root: string, opts: ReadOnlyGitOptions = {}):
     }
     const exec = opts.exec
       ?? ((file, a, o) => execFileSync(file, a, o as any) as unknown as string);
-    return String(exec('git', ['--no-optional-locks', '-C', root, ...args], {
+    const out = String(exec('git', ['--no-optional-locks', '-C', root, ...args], {
       encoding: 'utf8',
       timeout: opts.timeoutMs ?? 60_000,
       maxBuffer: opts.maxBuffer ?? 32 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
-    })).trim();
+    }));
+    return opts.raw ? out : out.trim();
   };
   return Object.assign(run, { inspect: inspectReadOnlyGit });
 }

@@ -3787,6 +3787,21 @@ export async function webSuite(): Promise<void> {
       (lit.match(/`/g) || []).length === 2,
       `${(lit.match(/`/g) || []).length} backtick(s) in the literal`);
 
+    // THE PROPOSAL IS THE POINT. The front door drafts a card and waits; a page
+    // that renders the verdict and offers no way to answer it looks exactly
+    // like a page where something crashed. It shipped that way once.
+    check('CHATUI7: a work request renders its card, with the actions that answer it',
+      /function proposal\(/.test(CHAT_HTML) && /d\.card/.test(CHAT_HTML)
+      && /chat\/decide/.test(CHAT_HTML) && /data-do/.test(CHAT_HTML));
+    check('CHATUI8: and it returns the digest it was given — confirm with hash',
+      /cardDigest: sent\.digest/.test(CHAT_HTML)
+      && /409/.test(CHAT_HTML) && /changed while you were reading it/.test(CHAT_HTML));
+    // The server's shapes, not the ones that read well on this side: the front
+    // door's fields live under `frontDoor` and `answer` is an object with text.
+    check('CHATUI9: it reads the front door from where the server puts it',
+      /d\.frontDoor \|\| \{\}/.test(CHAT_HTML)
+      && /d\.answer && d\.answer\.text/.test(CHAT_HTML));
+
     check('CHATUI5: it reads the existing API and adds no route of its own',
       /'\/api' \+ p/.test(CHAT_HTML) && /\/api\/events\/stream/.test(CHAT_HTML));
   }

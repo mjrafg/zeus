@@ -505,26 +505,138 @@ async function send() {
     const r = await post(scope('/chat'), { message: text });
     clearInterval(tick);
     CARDS.delete('pending'); el.remove();
+    // THE SHAPES ARE THE SERVER'S, not the ones that read well here. The front
+    // door's own fields live under 'frontDoor', and 'answer' is an object with
+    // a 'text', not a string - reading them at the top level produced an empty
+    // reply bubble and a card labelled "confidence" with no number.
     const d = r.json || {};
-    if (d.answer) turn('zeus', d.answer, 'zeus');
-    else if (d.summary) turn('zeus', d.summary, 'zeus');
-    if (d.intent && d.intent !== 'QUESTION') {
-      card(null, '<span class="stage">' + esc(d.intent.split('_').join(' ').toLowerCase())
-        + '</span><span class="who2">confidence ' + esc(String(d.confidence ?? '')) + '</span>',
-        esc(d.summary || ''),
-        { text: d.proposedWork ? 'proposed: ' + String(d.proposedWork.goal).slice(0, 140) : '',
-          cls:'ask' },
-        { text:'decided', cls:'run' },
-        (d.evidenceUsed && d.evidenceUsed.length
-          ? grp('what it looked at', d.evidenceUsed.map((x) => '<div class="l2">'
-              + esc(x.kind + ' ' + x.id + ' — ' + (x.detail || '')) + '</div>').join('')) : '')
-        + pre(d));
+    const fd = d.frontDoor || {};
+    if (d.answer && d.answer.text) turn('zeus', d.answer.text, 'zeus');
+    else if (fd.summary) turn('zeus', fd.summary, 'zeus');
+    if (d.degraded) {
+      turn('zeus', 'I could not decide what that asked for: '
+        + (d.degraded.detail || d.degraded.reason || ''), 'zeus');
     }
+    if (fd.readings && fd.readings.length) {
+      card(null, '<span class="stage">Two readings</span>',
+        'it could not tell which you meant',
+        { text:'pick one and say it again', cls:'ask' }, { text:'ambiguous', cls:'warn' },
+        fd.readings.map((x) => '<div class="fnd"><span class="sev">'
+          + esc(x.intent) + '</span> ' + esc(x.reading) + '</div>').join(''));
+    }
+    if (d.card) proposal(d.card, fd);
     await refresh();
   } catch (err) {
     clearInterval(tick); CARDS.delete('pending'); el.remove();
     turn('zeus', 'That did not reach the server: ' + String(err), 'zeus');
   } finally { BUSY = false; $('send').disabled = false; box.focus(); }
+}
+
+/**
+ * A mission proposal, and the decision it is waiting for.
+ *
+ * WHY THIS EXISTS AT ALL. The conversation rendered the front door's verdict
+ * and stopped: WORK_REQUEST, confidence 0.95, and no way to say yes. Nothing
+ * was stuck - the server had drafted a card and was waiting for an answer that
+ * this page gave no means of giving.
+ *
+ * CONFIRM WITH HASH. The digest goes back exactly as it arrived. If the card
+ * has changed since it was rendered to you the server refuses with 409 and
+ * hands back the current one, because answering a proposal you did not read
+ * approves something nobody agreed to.
+ */
+function proposal(c, fd) {
+  const el = card('card:' + c.digest,
+    '<span class="stage">Proposed mission</span><span class="who2">'
+      + esc('ceiling ' + money(c.budget && c.budget.costCeilingUsd)) + '</span>',
+    esc(String(c.proposedGoal || c.originalGoal || '')),
+    { text:'nothing is created until you say so', cls:'ask' },
+    { text:'your call', cls:'warn' },
+    grp('the goal, in your words', pre(c.originalGoal))
+    + (c.orientation ? grp('what the front door learned', pre(c.orientation)) : '')
+    + (fd && fd.evidenceUsed && fd.evidenceUsed.length
+      ? grp('what it looked at', fd.evidenceUsed.map((x) => '<div class="l2">'
+          + esc(x.kind + ' ' + x.id + (x.detail ? ' - ' + x.detail : '')) + '</div>').join('')) : '')
+    + grp('what happens next', (c.whatHappensNext || []).map((s) => '<div class="l2">'
+        + esc(s) + '</div>').join(''))
+    + grp('cost', esc(c.costExpectation || ''))
+    + '<div class="acts"><input class="num" id="ceil-' + esc(c.digest)
+      + '" type="number" min="0.5" step="0.5" value="'
+      + esc(String((c.budget && c.budget.costCeilingUsd) || 5)) + '">'
+    + (c.actions || []).map((a) => '<button class="btn'
+        + (a.id === 'create' ? '' : ' q') + '" data-do="' + esc(a.id) + '">'
+        + esc(a.label) + '</button>').join('') + '</div>');
+  el.classList.add('open');
+  el.querySelectorAll('[data-do]').forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      el.querySelectorAll('[data-do]').forEach((b) => { b.disabled = true; });
+      // THE CEILING IS PART OF WHAT IS CONFIRMED. Changing it re-drafts the
+      // card server-side, which changes the digest - so a raised ceiling has
+      // to be sent as a new proposal rather than smuggled past the old one.
+      const want = Number(($('ceil-' + c.digest) || {}).value);
+      const sent = (want && want !== (c.budget && c.budget.costCeilingUsd))
+        ? { ...c, budget: { ...c.budget, costCeilingUsd: want } } : c;
+      const r = await post(scope('/chat/decide'),
+        { card: sent, cardDigest: sent.digest, decision: btn.dataset.do });
+      if (r.status === 409 && r.json && r.json.current) {
+        turn('zeus', 'That proposal changed while you were reading it, so it was not '
+          + 'accepted. Here it is again.', 'zeus');
+        CARDS.delete('card:' + c.digest); el.remove();
+        proposal(r.json.current, fd);
+        return;
+      }
+      if (r.json && r.json.missionId) {
+        MISSION = r.json.missionId;
+        turn('zeus', 'Created ' + short(r.json.missionId)
+          + '. Compile the contract when you are ready.', 'zeus');
+        missionActions();
+      } else if (r.json && r.json.answer) {
+        turn('zeus', r.json.answer.text || 'Nothing in the log answers that yet.', 'zeus');
+      } else {
+        turn('zeus', 'Recorded: ' + esc(btn.dataset.do) + '.', 'zeus');
+      }
+      await refresh();
+    };
+  });
+}
+
+/**
+ * The operations a mission is ready for, as one card rather than a menu.
+ *
+ * Only what the mission can actually do next is offered. A button that exists
+ * and is refused teaches you to ignore the buttons.
+ */
+async function missionActions() {
+  if (!MISSION) return;
+  let m; try { m = await api(scope('/missions/' + encodeURIComponent(MISSION))); } catch { return; }
+  const can = [];
+  if (!m.oracle) can.push(['compile', 'Compile the contract']);
+  else if (m.oracleAccepted && !m.acceptedPlan) can.push(['plan', 'Plan the work']);
+  else if (m.acceptedPlan) can.push(['run', 'Run the tasks']);
+  if (!m.terminated) can.push(['cancel', 'Cancel']);
+  if (!can.length) return;
+  const el = card('do:' + MISSION + ':' + (m.phase || ''),
+    '<span class="stage">' + esc(short(MISSION)) + '</span><span class="who2">'
+      + esc(String(m.phase || '')) + '</span>',
+    esc(String(m.goal || '')),
+    { text:'ready when you are', cls:'' }, { text:'next', cls:'run' },
+    '<div class="acts">' + can.map((a) => '<button class="btn'
+      + (a[0] === 'cancel' ? ' q' : '') + '" data-op="' + esc(a[0]) + '">'
+      + esc(a[1]) + '</button>').join('') + '</div>');
+  el.classList.add('open');
+  el.querySelectorAll('[data-op]').forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      el.querySelectorAll('[data-op]').forEach((b) => { b.disabled = true; });
+      const r = await post(scope('/missions/' + encodeURIComponent(MISSION)
+        + '/' + btn.dataset.op), {});
+      turn('zeus', r.status < 300
+        ? btn.dataset.op + ' started on ' + short(MISSION)
+          + ' - it runs on the server, and this page follows the log'
+        : 'That was refused: ' + JSON.stringify(r.json), 'zeus');
+    };
+  });
 }
 
 /* -- context switching ---------------------------------------------------- */
@@ -618,7 +730,7 @@ async function openMission() {
   await loadMission();
 }
 
-async function refresh() { await loadMission(); }
+async function refresh() { await loadMission(); await missionActions(); }
 
 /* -- live ----------------------------------------------------------------- */
 

@@ -24,6 +24,7 @@ import {
   eventId, parseEventId, cursorFromLastId, since, advance, SSE_CHANNEL,
 } from '../src/web/tail';
 import { UI_HTML } from '../src/web/ui';
+import { CHAT_HTML } from '../src/web/chatui';
 import {
   missionStatusView, missionReportView, missionBundle, missionTrace, compareCalls,
 } from '../src/views';
@@ -261,9 +262,23 @@ export async function webSuite(): Promise<void> {
     check('NC1: the console HTML is served no-store',
       /'cache-control': 'no-store, must-revalidate'/.test(srv), 'no-store present');
     const at = srv.indexOf("'cache-control'");
-    const ui = srv.indexOf('const body = UI_HTML;');
+    // Repinned when `/` became the conversation and `/console` the dashboard:
+    // this asserted the exact assignment `const body = UI_HTML;`, which was the
+    // wording rather than the rule. The rule is that whatever HTML the page
+    // route returns is served no-store, and BOTH pages carry an inline script,
+    // so both are the application.
+    const ui = srv.indexOf('const body = url.pathname');
+    // BOUNDED BY THE RESPONSE, not by a character count. The old window was 600
+    // characters and a comment pushed the header to 618 - a test that fails
+    // because prose grew is measuring the wrong thing. The header has to sit
+    // between the body being chosen and the body being sent, which is exactly
+    // what "this response is no-store" means.
+    const ends = srv.indexOf('res.end(body)', ui);
     check('NC2: on the page itself, where the inline script lives',
-      at > ui && at < ui + 600, 'on the / response');
+      ui > 0 && at > ui && ends > at, 'between choosing the body and sending it');
+    check('NC2b: and both pages go through that one response, so neither can drift',
+      /CHAT_HTML/.test(srv) && /UI_HTML/.test(srv)
+      && srv.indexOf('CHAT_HTML', ui) < ui + 200, 'one writeHead for both');
   }
 
   section('control center: there is no write route for file content');
@@ -3724,6 +3739,43 @@ export async function webSuite(): Promise<void> {
     try { new Function(script); } catch (e: any) { parsed = String(e && e.message || e); }
     check('PV5: the page script parses — the browser gets valid JavaScript',
       parsed === '' && script.length > 1000, parsed || `${script.length} bytes`);
+
+    // THE SAME TRAP, ON THE OTHER PAGE. Two inline scripts means two places a
+    // real newline inside a JS string literal can ship a page that renders and
+    // does nothing, so both are parsed rather than the one that broke first.
+    const cscript = CHAT_HTML.slice(CHAT_HTML.indexOf('>', CHAT_HTML.indexOf('<script')) + 1,
+      CHAT_HTML.lastIndexOf('</script>'));
+    let cparsed = '';
+    try { new Function(cscript); } catch (e: any) { cparsed = String(e && e.message || e); }
+    check('PV5b: and so does the conversation page the server now serves at /',
+      cparsed === '' && cscript.length > 1000, cparsed || `${cscript.length} bytes`);
+  }
+
+  section('the conversation: three lines until you ask');
+  {
+    // The whole point of the second UI is that a stage is THREE lines - what it
+    // is, what it did, what it means for you - and the rest is opened. A card
+    // template that grew a fourth line would quietly turn the stream back into
+    // the wall of text it exists to replace.
+    check('CHATUI1: an activity card has exactly three lines and a detail body',
+      /class="l1"/.test(CHAT_HTML) && /class="l2"/.test(CHAT_HTML)
+      && /class="l3"/.test(CHAT_HTML) && !/class="l4"/.test(CHAT_HTML)
+      && /class="more"/.test(CHAT_HTML));
+    check('CHATUI2: the detail is hidden until the card is opened, and opens on click',
+      /\.act > \.more \{ display:none/.test(CHAT_HTML)
+      && /\.act\.open > \.more \{ display:block/.test(CHAT_HTML)
+      && /classList\.toggle\('open'\)/.test(CHAT_HTML));
+    // A stage that arrives with no renderer must still appear. A stream that
+    // silently drops what it does not recognise is a curated summary, and the
+    // thing you needed to see is exactly the thing nobody wrote a case for.
+    check('CHATUI3: an event with no renderer still becomes a card',
+      /Everything else still appears/.test(CHAT_HTML));
+    check('CHATUI4: the token is never persisted to storage',
+      !/localStorage|sessionStorage/.test(CHAT_HTML), 'in memory only');
+    // Both pages read the same API. A second UI that grew its own endpoints
+    // would be a second server with a different idea of the truth.
+    check('CHATUI5: it reads the existing API and adds no route of its own',
+      /'\/api' \+ p/.test(CHAT_HTML) && /\/api\/events\/stream/.test(CHAT_HTML));
   }
 
   section('the console can change how much of a mission is kept');

@@ -48,6 +48,7 @@ import {
 } from '../mission/chat';
 import { EventTailer, cursorFromLastId, eventId, SSE_CHANNEL } from './tail';
 import { UI_HTML } from './ui';
+import { CHAT_HTML } from './chatui';
 import { protocolCommand, type FrontDoorDecision } from '../mission/frontdoor';
 import { chatStreamId } from '../mission/chat';
 import { systemdUserEnv } from '../engine/isolation';
@@ -547,8 +548,15 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
     }
 
     try {
-      if (method === 'GET' && url.pathname === '/') {
-        const body = UI_HTML;
+      // TWO SHAPES, TWO ADDRESSES. `/` is the conversation: one column, every
+      // piece of work three lines until you open it. `/console` is the
+      // dashboard: three panes, the trace viewer, the routing screen. They
+      // answer different questions and neither is a worse version of the other,
+      // so the conversation does not have to grow a trace viewer before it is
+      // useful and the console does not have to be deleted before the
+      // conversation is.
+      if (method === 'GET' && (url.pathname === '/' || url.pathname === '/console')) {
+        const body = url.pathname === '/console' ? UI_HTML : CHAT_HTML;
         // no-store, because the console IS the application. Its whole script
         // is inline in this response, so it changes on every deploy — and the
         // response carried no cache directive at all, which leaves browsers

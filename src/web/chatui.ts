@@ -162,6 +162,8 @@ export const CHAT_HTML = `<!doctype html>
   <span class="spacer"></span>
   <input id="tok" type="password" placeholder="bearer token" class="num" style="width:190px">
   <button id="go" class="ghost">connect</button>
+  <button id="out" class="ghost" style="display:none"
+    title="forget the stored token on this browser">sign out</button>
   <span id="conn"><span class="dot"></span>offline</span>
   <a href="/console" class="ghost" style="text-decoration:none">console</a>
 </div>
@@ -186,8 +188,14 @@ export const CHAT_HTML = `<!doctype html>
 <div id="sheet"><div id="sheetbox"></div></div>
 
 <script>
-// In memory only. A credential that can spend money does not belong in the
-// most-read storage in the browser.
+// KEPT, BY REQUEST, AND THE TRADE IS WORTH STATING. This token can start work
+// that spends money, and localStorage is readable by any script that reaches
+// this origin. It is stored because the alternative in practice was pasting it
+// on every reload, and a console people avoid reloading is a console showing
+// stale state. It is scoped to this origin, cleared the moment the server
+// refuses it, and there is a sign-out that removes it - a stored credential
+// with no way to remove it is the version that is actually indefensible.
+const TOKEN_KEY = 'zeus.token';
 let TOKEN = '', PROJECT = null, MISSION = null, ES = null, LAST = null, BUSY = false;
 // The root of the project currently selected. Shown, so a run that is about to
 // spend money says which repository it is about.
@@ -224,9 +232,27 @@ const ms = (n) => (n == null ? '' : n < 1000 ? n + 'ms'
   : Math.floor(n / 60000) + 'm' + String(Math.round((n % 60000) / 1000)).padStart(2, '0') + 's');
 const money = (n) => '$' + Number(n || 0).toFixed(4);
 
+function remember(tok) { try { localStorage.setItem(TOKEN_KEY, tok); } catch (e) { /* private mode */ } }
+function forget() { try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* private mode */ } }
+
+/**
+ * A token the server refuses is not a token worth keeping.
+ *
+ * Otherwise a rotated token sits in storage failing on every load, and the page
+ * reports "unauthorized" for ever with no obvious way out of it.
+ */
+function rejected() {
+  forget();
+  TOKEN = '';
+  $('tok').style.display = ''; $('go').style.display = '';
+  $('out').style.display = 'none';
+  $('tok').value = ''; $('tok').focus();
+  conn('unauthorized - paste the token again', 'bad');
+}
+
 async function api(p) {
   const r = await fetch('/api' + p, { headers: { authorization: 'Bearer ' + TOKEN } });
-  if (r.status === 401) { conn('unauthorized — token changed?', 'bad'); throw new Error('401'); }
+  if (r.status === 401) { rejected(); throw new Error('401'); }
   return r.json();
 }
 async function post(p, body) {
@@ -791,8 +817,8 @@ function stream() {
   ES.onerror = async () => {
     try {
       const r = await fetch('/api/project', { headers:{ authorization:'Bearer ' + TOKEN } });
-      conn(r.status === 401 ? 'unauthorized — token changed?' : 'reconnecting…',
-        r.status === 401 ? 'bad' : 'warn');
+      if (r.status === 401) { if (ES) { ES.close(); ES = null; } rejected(); }
+      else conn('reconnecting…', 'warn');
     } catch { conn('server unreachable', 'bad'); }
   };
   // The server names every frame '${SSE_CHANNEL}'. A named frame does not reach
@@ -815,7 +841,9 @@ async function connect() {
   conn('connecting…', 'warn');
   let p; try { p = await api('/project'); } catch { return; }
   PROJECT = p.projectId;
+  remember(TOKEN);
   $('tok').style.display = 'none'; $('go').style.display = 'none';
+  $('out').style.display = '';
   ROOT = p.root || '';
   setContext();
   // THE STREAM OPENS FIRST. History can be retried by reloading; a live
@@ -829,6 +857,14 @@ async function connect() {
 }
 
 $('go').onclick = () => void connect();
+$('out').onclick = () => {
+  if (ES) { ES.close(); ES = null; }
+  forget(); TOKEN = ''; PROJECT = null; MISSION = null; ROOT = ''; LAST = null;
+  CARDS.clear(); $('stream').innerHTML = ''; $('empty').style.display = '';
+  $('tok').style.display = ''; $('go').style.display = '';
+  $('out').style.display = 'none'; $('tok').value = '';
+  setContext(); conn('signed out', '');
+};
 $('tok').addEventListener('keydown', (e) => { if (e.key === 'Enter') void connect(); });
 $('send').onclick = () => void send();
 $('ctx').onclick = () => void openSheet();
@@ -839,6 +875,14 @@ $('say').addEventListener('input', function grow() {
 $('say').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); }
 });
+
+// A stored token means the page opens where you left it. A rejected one is
+// cleared by rejected(), so a stale value cannot loop.
+(() => {
+  let saved = null;
+  try { saved = localStorage.getItem(TOKEN_KEY); } catch (e) { saved = null; }
+  if (saved) { $('tok').value = saved; void connect(); }
+})();
 </script>
 </body>
 </html>`;

@@ -3773,8 +3773,22 @@ export async function webSuite(): Promise<void> {
     // thing you needed to see is exactly the thing nobody wrote a case for.
     check('CHATUI3: an event with no renderer still becomes a card',
       /Everything else still appears/.test(CHAT_HTML));
-    check('CHATUI4: the token is never persisted to storage',
-      !/localStorage|sessionStorage/.test(CHAT_HTML), 'in memory only');
+    // REPINNED. This asserted the token was never stored, which was a decision
+    // rather than a law, and it was overturned deliberately: re-pasting it on
+    // every reload meant a console people avoided reloading, which is a console
+    // showing stale state. What has to hold now is the rest of the bargain.
+    check('CHATUI4: the stored token is scoped, removable, and dropped when refused',
+      /localStorage\.setItem\(TOKEN_KEY/.test(CHAT_HTML)
+      && /localStorage\.removeItem\(TOKEN_KEY/.test(CHAT_HTML)
+      && /function rejected\(\)/.test(CHAT_HTML),
+      'stored with a way out');
+    // A rotated token sitting in storage failing on every load, with the page
+    // saying "unauthorized" and offering nothing, is the failure this prevents.
+    check('CHATUI4b: a 401 on either the API or the stream clears it',
+      (CHAT_HTML.match(/rejected\(\)/g) || []).length >= 3,
+      'cleared from both paths');
+    check('CHATUI4c: and there is a sign out that removes it on purpose',
+      /id="out"/.test(CHAT_HTML) && /forget\(\); TOKEN = ''/.test(CHAT_HTML));
     // Both pages read the same API. A second UI that grew its own endpoints
     // would be a second server with a different idea of the truth.
     // THE SECOND WAY TO RUIN AN EMBEDDED PAGE. `\n` inside the template becomes

@@ -3774,6 +3774,19 @@ export async function webSuite(): Promise<void> {
       !/localStorage|sessionStorage/.test(CHAT_HTML), 'in memory only');
     // Both pages read the same API. A second UI that grew its own endpoints
     // would be a second server with a different idea of the truth.
+    // THE SECOND WAY TO RUIN AN EMBEDDED PAGE. `\n` inside the template becomes
+    // a real newline; a BACKTICK inside it ends the template outright. That one
+    // shipped: a doc comment mentioning /api/project in backticks closed the
+    // string, and everything after it was parsed as TypeScript. tsc caught it,
+    // but only because the wreckage happened not to compile - it is not a
+    // guarantee, so the shape is asserted directly.
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'web', 'chatui.ts'), 'utf8');
+    const lit = src.slice(src.indexOf('export const CHAT_HTML = '));
+    check('CHATUI6: the page template has exactly one opener and one closer',
+      (lit.match(/`/g) || []).length === 2,
+      `${(lit.match(/`/g) || []).length} backtick(s) in the literal`);
+
     check('CHATUI5: it reads the existing API and adds no route of its own',
       /'\/api' \+ p/.test(CHAT_HTML) && /\/api\/events\/stream/.test(CHAT_HTML));
   }

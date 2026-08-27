@@ -289,7 +289,25 @@ const STAGE_NAME = { 'front-door':'Front Door', oracle:'Oracle', 'oracle-critic'
   planner:'Planner', 'plan-critic':'Plan Critic', implementer:'Implementer',
   reviewer:'Reviewer', repair:'Repair', builder:'Builder' };
 
+/**
+ * One event, rendered - or said to be unrenderable, never silently dropped.
+ *
+ * A renderer that throws inside the history loop took the whole page with it:
+ * the exception escaped connect() and the live stream was never opened, so a
+ * single unexpected payload showed as "connecting…" for ever. The stream is
+ * the one thing here that cannot be recovered by reloading, so nothing inside
+ * it is allowed to be fatal.
+ */
 function render(e) {
+  try { render1(e); }
+  catch (err) {
+    card(null, '<span class="stage">' + esc(e && e.type || 'event') + '</span>',
+      'this event could not be rendered', { text:String(err && err.message || err), cls:'bad' },
+      { text:'raw', cls:'bad' }, pre(e));
+  }
+}
+
+function render1(e) {
   const p = e.payload || {};
   const t = e.type;
   const where = short(e.taskId);
@@ -511,29 +529,91 @@ async function send() {
 
 /* -- context switching ---------------------------------------------------- */
 
+/**
+ * Where you are, and everywhere else you could be.
+ *
+ * PROJECTS FIRST. The /api/project route answers with the project the SERVER
+ * was
+ * started in, and the first cut treated that as "the project" - so a host
+ * serving five repositories opened on whichever one the service happened to be
+ * launched from, with no way to leave it. The server was started with
+ * --projects, so the set is a fact it can be asked for.
+ */
 async function openSheet() {
   if (!TOKEN) return;
   const box = $('sheetbox');
-  box.innerHTML = '<div class="grp-t">missions</div>';
-  let ms2 = []; try { ms2 = await api(scope('/missions')); } catch { /* shown below */ }
-  if (!ms2.length) box.innerHTML += '<div class="row"><span>No missions yet.</span></div>';
-  for (const m of ms2.slice().reverse()) {
+  box.innerHTML = '';
+  const add = (html) => { const d = document.createElement('div'); d.innerHTML = html; return d; };
+
+  let ps = null;
+  try { ps = await api('/projects'); } catch { ps = null; }
+  const list = (ps && ps.projects) || [];
+  if (list.length) {
+    box.appendChild(add('<div class="grp-t">projects</div>').firstChild);
+    for (const pr of list) {
+      const r = document.createElement('div');
+      r.className = 'row' + (pr.projectId === PROJECT ? ' sel' : '');
+      r.innerHTML = '<b>' + esc(pr.projectId) + '</b><span>'
+        + esc((pr.adapter || '') + ' · ' + (pr.missions || 0) + ' mission(s)'
+          + (pr.lastActivity ? ' · ' + String(pr.lastActivity).slice(0, 10) : '')) + '</span>';
+      r.onclick = () => void pick(pr.projectId);
+      box.appendChild(r);
+    }
+  }
+
+  box.appendChild(add('<div class="grp-t">missions in ' + esc(PROJECT || 'this project')
+    + '</div>').firstChild);
+  let ms2 = []; try { ms2 = await api(scope('/missions')); } catch { ms2 = []; }
+  if (!ms2.length) box.appendChild(add('<div class="row"><span>No missions yet. '
+    + 'Describe a change below and one is proposed.</span></div>').firstChild);
+  for (const m of ms2.slice().reverse().slice(0, 40)) {
     const r = document.createElement('div');
     r.className = 'row' + (m.missionId === MISSION ? ' sel' : '');
-    r.innerHTML = '<b>' + esc(short(m.missionId)) + '</b><span>' + esc(m.goal || '') + '</span>';
+    const state = m.terminated ? (m.achievement + ' / ' + m.terminationReason) : m.phase;
+    r.innerHTML = '<b>' + esc(short(m.missionId)) + '</b><span>' + esc(m.goal || '')
+      + '  —  ' + esc(String(state || '')) + '</span>';
     r.onclick = () => { MISSION = m.missionId; $('sheet').classList.remove('on');
-      CARDS.clear(); $('stream').innerHTML = ''; void openMission(); };
+      CARDS.clear(); $('stream').innerHTML = ''; $('empty').style.display = 'none';
+      void openMission(); };
     box.appendChild(r);
   }
   $('sheet').classList.add('on');
 }
 
+/**
+ * Switch project.
+ *
+ * Everything is rebuilt, including the stream: the SSE subscription carries the
+ * project in its URL, so leaving one open would keep delivering the old
+ * project's events into the new project's conversation.
+ */
+async function pick(projectId) {
+  PROJECT = projectId; MISSION = null; LAST = null;
+  $('sheet').classList.remove('on');
+  CARDS.clear(); $('stream').innerHTML = '';
+  $('ctx').textContent = PROJECT;
+  $('empty').style.display = '';
+  stream();
+  let ms2 = []; try { ms2 = await api(scope('/missions')); } catch { ms2 = []; }
+  const live = ms2.slice().reverse().find((m) => !m.terminated);
+  if (live) { MISSION = live.missionId; await openMission(); }
+  $('say').focus();
+}
+
 async function openMission() {
   if (!MISSION) return;
   $('ctx').textContent = (PROJECT || '') + ' · ' + short(MISSION);
+  $('ctx').title = 'click to switch project or mission';
   let evs = [];
-  try { evs = await api(scope('/missions/' + encodeURIComponent(MISSION) + '/events')); }
-  catch { return; }
+  try {
+    const r = await api(scope('/missions/' + encodeURIComponent(MISSION) + '/events'));
+    // AN ENVELOPE, NOT AN ARRAY. /events answers {total,offset,limit,events},
+    // and iterating the envelope threw inside the history loop - which is how
+    // one wrong assumption about a response shape became a page stuck on
+    // "connecting…". Both shapes are accepted so a future unwrap cannot break
+    // it again.
+    evs = Array.isArray(r) ? r : (r && r.events) || [];
+  } catch { return; }
   for (const e of evs) render(e);
   await loadMission();
 }
@@ -577,12 +657,15 @@ async function connect() {
   let p; try { p = await api('/project'); } catch { return; }
   PROJECT = p.projectId;
   $('tok').style.display = 'none'; $('go').style.display = 'none';
-  $('ctx').textContent = PROJECT;
+  $('ctx').textContent = PROJECT + ' · switch';
   $('hintr').textContent = p.root || '';
+  // THE STREAM OPENS FIRST. History can be retried by reloading; a live
+  // connection that was never opened because loading history failed cannot be,
+  // and the page says "connecting…" with no way to find out why.
+  stream();
   let ms2 = []; try { ms2 = await api(scope('/missions')); } catch { /* empty is fine */ }
   const live = ms2.slice().reverse().find((m) => !m.terminated);
   if (live) { MISSION = live.missionId; await openMission(); }
-  stream();
   $('say').focus();
 }
 

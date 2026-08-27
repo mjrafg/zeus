@@ -189,11 +189,31 @@ export const CHAT_HTML = `<!doctype html>
 // In memory only. A credential that can spend money does not belong in the
 // most-read storage in the browser.
 let TOKEN = '', PROJECT = null, MISSION = null, ES = null, LAST = null, BUSY = false;
+// The root of the project currently selected. Shown, so a run that is about to
+// spend money says which repository it is about.
+let ROOT = '';
 // One card per correlated unit of work, so a STARTED and its FINISHED are the
 // same three lines rather than two entries that scroll apart.
 const CARDS = new Map();
 
 const $ = (id) => document.getElementById(id);
+
+/**
+ * Every label derived from where you are, written in ONE place.
+ *
+ * Four call sites used to set these independently and one of them forgot the
+ * footer, so switching project moved the conversation, the stream and the
+ * mission list while the path underneath still named the project you had left.
+ * A label that can be updated from four places is a label that will be stale
+ * from one of them.
+ */
+function setContext() {
+  $('ctx').textContent = PROJECT
+    ? PROJECT + (MISSION ? ' · ' + short(MISSION) : ' · switch')
+    : 'connect first';
+  $('ctx').title = 'click to switch project or mission';
+  $('hintr').textContent = ROOT || '';
+}
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g,
   (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
 const scope = (p) => p + (PROJECT ? (p.includes('?') ? '&' : '?') + 'project='
@@ -459,7 +479,7 @@ function render1(e) {
 async function loadMission() {
   if (!MISSION) return;
   let m; try { m = await api(scope('/missions/' + encodeURIComponent(MISSION))); } catch { return; }
-  $('ctx').textContent = (PROJECT || '') + ' · ' + short(MISSION);
+  setContext();
   const b = m.blockedBy || (m.consent && m.consent.decidable ? m.consent : null);
   if (!b && !m.consent) return;
   const c = m.consent || {};
@@ -668,7 +688,7 @@ async function openSheet() {
       r.innerHTML = '<b>' + esc(pr.projectId) + '</b><span>'
         + esc((pr.adapter || '') + ' · ' + (pr.missions || 0) + ' mission(s)'
           + (pr.lastActivity ? ' · ' + String(pr.lastActivity).slice(0, 10) : '')) + '</span>';
-      r.onclick = () => void pick(pr.projectId);
+      r.onclick = () => void pick(pr);
       box.appendChild(r);
     }
   }
@@ -699,11 +719,14 @@ async function openSheet() {
  * project in its URL, so leaving one open would keep delivering the old
  * project's events into the new project's conversation.
  */
-async function pick(projectId) {
-  PROJECT = projectId; MISSION = null; LAST = null;
+async function pick(pr) {
+  // The ROOT comes from the project record, not from /api/project - that route
+  // answers with the project the SERVER was started in, which is the one thing
+  // switching is trying to get away from.
+  PROJECT = pr.projectId; ROOT = pr.root || ''; MISSION = null; LAST = null;
   $('sheet').classList.remove('on');
   CARDS.clear(); $('stream').innerHTML = '';
-  $('ctx').textContent = PROJECT;
+  setContext();
   $('empty').style.display = '';
   stream();
   let ms2 = []; try { ms2 = await api(scope('/missions')); } catch { ms2 = []; }
@@ -714,7 +737,7 @@ async function pick(projectId) {
 
 async function openMission() {
   if (!MISSION) return;
-  $('ctx').textContent = (PROJECT || '') + ' · ' + short(MISSION);
+  setContext();
   $('ctx').title = 'click to switch project or mission';
   let evs = [];
   try {
@@ -769,8 +792,8 @@ async function connect() {
   let p; try { p = await api('/project'); } catch { return; }
   PROJECT = p.projectId;
   $('tok').style.display = 'none'; $('go').style.display = 'none';
-  $('ctx').textContent = PROJECT + ' · switch';
-  $('hintr').textContent = p.root || '';
+  ROOT = p.root || '';
+  setContext();
   // THE STREAM OPENS FIRST. History can be retried by reloading; a live
   // connection that was never opened because loading history failed cannot be,
   // and the page says "connecting…" with no way to find out why.

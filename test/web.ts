@@ -3802,6 +3802,20 @@ export async function webSuite(): Promise<void> {
       /d\.frontDoor \|\| \{\}/.test(CHAT_HTML)
       && /d\.answer && d\.answer\.text/.test(CHAT_HTML));
 
+    // ONE OWNER FOR THE LABELS. Four call sites wrote the header and footer
+    // independently and one forgot the footer, so switching project moved the
+    // conversation, the stream and the mission list while the path underneath
+    // still named the project you had left. Structure, not vigilance.
+    check('CHATUI10: every context label is written in one place',
+      /function setContext\(\)/.test(CHAT_HTML)
+      && (CHAT_HTML.match(/\$\('hintr'\)\.textContent/g) || []).length === 1
+      && (CHAT_HTML.match(/\$\('ctx'\)\.textContent/g) || []).length === 1,
+      'one writer for ctx and hintr');
+    // /api/project answers with the project the SERVER was started in, which is
+    // the one thing switching is trying to get away from.
+    check('CHATUI11: switching takes the root from the project it switched to',
+      /ROOT = pr\.root/.test(CHAT_HTML) && /void pick\(pr\)/.test(CHAT_HTML));
+
     check('CHATUI5: it reads the existing API and adds no route of its own',
       /'\/api' \+ p/.test(CHAT_HTML) && /\/api\/events\/stream/.test(CHAT_HTML));
   }

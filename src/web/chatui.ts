@@ -544,7 +544,7 @@ async function send() {
         fd.readings.map((x) => '<div class="fnd"><span class="sev">'
           + esc(x.intent) + '</span> ' + esc(x.reading) + '</div>').join(''));
     }
-    if (d.card) proposal(d.card, fd);
+    if (d.card) proposal(d.card, fd, d.pipeline || 'full');
     await refresh();
   } catch (err) {
     clearInterval(tick); CARDS.delete('pending'); el.remove();
@@ -565,10 +565,18 @@ async function send() {
  * hands back the current one, because answering a proposal you did not read
  * approves something nobody agreed to.
  */
-function proposal(c, fd) {
+function proposal(c, fd, pipeline) {
+  // TWO STAGES OR EIGHT, AND THE CARD SAYS WHICH. A project set to lite was
+  // still being offered a Mission, so asking for one agent that plans and
+  // writes plus one that reviews produced an Oracle, a critic, a planner and
+  // a plan critic. The proposal is the same either way - a goal, a ceiling and
+  // a digest - and what differs is which machine answers it.
+  const lite = pipeline === 'lite';
   const el = card('card:' + c.digest,
-    '<span class="stage">Proposed mission</span><span class="who2">'
-      + esc('ceiling ' + money(c.budget && c.budget.costCeilingUsd)) + '</span>',
+    '<span class="stage">' + (lite ? 'Proposed change' : 'Proposed mission')
+      + '</span><span class="who2">'
+      + esc((lite ? 'lite - build then review - ' : '')
+        + 'ceiling ' + money(c.budget && c.budget.costCeilingUsd)) + '</span>',
     esc(String(c.proposedGoal || c.originalGoal || '')),
     { text:'nothing is created until you say so', cls:'ask' },
     { text:'your call', cls:'warn' },
@@ -577,7 +585,12 @@ function proposal(c, fd) {
     + (fd && fd.evidenceUsed && fd.evidenceUsed.length
       ? grp('what it looked at', fd.evidenceUsed.map((x) => '<div class="l2">'
           + esc(x.kind + ' ' + x.id + (x.detail ? ' - ' + x.detail : '')) + '</div>').join('')) : '')
-    + grp('what happens next', (c.whatHappensNext || []).map((s) => '<div class="l2">'
+    + grp('what happens next', (lite
+      ? ['build - one agent plans the change and writes it, in a worktree',
+        'checks - whatever this project declares runs against it',
+        'review - a second, independent model reads the diff',
+        'repair - one attempt if the reviewer refuses it, then it stops for you']
+      : (c.whatHappensNext || [])).map((s) => '<div class="l2">'
         + esc(s) + '</div>').join(''))
     + grp('cost', esc(c.costExpectation || ''))
     + '<div class="acts"><input class="num" id="ceil-' + esc(c.digest)
@@ -585,7 +598,8 @@ function proposal(c, fd) {
       + esc(String((c.budget && c.budget.costCeilingUsd) || 5)) + '">'
     + (c.actions || []).map((a) => '<button class="btn'
         + (a.id === 'create' ? '' : ' q') + '" data-do="' + esc(a.id) + '">'
-        + esc(a.label) + '</button>').join('') + '</div>');
+        + esc(a.id === 'create' && lite ? 'Build and review' : a.label)
+        + '</button>').join('') + '</div>');
   el.classList.add('open');
   el.querySelectorAll('[data-do]').forEach((btn) => {
     btn.onclick = async (ev) => {
@@ -597,13 +611,23 @@ function proposal(c, fd) {
       const want = Number(($('ceil-' + c.digest) || {}).value);
       const sent = (want && want !== (c.budget && c.budget.costCeilingUsd))
         ? { ...c, budget: { ...c.budget, costCeilingUsd: want } } : c;
-      const r = await post(scope('/chat/decide'),
+      // A lite run has no mission to create, so 'create' means "start it".
+      // Every other action still belongs to the card machinery.
+      const toLite = lite && btn.dataset.do === 'create';
+      const r = await post(scope(toLite ? '/lite' : '/chat/decide'),
         { card: sent, cardDigest: sent.digest, decision: btn.dataset.do });
       if (r.status === 409 && r.json && r.json.current) {
         turn('zeus', 'That proposal changed while you were reading it, so it was not '
           + 'accepted. Here it is again.', 'zeus');
         CARDS.delete('card:' + c.digest); el.remove();
-        proposal(r.json.current, fd);
+        proposal(r.json.current, fd, pipeline);
+        return;
+      }
+      if (r.json && r.json.pipeline === 'lite') {
+        turn('zeus', r.json.ok
+          ? 'Building. One agent plans and writes it, then an independent reviewer '
+            + 'reads the diff - this page follows the log.'
+          : 'That did not start: ' + (r.json.detail || ''), 'zeus');
         return;
       }
       if (r.json && r.json.missionId) {

@@ -660,8 +660,20 @@ async function liteSuite(): Promise<void> {
   fullCfg.commands.unitTest = 'node -e process.exit(0)';
   fullCfg.commands.typecheck = null;
   writeConfig(fullRoot, fullCfg);
-  check('LT7: a project that never set a pipeline is still full — no silent migration',
-    fullCfg.project.pipeline === undefined);
+  // REPINNED when defaultConfig started writing the setting out. It asserted
+  // ABSENCE, which was the old wording of the rule; the rule is that a project
+  // that has not asked for lite runs the full pipeline. Absence stopped being
+  // the way that is expressed the moment `zeus config set` turned out to
+  // refuse keys that do not already exist - a setting nobody can switch is not
+  // a setting.
+  check('LT7: a new project is explicitly full — the setting is visible and switchable',
+    fullCfg.project.pipeline === 'full');
+  // AND THE OLD FILES STILL MEAN FULL. Every config written before this exists
+  // has no pipeline key at all, and none of them may quietly change shape.
+  const legacy: any = defaultConfig(fullRoot);
+  delete legacy.project.pipeline;
+  check('LT7b: a config written before the setting existed is still full',
+    legacy.project.pipeline !== 'lite');
   const fullEngine = new Engine({
     projectRoot: fullRoot, config: fullCfg, supervisor: sup,
     providers: { planner: mockProvider(), implementer: mockProvider(), reviewer: mockProvider() },

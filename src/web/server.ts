@@ -83,6 +83,9 @@ export interface WebServerOptions {
   /** Injected so tests drive the server without a real engine or CLI. */
   spawnRun?: (missionId: string, target: ProjectTarget)
   => { ok: boolean; pid: number | null; detail: string };
+  /** The same, for a lite run, which has no mission to be named after. */
+  spawnLite?: (projectRoot: string, goal: string)
+  => { ok: boolean; pid: number | null; detail: string; logFile?: string | null };
   /**
    * A directory of Zeus projects. Absent means the Projects home is off and
    * the server serves only the project it was started in.
@@ -167,6 +170,7 @@ export const WRITE_ROUTES = [
   'POST /api/projects/decide',
   'POST /api/routing',
   'POST /api/missions/:id/trace',
+  'POST /api/lite',
 ] as const;
 
 /**
@@ -308,6 +312,46 @@ function spawnInOwnUnit(projectRoot: string, missionId: string, argv: string[],
     pid: Number.isFinite(pid) && pid > 0 ? pid : null,
     detail: `started as ${unit}, a unit of its own — it survives a restart of this console`,
   };
+}
+
+/**
+ * Starts a lite run, detached, exactly as a mission run is started.
+ *
+ * A lite run is two model calls and a repair, which is minutes and real money.
+ * Holding it open on an HTTP request would tie the work to a browser tab, and
+ * the whole point of detaching a mission run applies unchanged: the work
+ * outlives the page that asked for it, and the log is how anyone finds out
+ * what happened.
+ */
+export function defaultSpawnLite(projectRoot: string, goal: string):
+{ ok: boolean; pid: number | null; detail: string; logFile: string | null } {
+  const args = zeusCliArgv();
+  const logDir = path.join(projectRoot, '.zeus', 'logs');
+  let out: number | 'ignore' = 'ignore';
+  let logFile: string | null = null;
+  try {
+    fs.mkdirSync(logDir, { recursive: true });
+    logFile = path.join(logDir, `lite-${Date.now()}.log`);
+    out = fs.openSync(logFile, 'a');
+  } catch { out = 'ignore'; logFile = null; }
+  try {
+    const child = spawn(process.execPath, [...args, 'lite', goal], {
+      cwd: projectRoot, detached: true, stdio: ['ignore', out, out],
+    });
+    child.unref();
+    if (typeof out === 'number') fs.closeSync(out);
+    return { ok: true, pid: child.pid ?? null, logFile,
+      detail: `lite run started as pid ${child.pid}${logFile ? `; output at ${logFile}` : ''}` };
+  } catch (e: any) {
+    if (typeof out === 'number') fs.closeSync(out);
+    return { ok: false, pid: null, logFile, detail: `spawn failed: ${e?.message ?? e}` };
+  }
+}
+
+/** Which pipeline a project is on, read from its own config, never assumed. */
+function pipelineOf(root: string): 'full' | 'lite' {
+  try { return readConfig(root)?.project?.pipeline === 'lite' ? 'lite' : 'full'; }
+  catch { return 'full'; }
 }
 
 export function defaultSpawnRun(projectRoot: string, missionId: string):
@@ -1250,13 +1294,54 @@ export async function startWebServer(opts: WebServerOptions): Promise<RunningSer
         const card = draftCard({ intent: 'WORK',
           message: fd.proposedWork?.goal ?? message,
           costCeilingUsd: body?.costCeilingUsd ?? null });
+        // WHICH PIPELINE THIS PROPOSAL IS FOR.
+        //
+        // A project set to `lite` was still being offered a Mission: the
+        // setting reached the task engine and the CLI and never reached the
+        // one surface people actually use, so asking for two stages produced
+        // an Oracle, a critic, a planner and a plan critic. The card is the
+        // same proposal either way - a goal, a ceiling and a digest - and this
+        // says which machine will answer it.
         send(res, 200, {
           intent: 'WORK_REQUEST', frontDoor: fd, answer: null,
+          pipeline: pipelineOf(wsc.root),
           card: { ...card, orientation: fd.proposedWork?.orientation ?? null },
           tighteningOffered: wantsTightening(message),
         });
         return;
       }
+    }
+
+    if (url.pathname === '/api/lite') {
+      if (pipelineOf(wsc.root) !== 'lite') {
+        send(res, 409, { error: 'NOT_A_LITE_PROJECT',
+          detail: 'this project runs the full pipeline; set project.pipeline to lite first' });
+        return;
+      }
+      const card = body?.card as MissionCard | undefined;
+      const digest = String(body?.cardDigest ?? '');
+      if (!card || !digest) { send(res, 400, { error: 'CARD_DECISION_INCOMPLETE' }); return; }
+      // THE SAME RULE AS EVERY OTHER CARD. A lite run spends money; the fact
+      // that it skips the contract does not make the confirmation optional.
+      const fresh = draftCard({ intent: card.intent, message: card.originalGoal,
+        costCeilingUsd: card.budget.costCeilingUsd });
+      if (fresh.digest !== digest || card.digest !== digest) {
+        send(res, 409, { error: 'CARD_DIGEST_MISMATCH',
+          detail: 'the card changed since it was rendered to you - read it again before deciding',
+          current: fresh });
+        return;
+      }
+      const goal = card.proposedGoal ?? card.originalGoal;
+      const spawn2 = opts.spawnLite ?? ((root: string, g: string) => defaultSpawnLite(root, g));
+      const started = spawn2(wsc.root, goal);
+      recordChatMessage(wsc.store, wsc.projectId, {
+        message: goal,
+        classification: { intent: 'WORK', matched: ['pipeline:lite'],
+          reason: 'started as a lite run: one agent plans and writes, one reviews' } as any,
+        led: 'CARD_DRAFTED',
+      });
+      send(res, started.ok ? 202 : 500, { pipeline: 'lite', ...started });
+      return;
     }
 
     if (url.pathname === '/api/chat/decide') {

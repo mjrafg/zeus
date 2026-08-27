@@ -293,7 +293,10 @@ export async function webSuite(): Promise<void> {
     check('WF4: no route offers a consent bypass',
       !table.some((r) => /yes|force|skip/i.test(r)), writes.join(', '));
     check('WF5: read and write tables are declared separately, so a reviewer can see the split',
-      READ_ROUTES.length === 16 && WRITE_ROUTES.length === 15,
+      // 15 -> 16 writes with POST /api/lite. Pinned so a route cannot appear
+      // without somebody acknowledging it: this table is what the boundary
+      // tests read to prove no route writes project file content.
+      READ_ROUTES.length === 16 && WRITE_ROUTES.length === 16,
       `${READ_ROUTES.length}/${WRITE_ROUTES.length}`);
   }
 
@@ -3815,6 +3818,22 @@ export async function webSuite(): Promise<void> {
     // the one thing switching is trying to get away from.
     check('CHATUI11: switching takes the root from the project it switched to',
       /ROOT = pr\.root/.test(CHAT_HTML) && /void pick\(pr\)/.test(CHAT_HTML));
+
+    // TWO STAGES OR EIGHT, AND THE CARD SAYS WHICH. project.pipeline reached
+    // the task engine and the CLI and never reached the surface people use, so
+    // a project set to lite was still offered a Mission - an Oracle, a critic,
+    // a planner and a plan critic for a change that asked for two stages.
+    check('CHATUI12: a lite project is offered a lite run, not a mission',
+      /pipeline === 'lite'/.test(CHAT_HTML) && /Build and review/.test(CHAT_HTML)
+      && /toLite \? '\/lite' : '\/chat\/decide'/.test(CHAT_HTML));
+    check('CHATUI13: and the lite card says what the two stages actually are',
+      /one agent plans the change and writes it/.test(CHAT_HTML)
+      && /a second, independent model reads the diff/.test(CHAT_HTML)
+      && /one attempt if the reviewer refuses it/.test(CHAT_HTML));
+    // A lite run spends money. Skipping the contract does not make the
+    // confirmation optional.
+    check('CHATUI14: starting one still goes through confirm-with-hash',
+      /'\/lite'/.test(CHAT_HTML) && /cardDigest: sent\.digest/.test(CHAT_HTML));
 
     check('CHATUI5: it reads the existing API and adds no route of its own',
       /'\/api' \+ p/.test(CHAT_HTML) && /\/api\/events\/stream/.test(CHAT_HTML));

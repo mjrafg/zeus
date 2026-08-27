@@ -173,6 +173,12 @@ export function defaultConfig(root: string): ProjectConfig {
       name: path.basename(root),
       adapter: det.primary.id,
       root: '.',
+      // WRITTEN OUT, not left implicit. `zeus config set` only accepts keys
+      // that already exist - inventing one silently is how a typo becomes a
+      // setting that looks applied and does nothing - so a pipeline that is
+      // absent from the file is a pipeline nobody can switch. It is also the
+      // answer to a question a reader has: which shape does this project run?
+      pipeline: 'full' as const,
       ...(det.packageManager ? { packageManager: det.packageManager } : {}),
     },
     commands: det.primary.commands(root),

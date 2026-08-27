@@ -43,7 +43,7 @@ import {
   missionStatusView, missionListView, missionReportView, missionTrace, compareCalls,
 } from './views';
 import {
-  startWebServer, defaultSpawnRun, zeusCliArgv, ProjectTarget,
+  startWebServer, defaultSpawnRun, defaultSpawnLite, zeusCliArgv, ProjectTarget,
 } from './web/server';
 import { defaultProjectsRoot } from './projects';
 import {
@@ -2336,6 +2336,10 @@ async function cmdWeb(argv: string[]): Promise<number> {
     projectRoot: ctx.root, stateRoot: engine.stateRoot, projectId: engine.projectId,
     port, host,
     spawnRun: (missionId, target) => defaultSpawnRun(target.root, missionId),
+    // The console can start a lite run for the same reason it can start a
+    // mission run: the work is detached, and the log is how anyone finds
+    // out what happened.
+    spawnLite: (root, goal) => defaultSpawnLite(root, goal),
     ...(projectsRoot ? { projectsRoot } : {}),
     // Creation steps run through the supervisor: bounded, killable, and in the
     // run registry like every other execution Zeus causes.
